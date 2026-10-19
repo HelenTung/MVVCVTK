@@ -14,7 +14,7 @@ Qt 宿主负责窗口、布局和事件循环，`VtkAppHostSession` 负责数据
 | [2. 数据加载与切换](#2-数据加载与切换) | RAW、TIFF 序列、内存体素、激活、选择、卸载 | Host |
 | [3. 视图模式](#3-视图模式) | 三向切片、体渲染、等值面、组合视图 | Host |
 | [4. 窗宽窗位与显示参数](#4-窗宽窗位与显示参数) | 材质、传输函数、质量、标尺、光标 | Host |
-| [5. 导航与输入](#5-导航与输入) | 缩放、平移、旋转、翻片、工具、绑定与事件注入 | Host |
+| [5. 导航与输入](#5-导航与输入) | 导航、绑定提供器、操作查询、策略扩展与事件注入 | Host |
 | [6. 数据读取与导出](#6-数据读取与导出) | 元信息、图像和标签分块读取、模型和切片导出 | Host |
 | [7. ROI](#7-roi) | 正式区域、布尔和形态操作、交互草稿、提交 | Host 数据接口；交互编辑器仅仓内构建 |
 | [8. 裁切](#8-裁切) | 盒、平面、圆柱、球；历史、预览和正式结果 | OrthogonalCrop |
@@ -45,7 +45,9 @@ SDK（Software Development Kit，开发包）安装面由 CMake 头映射和安�
 
 各章包含创建和挂载的示例用于首次接入。宿主把返回的功能句柄保存为页面或会话成员，后续计算和参数更新复用该实例的请求入口，不在每次点击按钮时重复挂载同名功能。
 
-以下 C++ 短代码是单次操作的 Qt 槽函数片段。session 是宿主持有的 `std::shared_ptr<VtkAppHostSession>`；roiEditor、crop、surface、parts、gap、wall、rotation、alignment、artifact 是各章挂载后保存的功能句柄。表格中的业务参数由对话框、参数面板或前一步结果提供。除工程配置、Qt 初始化和控件子类外，片段均在会话所属线程执行；异步回调捕获界面对象时须使用 QPointer 等生命周期保护。
+每段示例开头列出本段直接使用的头文件；实际代码把这些包含放在源文件顶部，子类放在源文件的类定义区，重复头合并即可，头文件行不计入 5–20 行业务片段。已标明仓内构建的功能使用目标公开的源码形式头，同一源文件中的核心头也沿用这套命名，避免混入另一套 SDK 暂存头。
+
+以下 C++ 短代码是单次操作的 Qt 槽函数片段。session 是宿主持有的 `std::shared_ptr<VtkAppHostSession>`；roiEditor、crop、surface、parts、gap、wall、rotation、alignment、artifact 是各章挂载后保存的功能句柄。表格中的业务参数由对话框、参数面板或前一步结果提供。除工程配置、Qt 初始化以及控件和导航子类定义外，片段均在会话所属线程执行；异步回调捕获界面对象时须使用 QPointer 等生命周期保护。
 
 ## 1. 基础会话与窗口嵌入
 
@@ -101,6 +103,12 @@ vtk_module_autoinit(TARGETS QtViewer MODULES VTK::RenderingOpenGL2
 出参与返回：Qt 初始化没有 Host 状态枚举。主循环使用 app.exec()；Session 的 Start() 用于独立 VTK 事件循环，Qt 不调用。
 
 ```cpp
+#include <QApplication>
+#include <QLocale>
+#include <QMainWindow>
+#include <QSurfaceFormat>
+#include <QVTKOpenGLNativeWidget.h>
+
 QLocale::setDefault(QLocale::c());
 QSurfaceFormat::setDefaultFormat(QVTKOpenGLNativeWidget::defaultFormat());
 // QApplication 必须比 Session 活得更久。
@@ -125,6 +133,13 @@ return app.exec();
 出参与返回：本步骤构造 HostRenderViewConfig，没有完成回调。最终成功或失败由 BuildSession() 同步返回，重复 ID 或无效拓扑会构建失败。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostSessionTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <QVTKOpenGLNativeWidget.h>
+#include <vtkGenericOpenGLRenderWindow.h>
+#include <vtkSmartPointer.h>
+
 auto window = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
 window->SetMultiSamples(0);
 auto* widget = new QVTKOpenGLNativeWidget(panel);
@@ -150,6 +165,9 @@ config.renderViews.push_back(view); // config 是待构建的 HostSessionConfig�
 出参与返回：这是控件生命周期回调，没有 Host 接纳结果。窗口就绪后执行的是 VTK 窗口 Start/End，不启动会话事件循环。
 
 ```cpp
+#include <QVTKOpenGLNativeWidget.h>
+#include <vtkGenericOpenGLRenderWindow.h>
+
 class RenderWidget : public QVTKOpenGLNativeWidget {
 public:
     using QVTKOpenGLNativeWidget::QVTKOpenGLNativeWidget;
@@ -180,6 +198,17 @@ protected:
 出参与返回：投递器同步返回 bool，真表示排队成功，假表示投递失败。工作通知返回 void，可能早于发送函数返回；work 和 QApplication 活到 Stop 成功，晚到通知通过弱引用忽略。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostSessionTypes.h>
+#include <QApplication>
+#include <QDebug>
+#include <QMetaObject>
+#include <QString>
+#include <QtCore/qnamespace.h>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+
 config.driveMode = HostDriveMode::HostDriven;
 config.sendOwnerTask = [](std::function<void()> task) {
     return task && QMetaObject::invokeMethod(qApp, std::move(task), Qt::QueuedConnection);
@@ -210,6 +239,11 @@ config.sendDiagnostic = [](const std::string& message) {
 出参与返回：BuildSession() 同步返回 bool：真为构建成功，假为配置或某个构建步骤失败，没有完成回调；诊断由 sendDiagnostic 消费。该入口幂等。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <memory>
+#include <utility>
+
 session = std::make_shared<VtkAppHostSession>(std::move(config));
 const bool built = session->BuildSession();
 if (!built) {
@@ -232,6 +266,10 @@ queueWork();
 出参与返回：SendUpdates() 同步返回 HostUpdateResult：Completed 已处理、Deferred 延后、Failed 失败、Stopped 已停止；renderViewIds 给出待绘制 ID。它不绘制，但可能在本次调用中派发已就绪的业务完成回调。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostSessionTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 *work = [this] {
     if (!session || session->GetIsStopped()) return;
     const auto update = session->SendUpdates();
@@ -256,6 +294,10 @@ queueWork();
 出参与返回：SendRender() 同步返回 HostRenderResult。每视图 Rendered/Unchanged 可清除需求；Deferred 延后，Failed 失败，Stopped 已停止。它不隐式更新或派发业务回调，Rendered 不承诺显示器呈现。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostSessionTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 HostRenderRequest request;
 request.viewIds = readyViewIds; // 从 pending 筛出可见且窗口已就绪的 ID。
 if (request.viewIds.empty()) return;
@@ -283,6 +325,9 @@ if (drew) queueWork(); // 真实绘制后收口一次资源提交，空闲不自
 出参与返回：AttachFeature() 同步返回 bool：真为挂载完成，假为拒绝或失败，没有完成回调。更新/绘制期间拒绝拓扑变更。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 const bool attached = session->AttachFeature(feature);
 if (!attached) {
     qWarning() << "Attach failed";
@@ -303,6 +348,9 @@ if (!attached) {
 出参与返回：DetachFeature(*feature) 同步返回 bool，真表示移除完成，假表示拒绝或清理未收口，没有独立完成回调。失败后在所属线程重试。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 const bool detached = session->DetachFeature(*feature);
 if (detached) {
     feature.reset(); // 完成后才释放宿主持有的句柄。
@@ -324,6 +372,10 @@ if (detached) {
 出参与返回：Stop() 同步返回 bool，真为停止完成，假为阶段未收口；GetStopState() 可读取状态，没有独立停止回调。dispatcher 失效时 Qt 所属线程可用 SendPendingStops() 补泵。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QCloseEvent>
+#include <QTimer>
+
 if (session && !session->Stop()) {
     event->ignore(); // closeEvent 中不能先销毁窗口。
     QTimer::singleShot(50, this, [this] { close(); });
@@ -381,6 +433,14 @@ RAW 入口读取连续 float32 单分量数据并核对大小，没有切换任�
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Data/ImageReadTypes.h>
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QByteArray>
+#include <QDebug>
+#include <QString>
+#include <utility>
+
 HostLoadRequest request;
 request.filePath = path.toUtf8().toStdString();
 request.geometry = geometry; // 使用实际采集几何，不填默认间距。
@@ -406,6 +466,14 @@ TIFF 序列也要明确提供几何，不使用 RAW 文件名尺寸推断。
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Data/ImageReadTypes.h>
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QByteArray>
+#include <QDebug>
+#include <QString>
+#include <utility>
+
 HostLoadRequest request;
 request.filePath = seriesPath.toUtf8().toStdString();
 request.geometry = geometry; // 使用实际采集几何，不填默认间距。
@@ -430,6 +498,12 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Load reject
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Data/ImageReadTypes.h>
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostReloadRequest request;
 request.voxels = std::move(voxels); // 不借用短命外部缓冲。
 request.geometry = geometry;
@@ -454,6 +528,11 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Reload reje
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostLoadActivationRequest request;
 request.dataRevision = selectedRevision;
 request.expectedBindingRevision = observedBindingRevision;
@@ -478,6 +557,11 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Switch reje
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostDataSelectRequest request;
 request.dataRevision = selectedRevision;
 request.expectedBindingRevision = observedBindingRevision;
@@ -501,6 +585,12 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Switch reje
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <QString>
+#include <utility>
+
 HostDataUnloadRequest request;
 request.dataRevision = observedHead; // 防止卸载同一实体后来生成的修订。
 const auto admitted = session->SendRequest(std::move(request), [](HostResult result) {
@@ -531,6 +621,13 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Unload reje
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.mode = HostRenderMode::Volume;
@@ -555,6 +652,13 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Mode reject
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.mode = HostRenderMode::IsoSurface;
@@ -579,6 +683,13 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Mode reject
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.mode = HostRenderMode::CompositeVolume;
@@ -603,6 +714,13 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Mode reject
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.mode = HostRenderMode::CompositeIsoSurface;
@@ -627,6 +745,13 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Mode reject
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"slice-top-down"};
 request.mode = HostRenderMode::SliceTopDown;
@@ -651,6 +776,13 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Mode reject
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"slice-front-back"};
 request.mode = HostRenderMode::SliceFrontBack;
@@ -675,6 +807,13 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Mode reject
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"slice-left-right"};
 request.mode = HostRenderMode::SliceLeftRight;
@@ -698,6 +837,12 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Mode reject
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewResetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 // 返回只说明接纳，业务成功还要看所属线程完成回调。
@@ -729,6 +874,13 @@ if (admitted.status != HostAdmissionStatus::Accepted) qWarning() << "Reset rejec
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"slice-top-down"};
 HostWindowLevelParams level;
@@ -756,6 +908,12 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.iso = isoValue; // 与体素原始标量同量纲。
@@ -779,6 +937,13 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.background = HostBackgroundColor{0.08, 0.08, 0.08};
@@ -803,6 +968,13 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 HostMaterialParams material;
@@ -829,6 +1001,13 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostVolumeTransferFunction curve;
 curve.colorNodes = {{low, 0, 0, 0}, {high, 1, 1, 1}};
 curve.opacityNodes = {{low, 0}, {high, 1}}; // low/high 须递增。
@@ -854,6 +1033,13 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.volumeQuality = HostVolumeQuality::High;
@@ -878,6 +1064,13 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 HostVisibilityParams visible;
@@ -906,6 +1099,13 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostViewSetRequest request;
 request.targetView = HostViewTarget{"slice-top-down"};
 HostRulerParams ruler;
@@ -934,6 +1134,12 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostSessionSetRequest request;
 HostCursorParams cursor;
 cursor.world = worldPoint;
@@ -958,6 +1164,11 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostSessionSetRequest request;
 request.spacing = calibratedSpacing; // 来自业务校准结果，单位 mm。
 const auto a = session->SendRequest(std::move(request), [](HostResult r) {
@@ -974,6 +1185,10 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 2. 调用单次导航或修改绑定；检查同步状态。
 3. 需要自转发事件时，在构建前选 HostInjected，再发送值事件。
 
+这四个头分别负责绑定值与覆盖提供器、操作/绑定调度、导航输入和结果值、每视图导航及其计算扩展点。NavigationInput.phase 用 Discrete 或 Begin/Update/End 表示离散输入和连续手势阶段，由既有输入链提供。InputBinding 的按钮、修饰键和触发方式是绑定数据；允许哪些触发方式以 GetActions() 的声明为准。键码可用 InputKey，覆盖用 BindingPatch 或 IInputBindings 提供器。
+
+绑定禁用只控制对应绑定，不等同于停止 ROI、裁切等功能；它们的工具生命周期沿用对应功能章节。控制器没有通用的输入优先级或捕获接管 setter，RegisterAction() 也不能用来注册任意拖拽/Modifiers 行为。控制器从 Session 获取，单独构造另一个控制器不会控制该 Session；导航子类通过 shared_ptr 交给视图。两类句柄禁止复制，构造和析构不单独作为界面操作。
+
 ### 5.1 倍率缩放
 
 围绕锚点按相对倍率缩放。
@@ -987,6 +1202,12 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Request rejected";
 出参与返回：导航写方法同步返回 NavigationStatus，没有完成回调：Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 视图不支持，Busy 忙，WrongThread 线程错误，Failed 执行失败。实际显示仍由更新和绘制推进。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
 const auto controller = session->GetInteractionController();
 const auto nav = controller ? controller->GetNavigation("primary-3d") : nullptr;
 if (!nav) return;
@@ -1008,6 +1229,12 @@ if (status != NavigationStatus::Applied)
 出参与返回：导航写方法同步返回 NavigationStatus，没有完成回调：Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 视图不支持，Busy 忙，WrongThread 线程错误，Failed 执行失败。实际显示仍由更新和绘制推进。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
 const auto controller = session->GetInteractionController();
 const auto nav = controller ? controller->GetNavigation("primary-3d") : nullptr;
 if (!nav) return;
@@ -1018,17 +1245,23 @@ if (status != NavigationStatus::Applied)
 
 ### 5.3 平移
 
-按显示像素位移移动当前观察。
+按逻辑像素位移移动当前观察，正方向采用左下原点；显示缩放由导航链换算。
 
 入参：
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
-| `deltaX/deltaY` | `double` | 像素位移，方向由导航坐标约定解释。 |
+| `deltaX/deltaY` | `double` | 逻辑像素位移，不预先乘 displayScale。 |
 
 出参与返回：导航写方法同步返回 NavigationStatus，没有完成回调：Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 视图不支持，Busy 忙，WrongThread 线程错误，Failed 执行失败。实际显示仍由更新和绘制推进。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
 const auto controller = session->GetInteractionController();
 const auto nav = controller ? controller->GetNavigation("primary-3d") : nullptr;
 if (!nav) return;
@@ -1050,6 +1283,12 @@ if (status != NavigationStatus::Applied)
 出参与返回：导航写方法同步返回 NavigationStatus，没有完成回调：Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 视图不支持，Busy 忙，WrongThread 线程错误，Failed 执行失败。实际显示仍由更新和绘制推进。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
 const auto controller = session->GetInteractionController();
 const auto nav = controller ? controller->GetNavigation("primary-3d") : nullptr;
 if (!nav) return;
@@ -1071,6 +1310,12 @@ if (status != NavigationStatus::Applied)
 出参与返回：导航写方法同步返回 NavigationStatus，没有完成回调：Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 视图不支持，Busy 忙，WrongThread 线程错误，Failed 执行失败。实际显示仍由更新和绘制推进。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
 const auto controller = session->GetInteractionController();
 const auto nav = controller ? controller->GetNavigation("slice-top-down") : nullptr;
 if (!nav) return;
@@ -1092,6 +1337,12 @@ if (status != NavigationStatus::Applied)
 出参与返回：导航写方法同步返回 NavigationStatus，没有完成回调：Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 视图不支持，Busy 忙，WrongThread 线程错误，Failed 执行失败。实际显示仍由更新和绘制推进。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
 const auto controller = session->GetInteractionController();
 const auto nav = controller ? controller->GetNavigation("primary-3d") : nullptr;
 if (!nav) return;
@@ -1108,11 +1359,21 @@ if (status != NavigationStatus::Applied)
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
-| `options` | `NavigationOptions` | 默认滚轮倍率 1.1、旋转 .5 度/像素、翻片每步 5 层；需要逐层翻片时主动改为 1。 |
+| `options.zoom` | `NavigationOptions::Zoom` | 滚轮倍率、拖动/像素滚轮灵敏度和精度倍率；可反向，wheelAnchor/dragAnchor 选择锚点模式。 |
+| `options.pan` | `NavigationOptions::Pan` | sensitivity 调整平移灵敏度，isInverted 改变方向。 |
+| `options.rotate` | `NavigationOptions::Rotate` | degreesPerPixel 为度/逻辑像素，pivot 选择旋转锚点。 |
+| `options.slice` | `NavigationOptions::Slice` | countPerStep/acceleratedCount 分别控制普通和加速翻片步数；本例改为逐层。 |
+| `options.windowLevel` | `NavigationOptions::WindowLevel` | 分别调整窗宽/窗位灵敏度和反向开关。 |
 
-出参与返回：导航写方法同步返回 NavigationStatus，没有完成回调：Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 视图不支持，Busy 忙，WrongThread 线程错误，Failed 执行失败。实际显示仍由更新和绘制推进。
+出参与返回：导航写方法同步返回 NavigationStatus，没有完成回调：Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 视图不支持，Busy 忙，WrongThread 线程错误，Failed 执行失败。所有倍率和灵敏度须正且有限，翻片步数须为正，锚点模式须为有效枚举，否则返回 Invalid。GetOptions() 取得配置副本；修改副本后仍要 SetOptions()，查询本身不改视图。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
 const auto c = session->GetInteractionController();
 const auto nav = c ? c->GetNavigation("slice-top-down") : nullptr;
 if (!nav) return;
@@ -1121,6 +1382,7 @@ options.slice.countPerStep = 1; // 每次滚轮步进一层。
 if (nav->SetOptions(options) != NavigationStatus::Applied)
     qWarning() << "Navigation options failed";
 ```
+
 
 ### 5.8 启用导航工具
 
@@ -1136,6 +1398,13 @@ if (nav->SetOptions(options) != NavigationStatus::Applied)
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostToolSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.toolMode = HostToolMode::Navigation;
@@ -1160,6 +1429,13 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Tool rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <utility>
+
 HostToolSetRequest request;
 request.targetView = HostViewTarget{"primary-3d"};
 request.toolMode = HostToolMode::ModelTransform;
@@ -1179,12 +1455,18 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Tool rejected";
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `bindingKey` | `string` | 由导航或所属 Feature 声明的键。 |
-| `InputBinding` | `输入结构` | 触发种类、按钮、必需和禁止修饰键；Shift/Ctrl/Alt 标志为 1/2/4。 |
-| `scope` | `BindingScope` | View(id) 指单视图，Slices() 指切片。 |
+| `InputBinding` | `InputBinding` | trigger 选 KeyPress、PointerPress、Drag、两向 Wheel 或 Modifiers，button 选 None/Primary/Secondary/Middle；修饰键 Shift/Ctrl/Alt 为 1/2/4。字符 key 填 Unicode/ASCII，功能键用 InputKey，allowsRepeat 控制重复触发。 |
+| `scope` | `BindingScope` | View(id) 指单视图，Slices() 指切片；省略 scope 等同 ViewArea() 的默认范围。 |
 
-出参与返回：同步返回 BindingUpdateResult，没有完成回调。Applied 表示设置已应用；Conflict 表示绑定冲突，Invalid/Unsupported/Busy/Failed 分别表示配置无效、触发方式不支持、重入忙或应用失败；诊断读取 diagnostics。修改在所属线程进行。
+出参与返回：同步返回 BindingUpdateResult，没有完成回调。Applied 表示设置已应用；Conflict 表示绑定冲突，Invalid/Unsupported/Busy/Failed 分别表示配置无效、触发方式不支持、重入忙或应用失败；diagnostics 用 bindingKey/conflictingKey、viewId 和 status 定位问题。修改在所属线程进行。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+#include <string>
+
 const auto c = session->GetInteractionController();
 if (!c) return;
 BindingPatch patch;
@@ -1208,6 +1490,12 @@ if (result.status != InputBindingStatus::Applied) qWarning() << "Binding failed"
 出参与返回：同步返回 BindingUpdateResult，没有完成回调。Applied 表示设置已应用；Conflict 表示绑定冲突，Invalid/Unsupported/Busy/Failed 分别表示配置无效、触发方式不支持、重入忙或应用失败；诊断读取 diagnostics。修改在所属线程进行。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+#include <string>
+
 const auto c = session->GetInteractionController();
 if (!c) return;
 BindingPatch patch;
@@ -1230,6 +1518,12 @@ if (result.status != InputBindingStatus::Applied) qWarning() << "Binding failed"
 出参与返回：同步返回 BindingUpdateResult，没有完成回调。Applied 表示设置已应用；Conflict 表示绑定冲突，Invalid/Unsupported/Busy/Failed 分别表示配置无效、触发方式不支持、重入忙或应用失败；诊断读取 diagnostics。修改在所属线程进行。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+#include <string>
+
 const auto c = session->GetInteractionController();
 if (!c) return;
 BindingPatch patch;
@@ -1252,6 +1546,11 @@ if (result.status != InputBindingStatus::Applied) qWarning() << "Binding failed"
 出参与返回：同步返回 BindingUpdateResult，没有完成回调。Applied 表示设置已应用；Conflict 表示绑定冲突，Invalid/Unsupported/Busy/Failed 分别表示配置无效、触发方式不支持、重入忙或应用失败；诊断读取 diagnostics。修改在所属线程进行。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+
 const auto c = session->GetInteractionController();
 if (!c) return;
 const InteractionSettings saved = c->GetSettings();
@@ -1274,6 +1573,15 @@ if (restored.status != InputBindingStatus::Applied)
 出参与返回：SendInput() 同步返回 HostInputResult，没有完成回调。isSucceeded 为处理成功，isHandled 表示命中动作，isDefaultSuppressed 表示默认处理被抑制；失败读 errorCode/message，包括 WrongThread、SessionNotReady 或 OperationFailed。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <QMouseEvent>
+#include <QPointF>
+#include <QString>
+#include <QVTKOpenGLNativeWidget.h>
+#include <array>
+
 auto* input = session->GetInputEndpoint();
 if (!input) return;
 const double scale = widget->devicePixelRatioF();
@@ -1297,11 +1605,17 @@ if (!result.isSucceeded) qWarning() << QString::fromStdString(result.message);
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `info.actionId/ownerId` | `string` | 非空，同一 owner 下不重复。 |
+| `info.bindings` | `vector<InteractionActionBinding>` | 需要输入触发时登记绑定键、默认触发和范围；应用命令只接受 KeyPress、PointerPress 或两向滚轮。 |
 | `execute` | `function<ActionTriggerResult(const ActionContext&)>` | 所属线程同步执行；异步业务返回 Accepted 后沿原业务完成链继续。 |
 
 出参与返回：RegisterAction() 同步返回 bool，无注册回调；真为完成，假为重复、参数、绑定或重入状态不合法。execute 在 Trigger 内同步调用，重入 Trigger 返回 Busy。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+#include <utility>
+
 const auto c = session->GetInteractionController();
 if (!c) return;
 ApplicationAction action;
@@ -1326,6 +1640,10 @@ if (!c->RegisterAction(std::move(action))) qWarning() << "Register failed";
 出参与返回：Trigger() 同步返回 ActionTriggerResult，无额外完成回调；Completed/Accepted 为同步完成/异步接纳，Unavailable/Invalid/Busy/Failed 为不可用、上下文、重入或执行失败。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+
 const auto c = session->GetInteractionController();
 if (!c) return;
 ActionContext context; context.viewId = "primary-3d";
@@ -1347,11 +1665,457 @@ if (result.status != ActionTriggerStatus::Completed && result.status != ActionTr
 出参与返回：RemoveAction() 同步返回 bool，无回调。真为移除操作已执行，假为控制器或重入状态不允许；不能据真值推断之前一定存在该 ID。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+
 const auto c = session->GetInteractionController();
 if (!c) return;
 const bool removed = c->RemoveAction("app.inspect");
 if (!removed) qWarning() << "Remove action rejected";
 // 不再触发命令后再释放其界面依赖。
+```
+
+### 5.18 准备绑定配置
+
+ConfigurableInputBindings 保存输入覆盖值，适合宿主先读取用户偏好，再统一导入控制器。它本身不改变当前视图。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `bindingKey` | `string` | 公开导航键或所属功能声明的键。 |
+| `choice/binding` | `InputBindingOverride、InputBinding` | Replace 主动提供触发参数；省略 binding 会记录 InputBinding 的 Drag+Primary 默认值，不是恢复默认。Disable 禁用，UseDefault 删除覆盖。 |
+
+出参与返回：SetOverride() 同步返回 bool，无回调；真表示配置值已记录，假表示键为空或覆盖枚举无效。这里只记录配置，不报告视图绑定已经生效。
+
+```cpp
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <QDebug>
+#include <string>
+
+ConfigurableInputBindings source;
+const bool saved = source.SetOverride(
+    std::string(NavigationBindingKeys::ZoomWheelForward),
+    InputBindingOverride::Disable);
+if (!saved) qWarning() << "Invalid binding configuration";
+// source 是配置值提供器；要改变视图仍需 ImportBindings()。
+```
+
+### 5.19 读取绑定覆盖
+
+读取配置提供器中的覆盖意图，用于偏好面板或自有 IInputBindings 实现。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `bindingKey` | `string_view` | 要查询的绑定键。 |
+| `out` | `InputBinding&` | 仅返回 Replace 时才读取其中参数。 |
+
+出参与返回：GetOverride() 同步返回 InputBindingOverride，无回调且声明 noexcept。UseDefault 为没有覆盖，Disable 为显式禁用，Replace 为使用 out；不能把 out 的默认值当作其他两种结果的有效参数。
+
+```cpp
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <QDebug>
+
+InputBinding replacement;
+const auto choice = source.GetOverride(
+    NavigationBindingKeys::ZoomWheelForward, replacement);
+if (choice == InputBindingOverride::Replace)
+    qInfo() << "Required modifiers:" << replacement.requiredModifiers;
+// UseDefault/Disable 时不消费 replacement；自有提供器也遵守这一契约。
+```
+
+### 5.20 导入绑定配置
+
+把 IInputBindings 提供的覆盖统一导入指定范围。控制器会枚举已注册操作的绑定键，因此配置源无需持有内部路由。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `source` | `const IInputBindings&` | 例如前面准备的 ConfigurableInputBindings。 |
+| `scope` | `BindingScope` | View(id) 指定视图，Slices() 指定切片类，ViewArea() 使用默认视图输入范围。 |
+
+出参与返回：同步返回 BindingUpdateResult，没有完成回调。Applied 为已应用，Invalid 为配置无效，Conflict 为绑定重叠，Unsupported 为该操作不支持所选触发方式，Busy 为重入或正在更新，Failed 为应用失败；失败时不提交候选配置，详情读 diagnostics。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+
+const auto controller = session->GetInteractionController();
+if (!controller) return;
+const auto result = controller->ImportBindings(source, BindingScope::Slices());
+if (result.status != InputBindingStatus::Applied)
+    qWarning() << "Import bindings failed";
+// 导入会处理范围内的已注册键；缺省覆盖按提供器的 UseDefault 解释。
+```
+
+### 5.21 查询有效绑定
+
+读取当前作用域解析后的绑定，适合展示按键帮助和冲突提示。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `scope` | `BindingScope` | 精确视图可用 View(id)；ViewArea() 查询默认范围的有效项。 |
+
+出参与返回：GetBindings() 同步返回 `vector<EffectiveBinding>`，无回调；控制器不可用时为空。每项的 bindingKey/actionId/ownerId 标识来源，origin 的 Default/Session/ViewClass/View 表示默认、会话、视图类或单视图覆盖，isEnabled/isAvailable/hasConflict/status 用于展示是否实际可用；查询不会启用行为，也不能代替实际导航或命令的返回检查。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+#include <QString>
+
+const auto controller = session->GetInteractionController();
+if (!controller) return;
+const auto values = controller->GetBindings(BindingScope::View("primary-3d"));
+for (const auto& value : values) {
+    qInfo() << QString::fromStdString(value.bindingKey) << value.isEnabled << value.hasConflict;
+}
+// isEnabled 是配置结果，实际可执行还要结合 isAvailable 和 status。
+```
+
+### 5.22 查询操作列表
+
+让宿主发现控制器已注册的操作和支持的触发方式，避免把某个绑定键误当成任意可调用命令。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `controller` | `InteractionController 句柄` | 从当前 Session 获取。 |
+
+出参与返回：GetActions() 同步返回 `vector<InteractionActionInfo>`，无回调；不可用时为空。isTriggerable 决定能否通过 Trigger() 调用，bindings 中的 supportedTriggers 决定 Replace 可使用的触发种类；ownerId 标记归属，isCurrentToolCommand 表示跟随当前工具的命令；bindings 还投影默认触发、作用域和 scene。它们是注册信息，不能靠修改返回副本重新定义路由；绑定变更仍走 ApplyBindings()。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+#include <QString>
+
+const auto controller = session->GetInteractionController();
+if (!controller) return;
+for (const auto& action : controller->GetActions()) {
+    qInfo() << QString::fromStdString(action.actionId) << action.isTriggerable;
+    for (const auto& binding : action.bindings)
+        qInfo() << QString::fromStdString(binding.bindingKey);
+}
+// 默认绑定、作用域和 supportedTriggers 取自返回值，不猜测内部动作。
+```
+
+### 5.23 查询导航状态
+
+读取一个视图的当前缩放、窗宽窗位和投影状态，用于同步宿主控件。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `viewId` | `string` | 已有视图 ID，导航句柄仍属于 Session 所属线程。 |
+
+出参与返回：GetState() 同步返回 `optional<NavigationState>`，有值为有效状态，空表示线程不符、句柄未绑定或端点不可用，没有回调。状态还提供 visibleWorldHeight（可见世界高度）、isSliceView 和 isParallel，供界面区分视图和投影。GetNavigation() 对空或未知 ID 返回空指针；GetOptions() 读取响应配置，查询都不驱动绘制。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
+const auto controller = session->GetInteractionController();
+const auto navigation = controller ? controller->GetNavigation("slice-top-down") : nullptr;
+if (!navigation) return;
+const auto state = navigation->GetState();
+if (!state) { qWarning() << "Navigation state unavailable"; return; }
+qInfo() << "Zoom:" << state->zoomRatio << "Window:" << state->windowWidth << state->windowCenter;
+// 状态与 GetOptions() 的响应配置是两类值，查询不会修改视图。
+```
+
+### 5.24 通过导航调窗
+
+直接通过已有导航句柄设置目标视图窗宽窗位，适合与导航工具共用句柄的宿主。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `width/center` | `double` | 原始标量单位；宽度正且有限，中心有限。 |
+
+出参与返回：同步返回 NavigationStatus，没有完成回调。Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 当前视图不支持，Busy 正在计算或被交互捕获，WrongThread 线程错误，Failed 执行失败。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
+const auto controller = session->GetInteractionController();
+const auto navigation = controller ? controller->GetNavigation("slice-top-down") : nullptr;
+if (!navigation) return;
+const auto status = navigation->SetWindowLevel(width, center);
+if (status != NavigationStatus::Applied) qWarning() << "Window level navigation failed";
+// 这里改的是该导航句柄的视图，不另发全局显示设置。
+```
+
+### 5.25 选择缩放锚点
+
+ZoomAnchor 的工厂函数提供锚点值，可用于 ZoomBy、SetZoomRatio 和 RotateBy 的 pivot。ViewportCenter()/Pointer()/Crosshair() 分别指视口中心、指针和十字线，DisplayPoint(x,y) 是显示像素，NormalizedPoint(x,y) 的两个分量在 [0,1] 内，表示视口归一化位置，WorldPoint(point) 是世界坐标。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `anchor` | `ZoomAnchor` | 按应用已有的坐标来源选择工厂函数；不要把 Qt 左上原点坐标直接当显示坐标。 |
+
+出参与返回：六个工厂同步返回 ZoomAnchor 值，不写视图、没有成功状态或回调。使用该锚点的导航操作同步返回 NavigationStatus。Applied 已应用，Unbound 视图未绑定，Invalid 参数无效，Unsupported 当前视图不支持，Busy 正在计算或被交互捕获，WrongThread 线程错误，Failed 执行失败。实际锚点是否可用由导航操作判断。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+
+const auto controller = session->GetInteractionController();
+const auto navigation = controller ? controller->GetNavigation("primary-3d") : nullptr;
+if (!navigation) return;
+const auto anchor = ZoomAnchor::WorldPoint(worldPoint);
+const auto status = navigation->ZoomBy(1.2, anchor); // 世界点要与当前视图坐标一致。
+if (status != NavigationStatus::Applied) qWarning() << "Anchored zoom failed";
+```
+
+### 5.26 自定义缩放计算
+
+复用基类的滚轮、拖动、精度模式和锚点计算，只把滚轮倍率变得更细。安装子类见 5.31。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `input` | `const NavigationInput&` | deltaX/deltaY 为左下原点逻辑像素；isWheel、wheelDelta/wheelUnit 区分步数和像素滚轮，isPrecisionMode 使用缩放精度倍率。 |
+| `context` | `const NavigationContext&` | 由导航链提供的状态和视口；手势开始时冻结 options，独立滚轮使用当前配置。hasPointer/displayPosition 提供显示像素位置，displayScale 连接显示像素与逻辑像素。 |
+
+出参与返回：BuildZoom() 同步返回 ZoomRequest，没有完成回调或接纳枚举。它是纯计算扩展点，不直接应用场景；不得重入视图写入，抛异常会结束本次导航。
+
+```cpp
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <cmath>
+
+class FineWheelNavigation final : public ViewNavigation {
+public:
+    ZoomRequest BuildZoom(const NavigationInput& input,
+        const NavigationContext& context) const override {
+        auto result = ViewNavigation::BuildZoom(input, context);
+        if (input.isWheel) result.factor = std::sqrt(result.factor); // 改倍率，不写视图。
+        return result;
+    }
+};
+```
+
+### 5.27 自定义平移计算
+
+在应用只允许水平平移时，保留基类灵敏度换算并清除竖直位移。安装子类见 5.31。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `input` | `const NavigationInput&` | 手势输入；deltaX/deltaY 为左下原点的逻辑像素，wheelDelta 配合 Steps/LogicalPixels。 |
+| `context` | `const NavigationContext&` | 由导航链提供的视图状态、视口、响应选项和可选手势起始窗宽窗位。 |
+
+出参与返回：BuildPan() 同步返回 PanRequest，没有完成回调或接纳枚举。它是纯计算扩展点，不直接应用场景；不得重入视图写入，抛异常会结束本次导航。
+
+```cpp
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+
+class HorizontalNavigation final : public ViewNavigation {
+public:
+    PanRequest BuildPan(const NavigationInput& input,
+        const NavigationContext& context) const override {
+        auto result = ViewNavigation::BuildPan(input, context);
+        result.deltaY = 0; // 只改变本次平移请求。
+        return result;
+    }
+};
+```
+
+### 5.28 自定义旋转计算
+
+约束相机只做偏航，保留基类返回的旋转中心。安装子类见 5.31。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `input` | `const NavigationInput&` | deltaX/deltaY 为逻辑像素；基类在 isRollMode 时用指针相对视口中心计算滚转，本例再限制为偏航。 |
+| `context` | `const NavigationContext&` | 由导航链提供的视图状态、视口、响应选项和可选手势起始窗宽窗位。 |
+
+出参与返回：BuildRotate() 同步返回 RotateRequest，没有完成回调或接纳枚举。它是纯计算扩展点，不直接应用场景；不得重入视图写入，抛异常会结束本次导航。
+
+```cpp
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+
+class YawNavigation final : public ViewNavigation {
+public:
+    RotateRequest BuildRotate(const NavigationInput& input,
+        const NavigationContext& context) const override {
+        auto result = ViewNavigation::BuildRotate(input, context);
+        result.pitchDegrees = 0; result.rollDegrees = 0; // 约束计算结果。
+        return result;
+    }
+};
+```
+
+### 5.29 自定义翻片计算
+
+把基类已计算的翻片请求中非零步数收敛为一层，保留方向，适合应用自己的逐层查看模式。安装子类见 5.31。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `input` | `const NavigationInput&` | wheelDelta 表示翻片输入；基类按 isAccelerated 选择 acceleratedCount 或 countPerStep。 |
+| `context` | `const NavigationContext&` | 由导航链提供的视图状态、视口、响应选项和可选手势起始窗宽窗位。 |
+
+出参与返回：BuildSliceScroll() 同步返回 SliceScrollRequest，没有完成回调或接纳枚举。它是纯计算扩展点，不直接应用场景；不得重入视图写入，抛异常会结束本次导航。
+
+```cpp
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+
+class SingleStepNavigation final : public ViewNavigation {
+public:
+    SliceScrollRequest BuildSliceScroll(const NavigationInput& input,
+        const NavigationContext& context) const override {
+        auto result = ViewNavigation::BuildSliceScroll(input, context);
+        result.count = result.count > 0 ? 1 : result.count < 0 ? -1 : 0; // 保留方向。
+        return result;
+    }
+};
+```
+
+### 5.30 自定义调窗计算
+
+在有效切片调窗上下文中只改窗位，保留当前窗宽。安装子类见 5.31。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `input` | `const NavigationInput&` | 手势输入；deltaX/deltaY 为左下原点的逻辑像素，wheelDelta 配合 Steps/LogicalPixels。 |
+| `context` | `const NavigationContext&` | state 为当前状态，startWindowLevel 为手势开始值；基类据此计算增量幅度，避免每次输入重置基准。 |
+
+出参与返回：BuildWindowLevel() 同步返回 WindowLevelRequest，没有完成回调或接纳枚举。它是纯计算扩展点，不直接应用场景；不得重入视图写入，抛异常会结束本次导航。
+
+```cpp
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+
+class CenterNavigation final : public ViewNavigation {
+public:
+    WindowLevelRequest BuildWindowLevel(const NavigationInput& input,
+        const NavigationContext& context) const override {
+        auto result = ViewNavigation::BuildWindowLevel(input, context);
+        result.width = context.state.windowWidth; // 当前窗宽必须有效。
+        return result;
+    }
+};
+```
+
+### 5.31 替换导航策略
+
+把前面定义的 ViewNavigation 子类装到单个已有视图。它只替换导航计算策略，不替换 InteractionController 的路由和捕获规则。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `viewId` | `string` | 已有目标视图。 |
+| `navigation` | `shared_ptr<ViewNavigation>` | 例如前面定义的 HorizontalNavigation；同一个实例不能同时绑定不同端点。 |
+
+出参与返回：SetNavigation() 同步返回 NavigationStatus，没有回调：Applied 成功，Invalid 为视图 ID 或参数无效，Unbound 为控制器或端点未绑定，Busy 为策略已被其他端点占用等当前状态限制，WrongThread 为策略创建或调用线程不符；若替换前取消当前导航捕获失败，则返回 Failed。存在活动导航交互时会先尝试取消捕获。成功后用 GetNavigation(viewId) 重新取得该视图的句柄。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <MVVCVTK/API/Interaction/ViewNavigation.h>
+#include <QDebug>
+#include <memory>
+
+const auto controller = session->GetInteractionController();
+if (!controller) return;
+auto navigation = std::make_shared<HorizontalNavigation>();
+const auto status = controller->SetNavigation("primary-3d", navigation);
+if (status != NavigationStatus::Applied) qWarning() << "Navigation replacement failed";
+// HorizontalNavigation 是前面定义的宿主子类，不是新增 SDK 类型。
+```
+
+### 5.32 限定绑定范围
+
+当配置只作用于三维视图或特定输入域时，使用 BindingScope 的公开字段。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `viewId/viewClass` | `string、InteractionViewClass` | 精确 ID 或 Any/Slice/ThreeD 视图类；View()、Slices() 是常用构造方式。 |
+| `area` | `InputArea` | View/Text/Modal/Application 是匹配输入上下文的域，不负责转发 Qt 控件事件。 |
+
+出参与返回：工厂同步返回 BindingScope 值，没有回调；提交仍由 ApplyBindings() 返回 BindingUpdateResult。Applied 成功，Invalid/Conflict/Unsupported/Busy/Failed 为参数、冲突、不支持、忙或失败。省略 patch 的 scope 参数等同 ViewArea()。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InputBindings.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <QDebug>
+#include <string>
+
+const auto controller = session->GetInteractionController();
+if (!controller) return;
+BindingScope scope = BindingScope::ViewArea();
+scope.viewClass = InteractionViewClass::ThreeD; scope.area = InputArea::View;
+BindingPatch patch;
+patch.Disable(std::string(NavigationBindingKeys::CameraRotateDrag), scope);
+const auto result = controller->ApplyBindings(patch); // 只禁用这个范围的相机旋转绑定。
+if (result.status != InputBindingStatus::Applied) qWarning() << "Scoped binding failed";
+```
+
+### 5.33 恢复默认导航
+
+空导航指针会创建新的默认 ViewNavigation，原自定义策略和选项不会自动继承。
+
+入参：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `viewId` | `string` | 已有视图 ID。 |
+| `navigation` | `shared_ptr<ViewNavigation>` | 传 nullptr 恢复默认策略。 |
+
+出参与返回：SetNavigation() 同步返回 NavigationStatus，无回调。Applied 表示恢复完成；Invalid 是 ID 无效，Unbound 是端点不可用，Busy 是正在计算等状态限制，WrongThread 是线程不符，Failed 表示取消当前导航捕获失败。恢复前会先尝试取消当前导航交互。
+
+```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Interaction/InteractionController.h>
+#include <MVVCVTK/API/Interaction/NavigationTypes.h>
+#include <QDebug>
+
+const auto controller = session->GetInteractionController();
+if (!controller) return;
+const auto status = controller->SetNavigation("primary-3d", nullptr);
+if (status != NavigationStatus::Applied) qWarning() << "Default navigation restore failed";
+// 恢复成功后重新获取导航句柄；此前自定义选项不会继承。
 ```
 
 ## 6. 数据读取与导出
@@ -1375,6 +2139,10 @@ if (!removed) qWarning() << "Remove action rejected";
 出参与返回：GetImageDescriptor() 或带 revision 的重载同步返回 `optional<ImageDescriptor>`，有值为可读图像，空表示无图像、不可用或修订类型不符，没有回调。dataRevision/bindingRevision 分别是数据和绑定版本。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <QtGlobal>
+
 const auto image = session->GetImageDescriptor();
 if (!image) {
     qWarning() << "No image";
@@ -1397,6 +2165,10 @@ qInfo() << "Voxel components:" << static_cast<qulonglong>(image->componentCount)
 出参与返回：GetDataCatalog() 同步返回 `optional<HostDataCatalog>`，空表示查询不可用；有值包含 commitId/data，没有回调。目录不保活数据载荷或资源租约。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <QtGlobal>
+
 // 目录只复制元信息，不保活体素或网格。
 const auto catalog = session->GetDataCatalog();
 if (!catalog) return;
@@ -1419,6 +2191,11 @@ for (const auto& item : catalog->data) {
 出参与返回：GetSceneViewState()、GetStateSnapshot() 同步返回 optional 值，无值为不可用，没有回调。场景 isAvailable 表示可用性；presentationRevision 只覆盖显示参数，sceneEpoch/renderedEpoch 比较逻辑提交覆盖，不证明显示器呈现。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <QtGlobal>
+
 // 查询不推进计算或绘制，读取当前值快照。
 const auto scene = session->GetSceneViewState(HostViewTarget{"primary-3d"});
 const auto state = session->GetStateSnapshot();
@@ -1442,6 +2219,9 @@ qInfo() << "Operations:" << static_cast<qulonglong>(state->operations.size());
 出参与返回：同步返回 ImageReadResult，error=None 且 state 有值为成功；NoImage/InvalidRegion/UnsupportedType/TooLarge/CopyFailed/Cancelled/ResultRetired 分别表示无图像、区域、类型、预算、复制、取消、退役问题，requiredBytes 给出所需字节数。没有完成回调。
 
 ```cpp
+#include <MVVCVTK/API/Data/ImageReadTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+
 ImageReadRequest request;
 request.region = ImageReadRegion{{0, 0, 0}, {16, 16, 16}};
 request.maxBytes = 1024 * 1024; // 在分配前限制复制量。
@@ -1464,6 +2244,10 @@ const auto bytes = result.state->values; // 按 valueType 和 componentBytes 解
 出参与返回：返回 ImageReadChunkResult，错误同同步读取。成功用 nextVoxelOffset/isDone 续读；requiredBytes 是整个区域大小。没有回调，跨块应核验 dataRevision/bindingRevision 一致，防止混入用户后来选择的数据。
 
 ```cpp
+#include <MVVCVTK/API/Data/ImageReadTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 ImageReadRequest request;
 request.region = region;
 const auto chunk = session->GetImageReadChunk(request, voxelOffset);
@@ -1486,6 +2270,11 @@ if (chunk.isDone) qInfo() << "Region completed";
 出参与返回：同步返回 ImageReadAdmission：Accepted 接纳，InvalidRequest/Busy/QueueFull/Stopping/Unavailable 为请求、已有未回调读取、队列满、停止或不可用。拒绝不回调；结果在所属线程更新阶段一次交付，后台完成不直接调用 UI。回调前移除当前读取条目，可再发读取；没有公开单次取消句柄，Stop 会收口为 Cancelled。
 
 ```cpp
+#include <MVVCVTK/API/Data/ImageReadTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <QtGlobal>
+
 ImageReadRequest request;
 request.region = region;
 request.maxBytes = 8 * 1024 * 1024;
@@ -1512,6 +2301,9 @@ if (a != ImageReadAdmission::Accepted) qWarning() << "Read rejected";
 出参与返回：同步返回 LabelMapReadResult。error=None 为成功；NotFound/VersionMismatch/GeometryMismatch/SourceMismatch/TooLarge 分别表示找不到、版本、几何、来源或预算错误；其他错误读 error。没有回调，精确整数从 values 字节解码。
 
 ```cpp
+#include <MVVCVTK/API/Data/ImageReadTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+
 LabelMapReadRequest request;
 request.id = labelDescriptor.id;
 request.expectedRevision = labelDescriptor.dataRevision;
@@ -1536,6 +2328,10 @@ if (result.error != LabelMapError::None || !result.state) return;
 出参与返回：同步返回 LabelMapReadChunkResult，没有回调。None 为成功，VersionMismatch/NotFound/InvalidRegion/TooLarge/ResultRetired 为版本、对象、区域、预算或退役问题。按 nextVoxelOffset/isDone 续读。
 
 ```cpp
+#include <MVVCVTK/API/Data/ImageReadTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 // 按返回体素偏移续读，不把它当字节偏移。
 const auto chunk = session->GetLabelMapReadChunk(request, voxelOffset);
 if (chunk.error != LabelMapError::None || !chunk.state) {
@@ -1561,6 +2357,15 @@ if (chunk.isDone) qInfo() << "Labels completed";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QByteArray>
+#include <QDebug>
+#include <QString>
+#include <utility>
+
 HostDataExportRequest request;
 request.outputPath = directory.toUtf8().toStdString();
 request.sourceView = HostViewTarget{"primary-3d"};
@@ -1587,6 +2392,15 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Export rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QByteArray>
+#include <QDebug>
+#include <QString>
+#include <utility>
+
 HostDataExportRequest request;
 request.outputPath = directory.toUtf8().toStdString();
 request.sourceView = HostViewTarget{"primary-3d"};
@@ -1613,6 +2427,15 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Export rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QByteArray>
+#include <QDebug>
+#include <QString>
+#include <utility>
+
 HostDataExportRequest request;
 request.outputPath = directory.toUtf8().toStdString();
 request.sourceView = HostViewTarget{"primary-3d"};
@@ -1639,6 +2462,15 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Export rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostValueTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QByteArray>
+#include <QDebug>
+#include <QString>
+#include <utility>
+
 HostDataExportRequest request;
 request.outputPath = directory.toUtf8().toStdString();
 request.sourceView = HostViewTarget{"primary-3d"};
@@ -1665,6 +2497,14 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Export rejected";
 出参与返回：同步返回 HostAdmission：Accepted 只表示接纳，Rejected 表示拒绝；errorCode 的 WrongThread/SessionNotReady/RequestRejected/OperationFailed 分别表示线程、会话、请求条件或处理异常。拒绝不回调；接纳后所属线程回调一次 HostResult，可能在发送函数返回前触发。完成看 isSucceeded，失败读 errorCode/message；回调可查询或再次请求。
 
 ```cpp
+#include <MVVCVTK/API/Host/Types/HostRequestTypes.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QByteArray>
+#include <QDebug>
+#include <QString>
+#include <utility>
+
 HostSliceExportRequest request;
 request.outputDir = directory.toUtf8().toStdString();
 request.sourceView = HostViewTarget{"slice-top-down"};
@@ -1698,6 +2538,9 @@ if (a.status != HostAdmissionStatus::Accepted) qWarning() << "Export rejected";
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+
 RoiPrimitive box;
 box.shape = RoiShape::Box;
 box.localToSource = {hx,0,0,cx, 0,hy,0,cy, 0,0,hz,cz, 0,0,0,1};
@@ -1724,6 +2567,10 @@ const auto roiRevision = result.roi->revision; // 保存精确修订，后续不
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::Sphere;
 p.origin = center;
@@ -1750,6 +2597,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::Cylinder;
 p.origin = center;
@@ -1776,6 +2627,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::HalfSpace;
 p.origin = planePoint;
@@ -1801,6 +2656,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::Ellipsoid;
 p.localToSource = ellipsoidToSource;
@@ -1826,6 +2685,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::EllipticCylinder;
 p.localToSource = cylinderToSource;
@@ -1852,6 +2715,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::Contour;
 p.contours = rings;
@@ -1879,6 +2746,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::ProjectedContour;
 p.contours = ndcRings;
@@ -1905,6 +2776,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::Brush;
 p.path = sourcePath;
@@ -1930,6 +2805,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiPrimitive p;
 p.shape = RoiShape::MaskReference;
 p.mask = maskRevision;
@@ -1954,6 +2833,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "ROI creation fai
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiVoxelBuilder builder;
 builder.AppendRuns(runs); // 一次构建只用 runs 或 voxels 一种输入方式。
 RoiPrimitive p; p.shape = RoiShape::VoxelSet;
@@ -1979,6 +2862,10 @@ if (saved.error != RoiError::None || !saved.roi) qWarning() << "Voxel ROI failed
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiRequest request;
 request.action = RoiAction::SetGeometry;
 request.expectedRoi = descriptor.revision;
@@ -2002,6 +2889,10 @@ if (result.error == RoiError::RevisionConflict) qWarning() << "Refresh ROI befor
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiRequest request;
 request.action = RoiAction::SetMetadata;
 request.expectedRoi = descriptor.revision;
@@ -2025,6 +2916,10 @@ if (result.error != RoiError::None) qWarning() << "ROI metadata failed";
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiRequest request;
 request.action = RoiAction::Copy;
 request.copyFrom = descriptor.revision;
@@ -2049,6 +2944,10 @@ if (result.error != RoiError::None || !result.roi) qWarning() << "ROI copy faile
 出参与返回：同步返回 RoiResult，没有完成回调。error=None 表示事务成功，创建或改几何时从可选 roi 描述符读 revision，删除只按 error 判断；WrongThread/InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/CommitFailed 分别表示线程、请求、几何、来源、版本或提交错误，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiRequest request;
 request.action = RoiAction::Remove;
 request.expectedRoi = descriptor.revision;
@@ -2071,6 +2970,10 @@ if (result.error != RoiError::None) qWarning() << "ROI remove failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request;
 request.source = sourceRevision;
 request.target = targetRoi;
@@ -2096,6 +2999,10 @@ if (result.error != RoiError::None) qWarning() << "ROI boolean failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request;
 request.source = sourceRevision;
 request.target = targetRoi;
@@ -2121,6 +3028,10 @@ if (result.error != RoiError::None) qWarning() << "ROI boolean failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request;
 request.source = sourceRevision;
 request.target = targetRoi;
@@ -2146,6 +3057,11 @@ if (result.error != RoiError::None) qWarning() << "ROI boolean failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <chrono>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiMorphologyParams p; p.operation = RoiMorphologyOperation::Dilate;
@@ -2170,6 +3086,11 @@ if (result.error != RoiError::None) qWarning() << "ROI morphology failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <chrono>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiMorphologyParams p; p.operation = RoiMorphologyOperation::Erode;
@@ -2194,6 +3115,11 @@ if (result.error != RoiError::None) qWarning() << "ROI morphology failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <chrono>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiMorphologyParams p; p.operation = RoiMorphologyOperation::Open;
@@ -2218,6 +3144,11 @@ if (result.error != RoiError::None) qWarning() << "ROI morphology failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <chrono>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiMorphologyParams p; p.operation = RoiMorphologyOperation::Close;
@@ -2242,6 +3173,10 @@ minimumVolume 为 mm³。
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiComponentParams p; p.operation = RoiComponentOperation::RemoveSmall;
@@ -2267,6 +3202,10 @@ if (result.error != RoiError::None) qWarning() << "ROI components failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiComponentParams p; p.operation = RoiComponentOperation::KeepLargest;
@@ -2292,6 +3231,10 @@ labels 指运算连通域编号。
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiComponentParams p; p.operation = RoiComponentOperation::KeepSelected;
@@ -2317,6 +3260,10 @@ if (result.error != RoiError::None) qWarning() << "ROI components failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiComponentParams p; p.operation = RoiComponentOperation::Split;
@@ -2342,6 +3289,10 @@ maximumHoleVolume 为 mm³，0 表示不限制孔洞大小。
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiComponentParams p; p.operation = RoiComponentOperation::FillHoles;
@@ -2367,6 +3318,10 @@ if (result.error != RoiError::None) qWarning() << "ROI components failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiThresholdParams p; p.mode = RoiThresholdMode::Threshold;
@@ -2392,6 +3347,10 @@ if (result.error != RoiError::None) qWarning() << "ROI threshold failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiThresholdParams p; p.mode = RoiThresholdMode::SeedGrow;
@@ -2415,6 +3374,10 @@ if (result.error != RoiError::None) qWarning() << "ROI threshold failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request;
 request.source = sourceRevision; request.target = targetRoi;
 request.params = RoiInvertParams{};
@@ -2436,6 +3399,10 @@ if (result.error != RoiError::None) qWarning() << "ROI operation failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request;
 request.source = sourceRevision; request.target = targetRoi;
 request.params = RoiClearParams{};
@@ -2458,6 +3425,10 @@ if (result.error != RoiError::None) qWarning() << "ROI operation failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiTransformParams p; p.sourceToTarget = transform;
@@ -2480,6 +3451,10 @@ if (result.error != RoiError::None) qWarning() << "ROI transform failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiMeshParams p; p.mesh = meshRevision; p.meshToSource = meshToSource;
@@ -2505,6 +3480,10 @@ if (result.error != RoiError::None) qWarning() << "Mesh ROI failed";
 出参与返回：SetRoiOperation() 同步返回 RoiOperationResult，没有完成回调；None 表示成功，正式区域在 rois。InvalidRequest/InvalidGeometry/SourceMismatch/RevisionConflict/TooLarge/Cancelled/DeadlineExceeded/CommitFailed 分别为参数、几何、来源、版本、资源、取消、截止时间或提交问题。长运算可改走编辑器异步候选。
 
 ```cpp
+#include <MVVCVTK/API/Data/RoiTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 RoiOperationRequest request; request.source = sourceRevision;
 request.target = targetRoi;
 RoiMeshParams p; p.mesh = meshRevision; p.meshToSource = meshToSource;
@@ -2530,6 +3509,12 @@ if (result.error != RoiError::None) qWarning() << "Mesh ROI failed";
 出参与返回：AttachFeature() 同步返回 bool，无完成回调。真为挂载成功；假为依赖、视图或注册失败。功能用 shared_ptr 持有，后续动作复用此实例。
 
 ```cpp
+#include "Host/RoiEditingHostFeature.h"
+#include "Host/Types/HostViewTypes.h"
+#include "Host/VtkAppHostSession.h"
+#include <QDebug>
+#include <memory>
+
 RoiEditingConfig config;
 config.referenceView = HostViewTarget{"primary-3d"};
 config.targetViews.viewIds = {"primary-3d", "slice-top-down"};
@@ -2551,6 +3536,10 @@ Begin 接受 Create 或 SetGeometry 草稿，草稿还不是正式数据。
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiRequest draft;
 draft.action = RoiAction::SetGeometry;
 draft.expectedRoi = descriptor.revision;
@@ -2577,6 +3566,10 @@ if (result.error != RoiError::None) qWarning() << "ROI begin failed";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::SetDraft;
 request.primitive = changedPrimitive;
@@ -2599,6 +3592,10 @@ if (result.error != RoiError::None) qWarning() << "Draft update failed";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::SliceContour;
@@ -2620,6 +3617,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::SliceBrush;
@@ -2641,6 +3642,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::ProjectedContour;
@@ -2662,6 +3667,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::VisibleBrush;
@@ -2683,6 +3692,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::Seed;
@@ -2704,6 +3717,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::SliceRectangle;
@@ -2725,6 +3742,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::SliceEllipse;
@@ -2746,6 +3767,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::SliceCircle;
@@ -2767,6 +3792,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginDrawing;
 request.drawing = RoiDrawingMode::EditControlPoint;
@@ -2788,6 +3817,10 @@ if (result.error != RoiError::None) qWarning() << "ROI drawing rejected";
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::EndDrawing;
 const auto result = roiEditor->SendRequest(request);
@@ -2808,6 +3841,10 @@ const auto state = roiEditor->GetState(); // 读取动作后的草稿状态。
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::ApplySelection;
 const auto result = roiEditor->SendRequest(request);
@@ -2828,6 +3865,10 @@ const auto state = roiEditor->GetState(); // 读取动作后的草稿状态。
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::Undo;
 const auto result = roiEditor->SendRequest(request);
@@ -2848,6 +3889,10 @@ const auto state = roiEditor->GetState(); // 读取动作后的草稿状态。
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::Redo;
 const auto result = roiEditor->SendRequest(request);
@@ -2868,6 +3913,10 @@ const auto state = roiEditor->GetState(); // 读取动作后的草稿状态。
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::Cancel;
 const auto result = roiEditor->SendRequest(request);
@@ -2888,6 +3937,10 @@ const auto state = roiEditor->GetState(); // 读取动作后的草稿状态。
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::CancelSave;
 const auto result = roiEditor->SendRequest(request);
@@ -2908,6 +3961,10 @@ const auto state = roiEditor->GetState(); // 读取动作后的草稿状态。
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request; request.action = RoiEditingAction::Commit;
 const auto result = roiEditor->SendRequest(request);
 if (result.error == RoiError::None && result.roi) {
@@ -2930,6 +3987,10 @@ if (result.error == RoiError::None && result.roi) {
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::BeginOperation;
 request.operation = operation;
@@ -2952,6 +4013,10 @@ if (result.error != RoiError::Pending && result.error != RoiError::None)
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::SetOperation;
 request.operation = operation;
@@ -2974,6 +4039,10 @@ if (result.error != RoiError::Pending && result.error != RoiError::None)
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::ApplyOperation;
 // 草稿与正式提交分开，Pending 时继续等待 Host 更新。
@@ -2995,6 +4064,10 @@ const auto state = roiEditor->GetState();
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::CancelOperation;
 // 草稿与正式提交分开，Pending 时继续等待 Host 更新。
@@ -3016,6 +4089,9 @@ const auto state = roiEditor->GetState();
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::ShowRoi;
 request.roi = roiRevision; request.isVisible = true;
@@ -3038,6 +4114,9 @@ if (state.displayStatus == RoiDisplayStatus::Failed) qWarning() << "ROI display 
 出参与返回：GetRoiDescriptor() 同步返回 `optional<RoiDescriptor>`，空为不可读；GetRoiDescriptors() 返回目录值集合，无回调。revision 是请求几何版本，currentRevision 是当前几何版本。
 
 ```cpp
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+
 const auto descriptor = session->GetRoiDescriptor(roiRevision);
 if (!descriptor) {
     qWarning() << "ROI unavailable";
@@ -3060,6 +4139,10 @@ const auto list = session->GetRoiDescriptors();
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiEditingRequest request;
 request.action = RoiEditingAction::SetVisible; request.isVisible = isVisible;
 const auto result = roiEditor->SendRequest(request); // 显示与保存分开判断。
@@ -3080,6 +4163,10 @@ const auto state = roiEditor->GetState();
 出参与返回：同步返回 RoiResult，编辑器没有用户完成回调。None 表示当前动作完成，Pending 表示仍要等待 Host 更新；WrongThread/Unavailable/InvalidRequest/SourceMismatch 分别表示线程错误、编辑器不可用、动作字段不符、来源不符。后续用 GetState() 读取状态。
 
 ```cpp
+#include "Data/RoiTypes.h"
+#include "Host/RoiEditingHostFeature.h"
+#include <QDebug>
+
 RoiRequest metadataOnly; metadataOnly.metadata = metadata;
 RoiEditingRequest request;
 request.action = RoiEditingAction::SetMetadata;
@@ -3110,6 +4197,12 @@ if (result.error != RoiError::None) qWarning() << "Metadata failed";
 出参与返回：AttachFeature() 同步返回 bool，无完成回调；真为挂载完成，假为依赖、重复挂载或拓扑状态不允许。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+#include <memory>
+
 crop = std::make_shared<CropHostFeature>();
 // 挂载失败停止后续操作，成功句柄由宿主持有。
 if (!session->AttachFeature(crop)) {
@@ -3133,6 +4226,13 @@ const auto state = crop->GetState();
 出参与返回：同步返回 CropDocumentAdmission，isAccepted 说明接纳，失败读 failureReason；SourceMismatch/StateVersionMismatch/Busy/PreviewNotReady/ResourceLimit 为来源、版本、忙、就绪或文档数量问题。本例不传回调，通过 Host 更新后 GetDocumentOutcome(documentId,requestId) 读取 Succeeded/Failed/Cancelled，Queued 尚未完成；此路径不提供同步完成保证。
 
 ```cpp
+#include <MVVCVTK/API/Data/DataGraphTypes.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Host/Types/HostViewTypes.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+#include <string>
+
 CropHostTarget target;
 target.inputBinding = std::string(primaryVolumeBinding);
 target.referenceView = HostViewTarget{"primary-3d"};
@@ -3159,6 +4259,10 @@ if (!a.isAccepted) qWarning() << static_cast<int>(a.failureReason);
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool；真为该工具命令已接纳，假为目标、来源、状态或字段不符。工具动作不传完成回调，状态从 GetState()/GetHistory() 读取；它不表示正式结果已构建。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::Box;
 request.target = target; // 不用工具动作代替创建或切换文档。
@@ -3180,6 +4284,10 @@ const auto state = crop->GetState();
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool；真为该工具命令已接纳，假为目标、来源、状态或字段不符。工具动作不传完成回调，状态从 GetState()/GetHistory() 读取；它不表示正式结果已构建。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::Plane;
 request.target = target; // 不用工具动作代替创建或切换文档。
@@ -3202,6 +4310,10 @@ const auto state = crop->GetState();
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool；真为该工具命令已接纳，假为目标、来源、状态或字段不符。工具动作不传完成回调，状态从 GetState()/GetHistory() 读取；它不表示正式结果已构建。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::Cylinder;
 request.target = target; // 不用工具动作代替创建或切换文档。
@@ -3223,6 +4335,10 @@ const auto state = crop->GetState();
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool；真为该工具命令已接纳，假为目标、来源、状态或字段不符。工具动作不传完成回调，状态从 GetState()/GetHistory() 读取；它不表示正式结果已构建。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::Sphere;
 request.target = target; // 不用工具动作代替创建或切换文档。
@@ -3243,6 +4359,10 @@ const auto state = crop->GetState();
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool；真为该工具命令已接纳，假为目标、来源、状态或字段不符。工具动作不传完成回调，状态从 GetState()/GetHistory() 读取；它不表示正式结果已构建。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::Mode;
 request.target = target;
@@ -3264,6 +4384,10 @@ if (!crop->SendRequest(request)) qWarning() << "Crop removal mode rejected";
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool；真为该工具命令已接纳，假为目标、来源、状态或字段不符。工具动作不传完成回调，状态从 GetState()/GetHistory() 读取；它不表示正式结果已构建。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::Mode;
 request.target = target;
@@ -3285,6 +4409,10 @@ if (!crop->SendRequest(request)) qWarning() << "Crop removal mode rejected";
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool；真为该工具命令已接纳，假为目标、来源、状态或字段不符。工具动作不传完成回调，状态从 GetState()/GetHistory() 读取；它不表示正式结果已构建。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::Mode;
 request.target = target;
@@ -3307,6 +4435,10 @@ if (!crop->SendRequest(request)) qWarning() << "Crop removal mode rejected";
 出参与返回：同步返回 CropEditAdmission，isAccepted 只说明接纳。拒绝从 failureReason 读取：BadInput/NodeNotFound/StateVersionMismatch/Busy/PreviewNotReady 分别表示几何、节点、版本、正在处理或视图就绪问题。本例不传回调，通过后续 GetOutcome(documentId,requestId) 读取 Queued/Succeeded/Failed/Cancelled。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropEditRequest request;
 request.documentId = h.documentId; request.nodeId = h.requestedHead;
@@ -3333,6 +4465,10 @@ if (!a.isAccepted) qWarning() << static_cast<int>(a.failureReason);
 出参与返回：同步返回 CropEditAdmission，isAccepted 只说明接纳。拒绝从 failureReason 读取：BadInput/NodeNotFound/StateVersionMismatch/Busy/PreviewNotReady 分别表示几何、节点、版本、正在处理或视图就绪问题。本例不传回调，通过后续 GetOutcome(documentId,requestId) 读取 Queued/Succeeded/Failed/Cancelled。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropEditRequest request;
 request.documentId = h.documentId; request.nodeId = h.requestedHead;
@@ -3360,6 +4496,10 @@ if (!a.isAccepted) qWarning() << static_cast<int>(a.failureReason);
 出参与返回：同步返回 CropEditAdmission，isAccepted 只说明接纳。拒绝从 failureReason 读取：BadInput/NodeNotFound/StateVersionMismatch/Busy/PreviewNotReady 分别表示几何、节点、版本、正在处理或视图就绪问题。本例不传回调，通过后续 GetOutcome(documentId,requestId) 读取 Queued/Succeeded/Failed/Cancelled。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropEditRequest request;
 request.documentId = h.documentId; request.nodeId = h.requestedHead;
@@ -3388,6 +4528,10 @@ if (!a.isAccepted) qWarning() << static_cast<int>(a.failureReason);
 出参与返回：同步返回 CropEditAdmission，isAccepted 只说明接纳。拒绝从 failureReason 读取：BadInput/NodeNotFound/StateVersionMismatch/Busy/PreviewNotReady 分别表示几何、节点、版本、正在处理或视图就绪问题。本例不传回调，通过后续 GetOutcome(documentId,requestId) 读取 Queued/Succeeded/Failed/Cancelled。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropEditRequest request;
 request.documentId = h.documentId; request.nodeId = h.requestedHead;
@@ -3415,6 +4559,10 @@ if (!a.isAccepted) qWarning() << static_cast<int>(a.failureReason);
 出参与返回：同步返回 CropEditAdmission，isAccepted 只说明接纳。拒绝从 failureReason 读取：BadInput/NodeNotFound/StateVersionMismatch/Busy/PreviewNotReady 分别表示几何、节点、版本、正在处理或视图就绪问题。本例不传回调，通过后续 GetOutcome(documentId,requestId) 读取 Queued/Succeeded/Failed/Cancelled。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropEditRequest request;
 request.documentId = h.documentId; request.nodeId = selectedNode;
@@ -3439,6 +4587,10 @@ Replace 指定一个已有操作节点，以新数学参数产生对应替换路
 出参与返回：同步返回 CropEditAdmission，isAccepted 只说明接纳。拒绝从 failureReason 读取：BadInput/NodeNotFound/StateVersionMismatch/Busy/PreviewNotReady 分别表示几何、节点、版本、正在处理或视图就绪问题。本例不传回调，通过后续 GetOutcome(documentId,requestId) 读取 Queued/Succeeded/Failed/Cancelled。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropEditRequest request;
 request.documentId = h.documentId; request.nodeId = selectedNode;
@@ -3463,6 +4615,10 @@ if (!a.isAccepted) qWarning() << "Replace rejected";
 出参与返回：同步返回 CropEditAdmission，isAccepted 只说明接纳。拒绝从 failureReason 读取：BadInput/NodeNotFound/StateVersionMismatch/Busy/PreviewNotReady 分别表示几何、节点、版本、正在处理或视图就绪问题。本例不传回调，通过后续 GetOutcome(documentId,requestId) 读取 Queued/Succeeded/Failed/Cancelled。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 const auto impact = crop->GetPruneImpact(h.documentId, prune);
 if (impact.failureReason != CropFailure::None || !impact.blockers.empty()) return;
@@ -3489,6 +4645,11 @@ if (!a.isAccepted) qWarning() << "Prune rejected";
 出参与返回：同步返回 CropBuildAdmission，isAccepted 只说明接纳；StateVersionMismatch/Busy/PreviewNotReady/NoCropOperations/LowRam/EmptyResult 为版本、忙、预览、缺操作、资源或空结果问题。构建完成回调由所属线程的 Host tick 兑现，结果是 CropBuildResult；isSucceeded 才表示正式构建成功，失败读 failureReason/message，正式输出在 outputRevision。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+#include <QString>
+
 const auto h = crop->GetHistory();
 CropBuildRequest request;
 request.documentId = h.documentId; request.nodeId = h.appliedHead;
@@ -3515,6 +4676,10 @@ if (!a.isAccepted) qWarning() << static_cast<int>(a.failureReason);
 出参与返回：同步返回 CropBuildAdmission，isAccepted 只说明接纳；StateVersionMismatch/Busy/PreviewNotReady/NoCropOperations/LowRam/EmptyResult 为版本、忙、预览、缺操作、资源或空结果问题。构建完成回调由所属线程的 Host tick 兑现，结果是 CropBuildResult；isSucceeded 才表示正式构建成功，失败读 failureReason/message，正式输出在 outputRevision。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropBuildRequest request;
 request.documentId = h.documentId; request.nodeId = h.rootNodeId;
@@ -3541,6 +4706,10 @@ if (!a.isAccepted) qWarning() << "ROI crop rejected";
 出参与返回：工具请求同步返回 bool，拒绝不回调；SaveRoi 必须提供回调，已接纳回调会在发送函数返回前同步执行，所属线程。结果 CropBuildResult 的 isSucceeded 表示保存成功，recipeRevision 是正式 ROI；失败读 failureReason/message。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::SaveRoi;
 request.target = target; request.roiMetadata = metadata;
@@ -3566,6 +4735,10 @@ if (!accepted) qWarning() << "Save crop ROI rejected";
 出参与返回：同步返回 CropDocumentAdmission，isAccepted 说明接纳，失败读 failureReason；SourceMismatch/StateVersionMismatch/Busy/PreviewNotReady/ResourceLimit 为来源、版本、忙、就绪或文档数量问题。本例不传回调，通过 Host 更新后 GetDocumentOutcome(documentId,requestId) 读取 Succeeded/Failed/Cancelled，Queued 尚未完成；此路径不提供同步完成保证。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory(documentId);
 CropDocumentRequest request;
 request.action = CropDocumentAction::ActivateDocument;
@@ -3590,6 +4763,10 @@ if (!a.isAccepted) qWarning() << "Document activation rejected";
 出参与返回：同步返回 CropDocumentAdmission，isAccepted 说明接纳，失败读 failureReason；SourceMismatch/StateVersionMismatch/Busy/PreviewNotReady/ResourceLimit 为来源、版本、忙、就绪或文档数量问题。本例不传回调，通过 Host 更新后 GetDocumentOutcome(documentId,requestId) 读取 Succeeded/Failed/Cancelled，Queued 尚未完成；此路径不提供同步完成保证。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropDocumentRequest request;
 request.action = CropDocumentAction::ReturnToSource;
@@ -3613,6 +4790,10 @@ if (!a.isAccepted) qWarning() << "Document action rejected";
 出参与返回：同步返回 CropDocumentAdmission，isAccepted 说明接纳，失败读 failureReason；SourceMismatch/StateVersionMismatch/Busy/PreviewNotReady/ResourceLimit 为来源、版本、忙、就绪或文档数量问题。本例不传回调，通过 Host 更新后 GetDocumentOutcome(documentId,requestId) 读取 Succeeded/Failed/Cancelled，Queued 尚未完成；此路径不提供同步完成保证。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 const auto h = crop->GetHistory();
 CropDocumentRequest request;
 request.action = CropDocumentAction::CloseDocument;
@@ -3636,6 +4817,10 @@ if (!a.isAccepted) qWarning() << "Document action rejected";
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool；真为该工具命令已接纳，假为目标、来源、状态或字段不符。工具动作不传完成回调，状态从 GetState()/GetHistory() 读取；它不表示正式结果已构建。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::Exit;
 // 工具命令不表示已经构建正式裁切数据。
@@ -3657,6 +4842,11 @@ if (state.isPublishing) qWarning() << "Crop publication still active";
 出参与返回：SendRequest(CropHostRequest) 同步返回 bool，无回调；真为网格注册事务成功，假为数据或发布失败，不自动切换已有文档源。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+#include <vtkPolyData.h>
+
 CropHostRequest request;
 request.action = CropHostAction::SetPolyData;
 request.polyData = mesh; // 宿主文件读取入口提供。
@@ -3677,6 +4867,10 @@ if (!accepted) qWarning() << "Mesh registration failed";
 出参与返回：同步返回 bool，无回调；真为绑定清理完成，假为生命周期或提交失败；正式结果仍按文档和消费者关系处理。
 
 ```cpp
+#include <MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h>
+#include <MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h>
+#include <QDebug>
+
 CropHostRequest request;
 request.action = CropHostAction::ClearPolyData;
 const bool cleared = crop->SendRequest(request); // 不代替 CloseDocument。
@@ -3706,6 +4900,12 @@ const auto state = crop->GetState();
 出参与返回：AttachFeature() 同步返回 bool，没有完成回调；真为完成，假为依赖或拓扑条件不满足。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "Host/VtkAppHostSession.h"
+#include <QDebug>
+#include <memory>
+
 surface = std::make_shared<SurfaceDeterminationHostFeature>();
 // 挂载失败停止后续操作，成功句柄由宿主持有。
 if (!session->AttachFeature(surface)) {
@@ -3729,6 +4929,12 @@ GlobalAutomatic 是当前唯一计算方法。阈值和材料范围均省略时�
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "SurfaceRecipe.h"
+#include <QDebug>
+#include <QString>
+
 SurfaceDeterminationStartParams params;
 params.sourceVolume = sourceRevision;
 params.analysisRoi = analysisRoi;
@@ -3755,6 +4961,12 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Surface rejecte
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "SurfaceRecipe.h"
+#include <QDebug>
+#include <QString>
+
 params.initialIsoValue = isoValue;
 params.materialRange = materialRange;
 const auto error = SurfaceRecipeCodec::GetError(params);
@@ -3780,6 +4992,12 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Surface rejecte
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "SurfaceRecipe.h"
+#include <QDebug>
+#include <memory>
+
 params.purpose = SurfaceTaskPurpose::Preview;
 // 接纳和计算完成分开，不能把 Accepted 当成已发布。
 const auto a = surface->SendRequest(SurfaceStartRequest{params},
@@ -3806,6 +5024,12 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Surface rejecte
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "SurfaceRecipe.h"
+#include <QDebug>
+#include <memory>
+
 params.purpose = SurfaceTaskPurpose::Determine;
 // 接纳和计算完成分开，不能把 Accepted 当成已发布。
 const auto a = surface->SendRequest(SurfaceStartRequest{params},
@@ -3832,6 +5056,11 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Surface rejecte
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "SurfaceRecipe.h"
+#include <QDebug>
+
 params.componentSelection = SurfaceComponentSelection::All;
 params.minimumObjectVoxels = minimumVoxels;
 
@@ -3856,6 +5085,11 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Extraction reje
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "SurfaceRecipe.h"
+#include <QDebug>
+
 params.componentSelection = SurfaceComponentSelection::Largest;
 params.minimumObjectVoxels = minimumVoxels;
 
@@ -3881,6 +5115,11 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Extraction reje
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "SurfaceRecipe.h"
+#include <QDebug>
+
 params.componentSelection = SurfaceComponentSelection::Seeded;
 params.minimumObjectVoxels = minimumVoxels;
 params.seedModelPoint = seedModelPoint; // 模型坐标，不是显示像素。
@@ -3904,6 +5143,11 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Extraction reje
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include "SurfaceRecipe.h"
+#include <QDebug>
+
 params.parentGeneration = parentRevision;
 params.analysisRoi = roiRevision;
 params.purpose = SurfaceTaskPurpose::Determine;
@@ -3928,6 +5172,11 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Parent request 
 出参与返回：GetSurfaceSnapshot() 返回 `shared_ptr<const SurfaceGenerationSnapshot>`，空表示结果不可读；GetObjectPage() 返回 `optional<SurfaceObjectPage>`，空表示无目录或参数不合法。没有回调，使用 next 续读。面积、体积要结合 areaValidity/volumeValidity，缺失可选值不能写成 0。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+#include <QtGlobal>
+
 const auto snapshot = surface->GetSurfaceSnapshot(generation);
 if (!snapshot) return;
 const auto page = snapshot->GetObjectPage(offset, 256);
@@ -3949,6 +5198,10 @@ qInfo() << "Objects:" << static_cast<qulonglong>(page->total);
 出参与返回：GetObjectPoints() 同步返回对应的 optional 页结构，空表示对象、范围或后备数据不可读，没有回调。成功读取 points 或 triangles，并按 next 续读。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+
 const auto snapshot = surface->GetSurfaceSnapshot(generation);
 if (!snapshot) return;
 const auto page = snapshot->GetObjectPoints(objectIndex, offset, 1024);
@@ -3969,6 +5222,10 @@ offset = page->next; // 不自行猜测下一页偏移。
 出参与返回：GetObjectTriangles() 同步返回对应的 optional 页结构，空表示对象、范围或后备数据不可读，没有回调。成功读取 points 或 triangles，并按 next 续读。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+
 const auto snapshot = surface->GetSurfaceSnapshot(generation);
 if (!snapshot) return;
 const auto page = snapshot->GetObjectTriangles(objectIndex, offset, 1024);
@@ -3990,6 +5247,10 @@ offset = page->next; // 不自行猜测下一页偏移。
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+
 SurfaceObjectSelectionRequest request;
 request.generation = generation; request.objectIndex = objectIndex;
 request.isIsolated = true; request.targetViews.viewIds = {"primary-3d"};
@@ -4013,6 +5274,11 @@ if (a.status != SurfaceAdmissionStatus::Accepted) qWarning() << "Object rejected
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 const auto a = surface->SendRequest(SurfaceObjectPickModeRequest{true}, [](SurfaceDeterminationResult r) {
     if (r.status == SurfaceResultStatus::Failed) qWarning() << QString::fromStdString(r.message);
 });
@@ -4033,6 +5299,11 @@ const auto state = surface->GetState(); // 计算进度与显示准备分别读�
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 const auto a = surface->SendRequest(SurfaceVisibilityRequest{isVisible}, [](SurfaceDeterminationResult r) {
     if (r.status == SurfaceResultStatus::Failed) qWarning() << QString::fromStdString(r.message);
 });
@@ -4053,6 +5324,11 @@ const auto state = surface->GetState(); // 计算进度与显示准备分别读�
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 const auto a = surface->SendRequest(SurfaceStopRequest{targetRequestId}, [](SurfaceDeterminationResult r) {
     if (r.status == SurfaceResultStatus::Failed) qWarning() << QString::fromStdString(r.message);
 });
@@ -4073,6 +5349,11 @@ const auto state = surface->GetState(); // 计算进度与显示准备分别读�
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 const auto a = surface->SendRequest(SurfaceClearPreviewRequest{}, [](SurfaceDeterminationResult r) {
     if (r.status == SurfaceResultStatus::Failed) qWarning() << QString::fromStdString(r.message);
 });
@@ -4093,6 +5374,11 @@ const auto state = surface->GetState(); // 计算进度与显示准备分别读�
 出参与返回：同步返回 SurfaceDeterminationAdmission；Accepted 才等待完成，InvalidRequest/UnsupportedRoi/Busy/Stopping/Unavailable/UnsupportedMode 分别表示请求、区域支持、忙、停止、可用性或模式问题。非空回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/Cancelled/Failed 为成功、取消、失败；failureReason 的 InvalidSource/InvalidGeometry/UnsupportedScalar/ThresholdUnreliable/NoSurface/SourceChanged/BudgetExceeded/DisplayFailed/PublishFailed 分别说明源、几何、标量支持、阈值、空表面、源改变、预算、显示或发布问题。发布另看 isPublished。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 const auto a = surface->SendRequest(SurfaceClearRequest{}, [](SurfaceDeterminationResult r) {
     if (r.status == SurfaceResultStatus::Failed) qWarning() << QString::fromStdString(r.message);
 });
@@ -4113,6 +5399,11 @@ const auto state = surface->GetState(); // 计算进度与显示准备分别读�
 出参与返回：GetResultValidity() 同步返回 SurfaceRestoreState，Current/Historical/MissingInput/IncompatibleRecipe/MissingResult 分别表示当前、历史、缺输入、配方不兼容、缺结果。按 canDisplay/canRecompute/canMeasure 决定用途；GetState() 的显示失败单独报告，无回调。
 
 ```cpp
+#include "Host/SurfaceDeterminationHostFeature.h"
+#include "Host/SurfaceDeterminationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 // 能读历史结果不表示仍能作为当前测量输入。
 const auto validity = surface->GetResultValidity(generation);
 if (!validity.canMeasure) qWarning() << "Surface is not a current measurement input";
@@ -4143,6 +5434,12 @@ qInfo() << "Computation progress:" << state.progress01;
 出参与返回：AttachFeature() 同步返回 bool，无回调；真表示挂载完成，假表示依赖、重复挂载或拓扑失败。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include "Host/VtkAppHostSession.h"
+#include <QDebug>
+#include <memory>
+
 parts = std::make_shared<PartSegmentationHostFeature>();
 // 挂载失败停止后续操作，成功句柄由宿主持有。
 if (!session->AttachFeature(parts)) {
@@ -4166,6 +5463,10 @@ const auto state = parts->GetState();
 出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 PartSegmentationStartParams params;
 params.threshold = threshold; params.minPartVoxels = minVoxels;
 params.targetViews.viewIds = {"primary-3d", "slice-top-down"};
@@ -4192,6 +5493,10 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Segmentation rejec
 出参与返回：GetPartSetSnapshot() 同步返回 `shared_ptr<const PartSetSnapshot>`，空表示无可读结果，无回调。检查 isStale；对象体积为 physicalVolumeMM3，范围为含端点 voxelExtent。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog || catalog->isStale) return;
 for (const auto& part : catalog->parts) {
@@ -4214,6 +5519,10 @@ for (const auto& part : catalog->parts) {
 出参与返回：SetPartState() 同步返回 PartMutationResult，无回调。Succeeded 为成功，InvalidRequest/NotFound/StaleReference/RevisionConflict/Busy/Unavailable/DisplayFailed 为参数、对象、引用、版本、忙、可用性或显示失败。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartStatePatch patch;
@@ -4234,9 +5543,13 @@ if (result.status != PartMutationStatus::Succeeded) qWarning() << "Part state fa
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `sourcePoints/radiusMM` | `物理点集合、double` | 源物理坐标和 mm 半径；可指定切片平面。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4264,9 +5577,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `sourcePoints/radiusMM` | `物理点集合、double` | 源物理坐标和 mm 半径。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4294,9 +5611,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `seed` | `array<int,3>` | 源网格下标，不是物理点。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4323,9 +5644,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `minIslandVoxels` | `uint64_t` | 最小保留岛体素数。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4352,9 +5677,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `seeds/minimum/maximum` | `下标集合与 double` | 源网格种子和灰度区间；覆盖其他零件须明确 overwriteParts。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4382,9 +5711,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `seeds/barriers` | `vector<PartSplitSeed>、vector<PartBarrier>` | 子对象序号须连续 1..N；屏障是沿 axis 正向的邻接边。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4411,9 +5744,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `parts` | `vector<PartBindingRef>` | 当前结果中要合并的精确对象引用。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4440,9 +5777,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `isRedo` | `bool` | false 为撤销，仍须经过预览和确认。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4469,9 +5810,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | `expectedLabelMap/expectedCatalogRevision` | `DataRevisionRef、uint64_t` | 分别冻结当前标签和目录版本。 |
 | `isRedo` | `bool` | true 为重做，仍须经过预览和确认。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SendEditRequest 拒绝不保留回调；计算只产生 PreviewReady，不发布正式标签。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 PartEditRequest request;
@@ -4497,9 +5842,13 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Edit rejected";
 | --- | --- | --- |
 | `previewId` | `uint64_t` | GetEditPreview() 返回的当前候选 ID。 |
 
-出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。 SetEditCommit 可能在返回前回调，回调前已完成状态转换，允许再次请求或 Detach；失败会消费该 previewId，但不改正式数据或历史游标。
+出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。SetEditCommit 可能在返回前回调，回调前已完成状态转换，允许再次请求或 Detach；失败会消费该 previewId，但不改正式数据或历史游标。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto preview = parts->GetEditPreview();
 if (!preview) return;
 // 可能在返回前回调，先准备好回调依赖的界面状态。
@@ -4523,6 +5872,10 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Commit rejected";
 出参与返回：ClearEditPreview() 同步返回 PartMutationResult，无回调。Succeeded 为完成；InvalidRequest/NotFound/StaleReference/Busy/Unavailable 等表示 ID、版本或生命周期不符。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto preview = parts->GetEditPreview();
 if (!preview) return;
 // 丢弃临时候选，不改正式标签。
@@ -4544,6 +5897,11 @@ if (result.status != PartMutationStatus::Succeeded)
 出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 PartSegmentationRequest request;
 request.action = PartSegmentationAction::Stop;
 
@@ -4568,6 +5926,11 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Part action reject
 出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 PartSegmentationRequest request;
 request.action = PartSegmentationAction::SetVisibility;
 request.isVisible = isVisible;
@@ -4591,6 +5954,11 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Part action reject
 出参与返回：同步返回 PartSegmentationAdmission；Accepted 表示接纳，InvalidRequest/Busy/Stopping/Unavailable/RevisionConflict/BudgetExceeded 分别表示请求、忙、停止、可用性、版本或预算问题。非空完成回调在所属线程执行一次，短命令可能同步触发。结果 Succeeded/SucceededWithDisplayFailure/Cancelled/Failed/PreviewReady 分别表示成功、已提交但显示失败、取消、失败、候选待确认。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 PartSegmentationRequest request;
 request.action = PartSegmentationAction::Clear;
 
@@ -4614,6 +5982,10 @@ if (a.status != PartAdmissionStatus::Accepted) qWarning() << "Part action reject
 出参与返回：SetPreviousPart() 同步返回 PartMutationResult，无回调；Succeeded 成功，RevisionConflict 目录过期，Unavailable/Busy 为不可用或忙，其余状态沿用 SetPartState。
 
 ```cpp
+#include "Host/PartSegmentationHostFeature.h"
+#include "Host/PartSegmentationHostTypes.h"
+#include <QDebug>
+
 const auto catalog = parts->GetPartSetSnapshot();
 if (!catalog) return;
 const auto result = parts->SetPreviousPart(catalog->catalogRevision);
@@ -4643,6 +6015,12 @@ if (result.status != PartMutationStatus::Succeeded)
 出参与返回：AttachFeature() 同步返回 bool，没有完成回调，真表示完成，假表示配置或挂载条件不满足。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <memory>
+
 GapHostConfig config;
 config.inputViews.viewIds = {"primary-3d", "slice-top-down"};
 config.defaultStart.targetViews = config.inputViews;
@@ -4667,6 +6045,11 @@ if (!session->AttachFeature(gap)) qWarning() << "Gap attach failed";
 出参与返回：同步返回 GapAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 分别表示请求、忙、停止或可用性问题。拒绝不回调；接纳后所属线程回调一次，短命令可同步触发。GapHostResult.status 的 Succeeded/SucceededWithDisplayFailure/Failed/SourceChanged 分别表示成功、业务成功但显示失败、执行失败、来源改变，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 GapHostStartParams p;
 p.targetViews.viewIds = {"primary-3d"};
 p.surface.isoMode = GapIsoMode::AbsoluteValue;
@@ -4697,6 +6080,11 @@ if (a.status != GapAdmissionStatus::Accepted) qWarning() << "Gap rejected";
 出参与返回：同步返回 GapAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 分别表示请求、忙、停止或可用性问题。拒绝不回调；接纳后所属线程回调一次，短命令可同步触发。GapHostResult.status 的 Succeeded/SucceededWithDisplayFailure/Failed/SourceChanged 分别表示成功、业务成功但显示失败、执行失败、来源改变，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 GapHostStartParams p;
 p.targetViews.viewIds = {"primary-3d"};
 p.surface.isoMode = GapIsoMode::DataRangeRatio;
@@ -4726,6 +6114,10 @@ if (a.status != GapAdmissionStatus::Accepted) qWarning() << "Gap rejected";
 出参与返回：同步返回 GapAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 分别表示请求、忙、停止或可用性问题。拒绝不回调；接纳后所属线程回调一次，短命令可同步触发。GapHostResult.status 的 Succeeded/SucceededWithDisplayFailure/Failed/SourceChanged 分别表示成功、业务成功但显示失败、执行失败、来源改变，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+
 GapHostStartParams p = evaluationParams;
 p.parentResult = resultSet; p.evaluationRoi = roiRevision;
 p.isEvaluationOnly = true;
@@ -4751,6 +6143,10 @@ if (a.status != GapAdmissionStatus::Accepted) qWarning() << "Evaluation rejected
 出参与返回：GetResultReader() 同步返回 `shared_ptr<const GapResultReader>`，空为不可用；GetObjects() 返回 GapObjectPage，None 为成功，Unavailable/InvalidRequest/Cancelled/Failed 为数据、参数、取消或读取问题。没有回调；只读 reader 可用于后台，按 next 续读。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+
 // 固定同一代正式结果，不用当前页面替换结果身份。
 const auto reader = gap->GetResultReader(resultSet);
 if (!reader) return;
@@ -4777,6 +6173,9 @@ for (const auto& object : page.objects) {
 出参与返回：GetGeometry() 同步返回 GapGeometryChunk，无回调。error=None 为成功，Unavailable 表示后备几何不可用；CreateObjectReader() 只保留目录，其几何读取也返回 Unavailable。用 nextPoint/nextTriangle 续读。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+
 const auto reader = gap->GetResultReader(resultSet);
 if (!reader) return;
 const auto chunk = reader->GetGeometry(objectId, pointOffset, triangleOffset, 1024);
@@ -4799,6 +6198,10 @@ pointOffset = chunk.nextPoint; triangleOffset = chunk.nextTriangle;
 出参与返回：同步返回 GapAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 分别表示请求、忙、停止或可用性问题。拒绝不回调；接纳后所属线程回调一次，短命令可同步触发。GapHostResult.status 的 Succeeded/SucceededWithDisplayFailure/Failed/SourceChanged 分别表示成功、业务成功但显示失败、执行失败、来源改变，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+
 GapHostRequest request;
 request.action = GapHostAction::SetDisplay;
 request.displayResult = resultSet;
@@ -4825,6 +6228,10 @@ if (a.status != GapAdmissionStatus::Accepted) qWarning() << "Display rejected";
 出参与返回：同步返回 GapAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 分别表示请求、忙、停止或可用性问题。拒绝不回调；接纳后所属线程回调一次，短命令可同步触发。GapHostResult.status 的 Succeeded/SucceededWithDisplayFailure/Failed/SourceChanged 分别表示成功、业务成功但显示失败、执行失败、来源改变，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+
 GapHostRequest request;
 request.action = GapHostAction::SelectObject;
 request.selection = GapObjectSelection{resultSet, objectId, true};
@@ -4848,6 +6255,11 @@ if (a.status != GapAdmissionStatus::Accepted) qWarning() << "Selection rejected"
 出参与返回：同步返回 GapAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 分别表示请求、忙、停止或可用性问题。拒绝不回调；接纳后所属线程回调一次，短命令可同步触发。GapHostResult.status 的 Succeeded/SucceededWithDisplayFailure/Failed/SourceChanged 分别表示成功、业务成功但显示失败、执行失败、来源改变，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 GapHostRequest request;
 request.action = GapHostAction::SetObjectPicking;
 request.isObjectPickingEnabled = true;
@@ -4871,6 +6283,11 @@ if (a.status != GapAdmissionStatus::Accepted) qWarning() << "Gap action rejected
 出参与返回：同步返回 GapAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 分别表示请求、忙、停止或可用性问题。拒绝不回调；接纳后所属线程回调一次，短命令可同步触发。GapHostResult.status 的 Succeeded/SucceededWithDisplayFailure/Failed/SourceChanged 分别表示成功、业务成功但显示失败、执行失败、来源改变，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 GapHostRequest request;
 request.action = GapHostAction::Overlay;
 
@@ -4894,6 +6311,11 @@ if (a.status != GapAdmissionStatus::Accepted) qWarning() << "Gap action rejected
 出参与返回：同步返回 GapAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 分别表示请求、忙、停止或可用性问题。拒绝不回调；接纳后所属线程回调一次，短命令可同步触发。GapHostResult.status 的 Succeeded/SucceededWithDisplayFailure/Failed/SourceChanged 分别表示成功、业务成功但显示失败、执行失败、来源改变，诊断在 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h>
+#include <MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 GapHostRequest request;
 request.action = GapHostAction::Exit;
 
@@ -4926,6 +6348,12 @@ if (a.status != GapAdmissionStatus::Accepted) qWarning() << "Gap action rejected
 出参与返回：AttachFeature() 同步返回 bool，没有完成回调；真为完成，假为环境、依赖或拓扑条件不满足。
 
 ```cpp
+#include "Host/VtkAppHostSession.h"
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+#include <memory>
+
 wall = std::make_shared<WallThicknessHostFeature>();
 // 挂载失败停止后续操作，成功句柄由宿主持有。
 if (!session->AttachFeature(wall)) {
@@ -4952,6 +6380,11 @@ const auto state = wall->GetState();
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 ThicknessStartRequest request;
 request.input = input; // input 的三份修订已核实同源。
 request.params = params;
@@ -4979,6 +6412,11 @@ if (a.status != ThicknessAdmissionStatus::Accepted) qWarning() << "Wall rejected
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+#include <QString>
+
 ThicknessStartRequest request;
 request.input = input; // input 的三份修订已核实同源。
 request.params = params;
@@ -5002,6 +6440,10 @@ if (a.status != ThicknessAdmissionStatus::Accepted) qWarning() << "Wall rejected
 出参与返回：GetResult() 同步返回 `optional<ThicknessSnapshot>`，空为结果不可读，无回调。statistics 的 minimum/maximum/mean/quantiles 可为空；样本 validity 区分有效、截断支持、搜索上限、无效材料路径等原因。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 const auto snapshot = wall->GetResult(resultRevision);
 if (!snapshot) return;
 qInfo() << "Coverage:" << snapshot->statistics.coverage;
@@ -5023,6 +6465,10 @@ else qWarning() << "No valid thickness mean"; // 不用 0 代替缺失值。
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 ThicknessEvaluation evaluation;
 evaluation.lower = lower; evaluation.upper = upper;
 evaluation.histogramRange = histogramRange;
@@ -5048,6 +6494,10 @@ if (a.status != ThicknessAdmissionStatus::Accepted) qWarning() << "Evaluation re
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 ThicknessDisplay display;
 display.targetViews.viewIds = {"primary-3d"};
 display.mode = ThicknessDisplayMode::Continuous; display.range = displayRange;
@@ -5074,6 +6524,10 @@ if (a.status != ThicknessAdmissionStatus::Accepted) qWarning() << "Display rejec
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 ThicknessDisplay display;
 display.targetViews.viewIds = {"primary-3d"};
 display.mode = ThicknessDisplayMode::Tolerance; display.range = displayRange;
@@ -5099,6 +6553,10 @@ if (a.status != ThicknessAdmissionStatus::Accepted) qWarning() << "Display rejec
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 ThicknessActivationRequest request;
 request.resultRevision = resultRevision;
 // 计算终态与显示准备分开检查。
@@ -5121,6 +6579,10 @@ if (a.status != ThicknessAdmissionStatus::Accepted) qWarning() << "Activation re
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 ThicknessSampleRequest request;
 request.resultRevision = resultRevision;
 request.sampleIndex = sampleIndex;
@@ -5144,6 +6606,10 @@ if (a.status != ThicknessAdmissionStatus::Accepted) qWarning() << "Sample reject
 出参与返回：GetThicknessValue() 同步返回 `optional<double>`，有值为该位置可用厚度，无值为缺少有效支持或结果不可读，没有回调。最近角点须有效，不能把空值当作零。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 const auto value = wall->GetThicknessValue(resultRevision, modelPoint);
 if (!value) {
     qWarning() << "No valid thickness support";
@@ -5165,6 +6631,10 @@ qInfo() << "Thickness:" << *value; // 单位跟随 ThicknessInput.unit。
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 // 计算终态与显示准备分开检查。
 const auto a = wall->SendRequest(ThicknessCancelRequest{targetRequestId}, [](const ThicknessResult& r) {
     qInfo() << "Wall terminal:" << static_cast<int>(r.status);
@@ -5186,6 +6656,10 @@ const auto state = wall->GetState();
 出参与返回：同步返回 ThicknessAdmission；Accepted 接纳，InvalidRequest/Busy/Stopping/Unavailable 为请求、忙、停止或可用性问题。拒绝不回调；所属线程完成回调一次，短命令可同步触发，可查询、再次请求或取消。ThicknessStatus 的 Succeeded/InvalidInput/IncompleteBoundary/NoValidSamples/Cancelled/DeadlineExceeded/BudgetExceeded/StaleInput/DisplayFailed 分别表示成功、输入、边界、有效样本、取消、超时、预算、过期或显示问题。
 
 ```cpp
+#include "Host/WallThicknessHostFeature.h"
+#include "Host/WallThicknessHostTypes.h"
+#include <QDebug>
+
 // 计算终态与显示准备分开检查。
 const auto a = wall->SendRequest(ThicknessClearRequest{}, [](const ThicknessResult& r) {
     qInfo() << "Wall terminal:" << static_cast<int>(r.status);
@@ -5215,6 +6689,12 @@ const auto state = wall->GetState();
 出参与返回：AttachFeature() 同步返回 bool，无完成回调；真为完成，假为环境或拓扑条件不满足。
 
 ```cpp
+#include "Host/ModelRotationHostFeature.h"
+#include "Host/ModelRotationHostTypes.h"
+#include "Host/VtkAppHostSession.h"
+#include <QDebug>
+#include <memory>
+
 ModelRotationConfig config;
 config.targetViews.viewIds = {"primary-3d", "slice-top-down"};
 rotation = std::make_shared<ModelRotationHostFeature>(config);
@@ -5236,6 +6716,10 @@ const auto state = rotation->GetState();
 出参与返回：同步返回 ModelRotationAdmission：Accepted 接纳，InvalidRequest/Unavailable 为参数或可用性问题。拒绝不回调；所属线程回调一次，旋转和撤销成功在帧提交后兑现，失败或短命令可同步完成。结果 Succeeded/Cancelled/Invalidated 为成功、取消、失效，Detached/Idle 为未挂载/空闲；Pending/Dragging 仍未完成。
 
 ```cpp
+#include "Host/ModelRotationHostFeature.h"
+#include "Host/ModelRotationHostTypes.h"
+#include <QDebug>
+
 ModelRotationRequest request;
 request.action = ModelRotationAction::SetEnabled;
 request.isEnabled = true;
@@ -5260,6 +6744,10 @@ if (a.status != ModelRotationAdmissionStatus::Accepted) qWarning() << "Enable re
 出参与返回：同步返回 ModelRotationAdmission：Accepted 接纳，InvalidRequest/Unavailable 为参数或可用性问题。拒绝不回调；所属线程回调一次，旋转和撤销成功在帧提交后兑现，失败或短命令可同步完成。结果 Succeeded/Cancelled/Invalidated 为成功、取消、失效，Detached/Idle 为未挂载/空闲；Pending/Dragging 仍未完成。
 
 ```cpp
+#include "Host/ModelRotationHostFeature.h"
+#include "Host/ModelRotationHostTypes.h"
+#include <QDebug>
+
 ModelRotationRequest request;
 request.action = ModelRotationAction::Rotate;
 request.worldAxis = axis; request.angleDeg = angleDeg;
@@ -5284,6 +6772,10 @@ if (a.status != ModelRotationAdmissionStatus::Accepted) qWarning() << "Rotation 
 出参与返回：同步返回 ModelRotationAdmission：Accepted 接纳，InvalidRequest/Unavailable 为参数或可用性问题。拒绝不回调；所属线程回调一次，旋转和撤销成功在帧提交后兑现，失败或短命令可同步完成。结果 Succeeded/Cancelled/Invalidated 为成功、取消、失效，Detached/Idle 为未挂载/空闲；Pending/Dragging 仍未完成。
 
 ```cpp
+#include "Host/ModelRotationHostFeature.h"
+#include "Host/ModelRotationHostTypes.h"
+#include <QDebug>
+
 ModelRotationRequest request;
 request.action = ModelRotationAction::Cancel;
 // 成功需要满足本动作的帧提交规则。
@@ -5306,6 +6798,10 @@ if (a.status != ModelRotationAdmissionStatus::Accepted) qWarning() << "Rotation 
 出参与返回：同步返回 ModelRotationAdmission：Accepted 接纳，InvalidRequest/Unavailable 为参数或可用性问题。拒绝不回调；所属线程回调一次，旋转和撤销成功在帧提交后兑现，失败或短命令可同步完成。结果 Succeeded/Cancelled/Invalidated 为成功、取消、失效，Detached/Idle 为未挂载/空闲；Pending/Dragging 仍未完成。
 
 ```cpp
+#include "Host/ModelRotationHostFeature.h"
+#include "Host/ModelRotationHostTypes.h"
+#include <QDebug>
+
 ModelRotationRequest request;
 request.action = ModelRotationAction::Undo;
 // 成功需要满足本动作的帧提交规则。
@@ -5337,6 +6833,12 @@ if (a.status != ModelRotationAdmissionStatus::Accepted) qWarning() << "Rotation 
 出参与返回：AttachFeature() 同步返回 bool，无回调。真为挂载完成，假为依赖或拓扑失败；正常析构前必须成功 Detach，返回 false 时仍保留对象并重试。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <MVVCVTK/API/Host/VtkAppHostSession.h>
+#include <QDebug>
+#include <memory>
+
 AlignmentConfig config;
 config.targetViews.viewIds = {"primary-3d"};
 alignment = std::make_shared<MetrologyAlignmentHostFeature>(config);
@@ -5360,6 +6862,12 @@ STL 不携带单位，需要宿主明确声明文件单位和目标单位。
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QByteArray>
+#include <QDebug>
+#include <QString>
+
 AlignmentReferenceRequest reference;
 reference.filePath = path.toUtf8().toStdString();
 reference.frameId = frameId; reference.coordinateFrame = "RAS";
@@ -5375,7 +6883,7 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Reference rej
 
 ### 14.3 顺序平面对齐配方
 
-按配方的顺序基准平面约束对齐。 宿主必须提供经业务确认的几何、选区和名义约束，不由指南猜测基准。
+按配方的顺序基准平面约束对齐。宿主必须提供经业务确认的几何、选区和名义约束，不由指南猜测基准。
 
 入参：
 
@@ -5388,6 +6896,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Reference rej
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentRecipe recipe = configuredRecipe;
 recipe.method = AlignmentMethod::SequentialPlanes;
 AlignmentRequest request;
@@ -5401,7 +6913,7 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Save rejected
 
 ### 14.4 平面与双孔对齐配方
 
-按明确平面和双孔几何约束对齐。 宿主必须提供经业务确认的几何、选区和名义约束，不由指南猜测基准。
+按明确平面和双孔几何约束对齐。宿主必须提供经业务确认的几何、选区和名义约束，不由指南猜测基准。
 
 入参：
 
@@ -5414,6 +6926,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Save rejected
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentRecipe recipe = configuredRecipe;
 recipe.method = AlignmentMethod::PlaneTwoHoles;
 AlignmentRequest request;
@@ -5427,7 +6943,7 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Save rejected
 
 ### 14.5 参考点系统对齐配方
 
-通过配方约束构造参考点系统。 宿主必须提供经业务确认的几何、选区和名义约束，不由指南猜测基准。
+通过配方约束构造参考点系统。宿主必须提供经业务确认的几何、选区和名义约束，不由指南猜测基准。
 
 入参：
 
@@ -5440,6 +6956,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Save rejected
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentRecipe recipe = configuredRecipe;
 recipe.method = AlignmentMethod::Rps;
 AlignmentRequest request;
@@ -5453,7 +6973,7 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Save rejected
 
 ### 14.6 受约束最佳拟合配方
 
-使用基准和对应点或表面拟合优化剩余自由度。 宿主必须提供经业务确认的几何、选区和名义约束，不由指南猜测基准。
+使用基准和对应点或表面拟合优化剩余自由度。宿主必须提供经业务确认的几何、选区和名义约束，不由指南猜测基准。
 
 入参：
 
@@ -5466,6 +6986,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Save rejected
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentRecipe recipe = configuredRecipe;
 recipe.method = AlignmentMethod::ConstrainedBestFit;
 AlignmentRequest request;
@@ -5492,6 +7016,11 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Save rejected
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 AlignmentRequest request;
 request.action = AlignmentAction::Start;
 request.recipeRef = recipeRevision; request.input = input;
@@ -5516,6 +7045,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Solve rejecte
 出参与返回：GetResult() 同步返回 `optional<AlignmentSnapshot>`，空表示结果不可读，没有回调。isCurrent 表示捕获时是否仍当前，diagnostics 给出求解质量；不能只用有值判断业务合格。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 // 历史结果可读性和当前输入适用性分开。
 const auto snapshot = alignment->GetResult(resultRevision);
 if (!snapshot) {
@@ -5541,6 +7074,10 @@ const auto transformRevision = snapshot->transform;
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentDeviationRequest p;
 p.alignmentResult = resultRevision;
 p.metric = AlignmentDeviationMetric::UnsignedDistance;
@@ -5569,6 +7106,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Deviation rej
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentDeviationRequest p;
 p.alignmentResult = resultRevision;
 p.metric = AlignmentDeviationMetric::NominalNormalProjection;
@@ -5597,6 +7138,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Deviation rej
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 InspectionPlan plan = configuredPlan;
 plan.alignmentResult = resultRevision;
 AlignmentRequest request; request.action = AlignmentAction::Inspect;
@@ -5610,7 +7155,7 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Inspection re
 
 ### 14.12 按灰度区间计算体积
 
-直接比较存储值闭区间，不应用 slope/intercept。 体素体积不依赖先完成对齐。
+直接比较存储值闭区间，不应用 slope/intercept。体素体积不依赖先完成对齐。
 
 入参：
 
@@ -5623,6 +7168,11 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Inspection re
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/VoxelVolume.h>
+#include <QDebug>
+
 VoxelVolumeRequest p; p.id = "material"; p.source = sourceRevision;
 p.method = VoxelVolumeMethod::StoredValueRange;
 p.storedValueRange = storedRange;
@@ -5637,7 +7187,7 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Volume reject
 
 ### 14.13 按标签计算体积
 
-整数标签精确比较，可明确选择 0；负标签记为不可观测。 体素体积不依赖先完成对齐。
+整数标签精确比较，可明确选择 0；负标签记为不可观测。体素体积不依赖先完成对齐。
 
 入参：
 
@@ -5650,6 +7200,11 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Volume reject
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/VoxelVolume.h>
+#include <QDebug>
+
 VoxelVolumeRequest p; p.id = "material"; p.source = sourceRevision;
 p.method = VoxelVolumeMethod::Labels;
 p.labels = selectedLabels;
@@ -5676,6 +7231,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Volume reject
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentDeviationDisplay display;
 display.result = deviationRevision;
 display.rangeMode = AlignmentRangeMode::Manual; display.range = displayRange;
@@ -5701,6 +7260,10 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Display rejec
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentSceneDisplay display;
 display.anchorAlignment = anchorResult;
 display.parts = sceneParts;
@@ -5726,6 +7289,11 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Scene rejecte
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 AlignmentRequest request;
 request.action = AlignmentAction::Activate;
 request.resultRef = resultRevision;
@@ -5750,6 +7318,11 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Alignment act
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 AlignmentRequest request;
 request.action = AlignmentAction::Deactivate;
 request.resultRef = resultRevision;
@@ -5774,6 +7347,11 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Alignment act
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 AlignmentRequest request;
 request.action = AlignmentAction::SetVisibility;
 request.resultRef = resultRevision;
@@ -5798,6 +7376,11 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Alignment act
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+#include <QString>
+
 AlignmentRequest request;
 request.action = AlignmentAction::ApplyModelPose;
 request.resultRef = resultRevision;
@@ -5823,6 +7406,12 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Alignment act
 出参与返回：GetReport() 同步返回 MetrologyReportResult，没有完成回调。FullyDetermined 且 report 非空表示捕获成功，不表示所有尺寸合格；InvalidInput/Unavailable/BudgetExceeded 等为输入、可用性或预算失败，读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyReport.h>
+#include <QDebug>
+#include <QString>
+
 MetrologyReportRequest request;
 request.id = reportId; request.title = reportTitle;
 request.alignments = {resultRevision};
@@ -5848,6 +7437,10 @@ if (result.status != AlignmentStatus::FullyDetermined || !result.report)
 出参与返回：WriteMetrologyReportFile() 同步返回 MetrologyReportFileResult，不回调 Host。只有 isCommitted=true 表示文件已提交；write.status 的 InvalidInput/BudgetExceeded/Cancelled/IoError/AlreadyExists/ResourceExhausted 为输入、预算、取消、I/O、目标存在或资源失败。流式输出另有 WriteMetrologyReport()。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyReport.h>
+#include <QDebug>
+#include <QString>
+
 MetrologyReportWriteOptions options;
 options.format = MetrologyReportFormat::Json;
 const auto result = WriteMetrologyReportFile(*report, utf8Path, options);
@@ -5870,6 +7463,10 @@ if (!result.isCommitted) {
 出参与返回：同步返回 AlignmentAdmission；Accepted 接纳，InvalidRequest/Busy/Unavailable 为请求、忙或可用性问题。非空回调在所属线程执行一次，可能同步触发，允许查询和再次请求。FullyDetermined 表示本次求解或发布成功；Underconstrained/Degenerate/Conflicting/Ambiguous/NotConverged 为欠约束、退化、冲突、歧义、不收敛，Cancelled/Stale/InvalidInput/Unavailable 为取消、过期输入、输入无效、不可用；DeadlineExceeded/BudgetExceeded/Unsupported/IoError/ResourceExhausted/InternalError 为截止时间、预算、不支持、I/O、资源或内部失败，诊断读 message。
 
 ```cpp
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostFeature.h>
+#include <MVVCVTK/API/Features/MetrologyAlignment/Host/MetrologyAlignmentHostTypes.h>
+#include <QDebug>
+
 AlignmentRequest request;
 request.action = AlignmentAction::Cancel;
 request.targetRequestId = targetRequestId;
@@ -5902,6 +7499,12 @@ if (a.status != AlignmentAdmissionStatus::Accepted) qWarning() << "Cancel reject
 出参与返回：AttachFeature() 同步返回 bool，没有完成回调；真表示挂载完成，假表示依赖或拓扑失败。
 
 ```cpp
+#include "Host/ArtifactReductionHostFeature.h"
+#include "Host/ArtifactReductionHostTypes.h"
+#include "Host/VtkAppHostSession.h"
+#include <QDebug>
+#include <memory>
+
 artifact = std::make_shared<ArtifactReductionHostFeature>();
 // 挂载失败停止后续操作，成功句柄由宿主持有。
 if (!session->AttachFeature(artifact)) {
@@ -5926,6 +7529,10 @@ const auto state = artifact->GetState();
 出参与返回：同步返回 ArtifactAdmission，没有完成回调。error=None 表示接纳或本次短动作成功；WrongThread/Busy/InvalidRequest/SourceChanged/TooLarge/TimedOut/CommitFailed 分别表示线程、忙、参数、来源、资源、超时或发布问题。后台结果由 Host 更新消费，再从 GetState().status/error 读取。
 
 ```cpp
+#include "Host/ArtifactReductionHostFeature.h"
+#include "Host/ArtifactReductionHostTypes.h"
+#include <QDebug>
+
 ArtifactRequest p;
 p.source = sourceRevision;
 ArtifactDiffusionParams diffusion;
@@ -5953,6 +7560,10 @@ if (a.error != ArtifactError::None) qWarning() << "Diffusion rejected";
 出参与返回：同步返回 ArtifactAdmission，没有完成回调。error=None 表示接纳或本次短动作成功；WrongThread/Busy/InvalidRequest/SourceChanged/TooLarge/TimedOut/CommitFailed 分别表示线程、忙、参数、来源、资源、超时或发布问题。后台结果由 Host 更新消费，再从 GetState().status/error 读取。
 
 ```cpp
+#include "Host/ArtifactReductionHostFeature.h"
+#include "Host/ArtifactReductionHostTypes.h"
+#include <QDebug>
+
 ArtifactRingParams ring;
 ring.axis = axis; ring.centerIndex = centerIndex;
 ring.threshMin = grayMin; ring.threshMax = grayMax; ring.threshold = ringThreshold;
@@ -5980,6 +7591,10 @@ if (a.error != ArtifactError::None) qWarning() << "Ring correction rejected";
 出参与返回：同步返回 ArtifactAdmission，没有完成回调。error=None 表示接纳或本次短动作成功；WrongThread/Busy/InvalidRequest/SourceChanged/TooLarge/TimedOut/CommitFailed 分别表示线程、忙、参数、来源、资源、超时或发布问题。后台结果由 Host 更新消费，再从 GetState().status/error 读取。
 
 ```cpp
+#include "Host/ArtifactReductionHostFeature.h"
+#include "Host/ArtifactReductionHostTypes.h"
+#include <QDebug>
+
 ArtifactRingParams ring;
 ring.axis = axis; ring.centerIndex = centerIndex;
 ring.threshMin = grayMin; ring.threshMax = grayMax; ring.threshold = ringThreshold;
@@ -6005,6 +7620,10 @@ if (a.error != ArtifactError::None) qWarning() << "Ring correction rejected";
 出参与返回：GetState() 同步返回 ArtifactState，无回调。Running/Cancelling/Ready/Publishing/Failed 为计算、取消、可检查、发布或失败；错误读 error。GetCandidateSamples() 返回可选样本对集合，空表示状态、参数或数据不符；不发布候选。
 
 ```cpp
+#include "Host/ArtifactReductionHostFeature.h"
+#include "Host/ArtifactReductionHostTypes.h"
+#include <QDebug>
+
 const auto state = artifact->GetState();
 if (state.status == ArtifactStatus::Ready) {
     const auto samples = artifact->GetCandidateSamples(state.requestId, 0, 1, 256);
@@ -6028,6 +7647,10 @@ if (state.status == ArtifactStatus::Ready) {
 出参与返回：同步返回 ArtifactAdmission，没有完成回调。error=None 表示接纳或本次短动作成功；WrongThread/Busy/InvalidRequest/SourceChanged/TooLarge/TimedOut/CommitFailed 分别表示线程、忙、参数、来源、资源、超时或发布问题。后台结果由 Host 更新消费，再从 GetState().status/error 读取。
 
 ```cpp
+#include "Host/ArtifactReductionHostFeature.h"
+#include "Host/ArtifactReductionHostTypes.h"
+#include <QDebug>
+
 const auto state = artifact->GetState();
 if (state.status != ArtifactStatus::Ready) return;
 ArtifactHostRequest request;
@@ -6050,6 +7673,10 @@ const auto published = artifact->GetState().correctedVolume; // 有值后再选�
 出参与返回：同步返回 ArtifactAdmission，没有完成回调。error=None 表示接纳或本次短动作成功；WrongThread/Busy/InvalidRequest/SourceChanged/TooLarge/TimedOut/CommitFailed 分别表示线程、忙、参数、来源、资源、超时或发布问题。后台结果由 Host 更新消费，再从 GetState().status/error 读取。
 
 ```cpp
+#include "Host/ArtifactReductionHostFeature.h"
+#include "Host/ArtifactReductionHostTypes.h"
+#include <QDebug>
+
 ArtifactHostRequest request;
 request.action = ArtifactAction::Cancel;
 const auto a = artifact->SendRequest(request);
@@ -6070,6 +7697,10 @@ const auto state = artifact->GetState(); // 后续生命周期仍由 Host 更新
 出参与返回：同步返回 ArtifactAdmission，没有完成回调。error=None 表示接纳或本次短动作成功；WrongThread/Busy/InvalidRequest/SourceChanged/TooLarge/TimedOut/CommitFailed 分别表示线程、忙、参数、来源、资源、超时或发布问题。后台结果由 Host 更新消费，再从 GetState().status/error 读取。
 
 ```cpp
+#include "Host/ArtifactReductionHostFeature.h"
+#include "Host/ArtifactReductionHostTypes.h"
+#include <QDebug>
+
 ArtifactHostRequest request;
 request.action = ArtifactAction::Discard;
 const auto a = artifact->SendRequest(request);
