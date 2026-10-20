@@ -675,6 +675,30 @@ int GetIsoBuilderFailCount()
         "Iso builder returns a materialized producer-free CPU product")
         ? 0 : 1;
 
+    if (buildResult.product && buildResult.product->surface) {
+        // BuildIsoImage 在网格边上的零交点由 4.75 / (4.75 + 3.25) 线性插值确定。
+        const std::array<double, 6> expected{1.59375, 9.40625, 1.59375, 9.40625, 1.59375, 9.40625};
+        double bounds[6]{};
+        buildResult.product->surface->GetCellsBounds(bounds);
+        const bool isCorrect = std::equal(expected.begin(), expected.end(), bounds);
+        auto changed = vtkSmartPointer<vtkPolyData>::New();
+        changed->DeepCopy(buildResult.product->surface);
+        changed->ComputeCellsBounds();
+        for (vtkIdType index = 0; index < changed->GetNumberOfPoints(); ++index) {
+            double point[3];
+            changed->GetPoint(index, point);
+            point[0] += 2.0;
+            changed->GetPoints()->SetPoint(index, point);
+        }
+        changed->GetPoints()->Modified();
+        changed->GetCellsBounds(bounds);
+        auto translated = expected;
+        translated[0] += 2.0; translated[1] += 2.0;
+        failureCount += GetCaseResult(isCorrect
+            && std::equal(translated.begin(), translated.end(), bounds),
+            "Iso cell bounds preserve analytic grid intersections and invalidate after private geometry changes") ? 0 : 1;
+    }
+
     auto invalidMask = vtkSmartPointer<vtkImageData>::New();
     invalidMask->SetDimensions(3, 3, 3);
     invalidMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);

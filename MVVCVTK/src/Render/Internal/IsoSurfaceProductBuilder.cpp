@@ -431,6 +431,22 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         }
         auto surface = vtkSmartPointer<vtkPolyData>::New();
         surface->ShallowCopy(output);
+        // ResetCamera 的 mapper 读取单元范围；在私有候选上完成惰性拓扑扫描，
+        // 缓存仍由 VTK 按 points/cells/ghost 的 GetMeshMTime 正常失效。
+        if (stopToken.GetIsStopped()) {
+            return GetFailure(RenderProductFailure::Cancelled, "The iso bounds preparation was cancelled.");
+        }
+        try {
+            surface->ComputeCellsBounds();
+        }
+        catch (...) {
+            // 原生计算可能先更新缓存时间再分配内存；丢弃此壳，保留未预热的
+            // 私有 output，避免半成品缓存，也不因可选预热拒绝原有显示路径。
+            surface = output;
+        }
+        if (stopToken.GetIsStopped()) {
+            return GetFailure(RenderProductFailure::Cancelled, "The iso bounds preparation was cancelled.");
+        }
         const std::uint64_t actualBytes = GetDataBytes(surface);
         if (!stopToken.SetActualBytes(actualBytes)) {
             return GetFailure(
