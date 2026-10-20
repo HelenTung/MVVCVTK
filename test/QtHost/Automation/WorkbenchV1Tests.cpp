@@ -15,12 +15,40 @@
 #include <QSplitter>
 #include <QSettings>
 #include <QApplication>
+#include <QStyle>
+#include <QStyleOptionComboBox>
+#include <QAbstractItemModel>
 #include <stdexcept>
 #include <cmath>
 namespace Manual {
-namespace { void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);} }
+namespace {
+void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+void CheckNavigationWidth(TestWindow& window)
+{
+    const auto originalSize=window.size();
+    auto* groups=window.findChild<QComboBox*>("workspaceTabs");auto* modules=window.findChild<QComboBox*>("featureTabs");
+    for(const auto& size:{QSize(1560,960),QSize(1180,820),QSize(1000,720)}) {
+        window.resize(size);
+        for(int group=0;group<groups->count();++group) {
+            if(!groups->model()->flags(groups->model()->index(group,0)).testFlag(Qt::ItemIsEnabled))continue;
+            groups->setCurrentIndex(group);
+            for(int module=0;module<modules->count();++module) {
+                modules->setCurrentIndex(module);QCoreApplication::processEvents();
+                for(auto* combo:{groups,modules}) {
+                    QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
+                    const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
+                    Require(combo->fontMetrics().horizontalAdvance(combo->currentText())<=field.width(),"every current category and module name fits its actual text field at all three window sizes");
+                    Require(window.rect().contains(QRect(combo->mapTo(&window,QPoint()),combo->size())),"navigation selectors remain inside the minimum-width window");
+                }
+            }
+        }
+    }
+    window.resize(originalSize);window.GetWorkflow().onNavigate("Data","Load",{});QCoreApplication::processEvents();
+}
+}
 void CheckWorkbenchV1(TestWindow& window)
 {
+    CheckNavigationWidth(window);
     auto* split=window.findChild<QSplitter*>("workbenchSplit");
     auto* objects=window.findChild<QToolButton*>("toggleObjectColumn");
     auto* parameters=window.findChild<QToolButton*>("toggleParameterColumn");

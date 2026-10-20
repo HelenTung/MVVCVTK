@@ -41,9 +41,35 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QRegularExpression>
+#include <QResizeEvent>
 #include <algorithm>
 #include <climits>
 namespace Manual {
+class InputIdentityLabel final : public QLabel {
+public:
+    explicit InputIdentityLabel(QWidget* parent) : QLabel(parent)
+    {
+        setTextFormat(Qt::PlainText);setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+    }
+    void SetIdentity(const QString& text,const QString& details={})
+    {
+        m_fullText=text;setAccessibleName(text);setToolTip(text+(details.isEmpty()?QString():"\n"+details));SetDisplayText();
+    }
+protected:
+    void resizeEvent(QResizeEvent* event) override { QLabel::resizeEvent(event);SetDisplayText(); }
+    void changeEvent(QEvent* event) override
+    {
+        QLabel::changeEvent(event);
+        if(event->type()==QEvent::FontChange || event->type()==QEvent::StyleChange)SetDisplayText();
+    }
+private:
+    QString m_fullText;
+    void SetDisplayText()
+    {
+        const auto display=fontMetrics().elidedText(m_fullText,Qt::ElideRight,contentsRect().width());
+        if(text()!=display)QLabel::setText(display);
+    }
+};
 TestWindow::TestWindow(std::uint64_t budgetMiB)
 {
     m_workflow.resources = GetTestResources(budgetMiB);
@@ -104,21 +130,22 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_objectToggle->setCheckable(true); m_objectToggle->setChecked(true); m_objectToggle->setFocusPolicy(Qt::StrongFocus);
     m_objectToggle->setShortcut(QKeySequence("Ctrl+Shift+L")); navigationLayout->addWidget(m_objectToggle);
     m_workspaceTabs = new QComboBox(navigation); m_workspaceTabs->setObjectName("workspaceTabs"); m_workspaceTabs->setAccessibleName("工作分类");
+    m_workspaceTabs->setSizeAdjustPolicy(QComboBox::AdjustToContents);m_workspaceTabs->setSizePolicy(QSizePolicy::Minimum,QSizePolicy::Fixed);
     for (const auto& title : {"数据与视图", "处理与建模", "检测与分析"}) m_workspaceTabs->addItem(title);
     navigationLayout->addWidget(m_workspaceTabs);
     m_featureTabs = new QComboBox(navigation); m_featureTabs->setObjectName("featureTabs"); m_featureTabs->setAccessibleName("当前模块");
-    m_featureTabs->setMinimumContentsLength(6); m_featureTabs->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_featureTabs->setSizeAdjustPolicy(QComboBox::AdjustToContents);m_featureTabs->setSizePolicy(QSizePolicy::Minimum,QSizePolicy::Fixed);
     navigationLayout->addWidget(m_featureTabs);
     auto* inputStrip=new QWidget(navigation);inputStrip->setObjectName("workbenchInput");
     auto* inputLayout=new QHBoxLayout(inputStrip);inputLayout->setContentsMargins(6,0,0,0);inputLayout->setSpacing(6);
-    m_inputIdentity=new QLabel("当前输入 · 尚未加载体数据",inputStrip);m_inputIdentity->setObjectName("currentInputIdentity");
-    m_inputIdentity->setTextFormat(Qt::PlainText);m_inputIdentity->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);inputLayout->addWidget(m_inputIdentity,1);
+    m_inputIdentity=new InputIdentityLabel(inputStrip);m_inputIdentity->setObjectName("currentInputIdentity");
+    m_inputIdentity->SetIdentity("当前输入 · 尚未加载体数据");inputLayout->addWidget(m_inputIdentity,1);
     auto* inputDetails=new QToolButton(inputStrip);inputDetails->setText("输入详情");inputDetails->setObjectName("showInputDetails");inputDetails->setPopupMode(QToolButton::InstantPopup);
     auto* inputMenu=new QMenu(inputDetails);inputDetails->setMenu(inputMenu);inputLayout->addWidget(inputDetails);
     auto* geometryAction=inputMenu->addAction("查看几何与来源");
     connect(geometryAction,&QAction::triggered,this,[this] {
         QDialog details(this);details.setWindowTitle("当前输入详情");auto* fields=new QVBoxLayout(&details);
-        auto* identity=new QLabel(m_inputIdentity->text()+"\n"+m_inputIdentity->toolTip()+"\n\n"+m_inputGeometry->text(),&details);
+        auto* identity=new QLabel(m_inputIdentity->toolTip()+"\n\n"+m_inputGeometry->text(),&details);
         identity->setTextFormat(Qt::PlainText);identity->setWordWrap(true);identity->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);fields->addWidget(identity);
         auto* close=new QPushButton("关闭",&details);fields->addWidget(close);connect(close,&QPushButton::clicked,&details,&QDialog::accept);details.resize(600,280);details.exec();
     });
@@ -501,7 +528,7 @@ void TestWindow::UpdateInputIdentity()
     const auto session=m_runtime.GetSession();
     const auto input=session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{};
     m_sourceAction->setEnabled(input.has_value());
-    if(!input){m_inputIdentity->setText("当前输入 · 尚未加载体数据");m_inputGeometry->clear();m_inputSummary.clear();m_originalRevision.clear();m_originalInputAction->setEnabled(false);return;}
+    if(!input){m_inputIdentity->SetIdentity("当前输入 · 尚未加载体数据");m_inputGeometry->clear();m_inputSummary.clear();m_originalRevision.clear();m_originalInputAction->setEnabled(false);return;}
     const auto ref=GetRefText(input->dataRevision);
     QString kind="原始体数据", domain="源图像有效域"; QStringList parents;
     const auto graph=m_workflow.getPublishedGraph ? m_workflow.getPublishedGraph() : QJsonObject{};
@@ -524,8 +551,8 @@ void TestWindow::UpdateInputIdentity()
     }
     const auto title=QString("当前输入 · %1 · %2 · r%3 · %4")
         .arg(kind,QString::fromStdString(input->metadata.identity.datasetId),QString::number(input->dataRevision.generation),ref.section(':',0,0).right(16));
-    m_inputIdentity->setText(QString("%1 · %2 · r%3").arg(kind,QString::fromStdString(input->metadata.identity.datasetId),QString::number(input->dataRevision.generation)));
-    m_inputIdentity->setToolTip("实际输入修订："+ref+"\n来源："+parents.join("\n")+"\n"+QString::fromStdString(input->metadata.source.uri));
+    m_inputIdentity->SetIdentity(QString("%1 · %2 · r%3").arg(kind,QString::fromStdString(input->metadata.identity.datasetId),QString::number(input->dataRevision.generation)),
+        "实际输入修订："+ref+"\n来源："+parents.join("\n")+"\n"+QString::fromStdString(input->metadata.source.uri));
     const auto bytes=input->metadata.source.byteSize;
     const auto geometry=QString("网格 %1 × %2 × %3 · 间距 %4 × %5 × %6 mm · RAS · %8 · 灰度单位 %9 · 有效域：%7")
         .arg(input->dims[0]).arg(input->dims[1]).arg(input->dims[2]).arg(input->spacing[0]).arg(input->spacing[1]).arg(input->spacing[2]).arg(domain)

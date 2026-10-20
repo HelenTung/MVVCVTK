@@ -2780,6 +2780,12 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 if(step["columns"].toObject().contains(entry.first))window.findChild<QToolButton*>(entry.second)->setChecked(step["columns"].toObject()[entry.first].toBool());
             }
             QCoreApplication::processEvents();
+            if(step["expectInputElided"].toBool()) {
+                const auto* identity=window.findChild<QLabel*>("currentInputIdentity");const auto input=window.GetSession()->GetImageDescriptor();
+                Check(identity && identity->text().endsWith(QChar(0x2026)),"long input identity yields space with a visible ellipsis");
+                Check(input && identity->accessibleName().contains(QString::fromStdString(input->metadata.identity.datasetId))
+                    && identity->toolTip().contains(identity->accessibleName()),"elided input keeps its full current identity in the tooltip and accessible name");
+            }
             if(step["columns"].toObject()["parameters"].toBool(true)) {
                 const auto* scroll=page->findChild<QScrollArea*>("operationScroll");
                 Check(scroll->height()>=100,"parameter area retains usable height in every visible mode");

@@ -39,7 +39,7 @@ QWidget#operationFields, QWidget#sectionFields { background: @surface; }
 QWidget#businessContext { background: @subtle; border-radius: 4px; }
 QWidget#businessCommandFooter { border-top: 1px solid @outline; }
 QLabel#businessMeasurements { background: @subtle; padding: 8px; color: @muted; }
-QLabel#operationState { color: @muted; background: @subtle; padding: 6px 10px; border-radius: 4px; }
+QLabel#operationState { color: @muted; background: transparent; border: none; padding: 0; }
 QLabel#moduleFeedback { color: @muted; border-left: 3px solid @outline; padding-left: 6px; }
 QLabel#moduleFeedback[feedbackTone="neutral"] { color: @muted; border-left-color: @outline; }
 QLabel#moduleFeedback[feedbackTone="busy"] { color: @status; border-left-color: @status; background: @statusSurface; }

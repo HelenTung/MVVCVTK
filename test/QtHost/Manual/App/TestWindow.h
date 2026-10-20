@@ -16,6 +16,7 @@ class QAction;
 namespace Manual {
 class ResultReport;
 class ObjectBrowser;
+class InputIdentityLabel;
 class TestWindow final : public QMainWindow {
 public:
     explicit TestWindow(std::uint64_t budgetMiB = 0);
@@ -82,7 +83,7 @@ private:
     QStringList m_workspaceSelections{"Data", "Artifact", "Alignment"};
     QGridLayout* m_viewGrid = nullptr;
     QWidget* m_viewArea = nullptr;
-    QLabel* m_inputIdentity = nullptr;
+    InputIdentityLabel* m_inputIdentity = nullptr;
     QLabel* m_inputGeometry = nullptr;
     QAction* m_sourceAction = nullptr;
     QAction* m_originalInputAction = nullptr;
