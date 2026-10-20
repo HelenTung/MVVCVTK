@@ -170,7 +170,8 @@ public:
     bool DetachRenderEffect(const RenderEffect* effect);
     DataStageStatus StartDataStage(
         const VtkRenderInputSnapshot& snapshot,
-        std::uint64_t transactionRevision,const std::optional<RenderEffectChange>& effect={});
+        std::uint64_t transactionRevision,const std::optional<RenderEffectChange>& effect={},
+        bool isRefresh = false);
     DataStageStatus SetDataStageReady(
         const VtkRenderInputSnapshot& snapshot,
         std::uint64_t transactionRevision);
@@ -218,7 +219,16 @@ private:
         bool isParallelProjection = false;
     };
 
+    // 只保留值身份，不延长失败策略、图像缓冲或 GPU 资源的生命周期。
+    struct DataStageIdentity final {
+        std::uint64_t serial = 0;
+        std::uint64_t transitionRevision = 0;
+        DataRevisionRef dataRevision;
+        std::optional<DataBinding> binding;
+        VizMode mode = VizMode::Volume;
+    };
     struct DataStage final {
+        DataStageIdentity identity;
         std::optional<RenderEffectChange> effectChange;
         std::shared_ptr<RenderEffect> oldEffect,nextEffect;
         std::array<double,16> oldModelMatrix{};
@@ -325,6 +335,9 @@ private:
         bool& isReplaced);
     VtkRenderInputSnapshot GetPrimaryRenderInput() const;
     DataStageStatus BuildPipeline();
+    bool GetDataStageIdentityCurrent(const DataStageIdentity&, const VtkRenderInputSnapshot&) const;
+    void SetTransitionFailure(const DataStageIdentity&, DataStageStatus);
+    bool GetHasTransitionFailure() const;
     void StartAutoDisplayDefaults() noexcept;
     void SendAutoDisplayDefaults();
     std::optional<double> GetAutoDisplayIso(const VtkRenderInputSnapshot&) const;
@@ -457,7 +470,8 @@ private:
     bool m_hasViewUpdate = false;
     std::optional<bool> m_suppliedAutoWindowUpdate; // 随既有 ViewUpdate 提交，拒绝时不发布意图。
     DataRevisionRef m_isoSource;
-    std::atomic<bool> m_hasTransitionFailure{false};
+    std::optional<DataStageIdentity> m_dataStageIdentity; // 每次全参数候选尝试递增 serial，m_transitionMutex 保护。
+    std::optional<DataStageIdentity> m_transitionFailure; // 同一锁保护；查询按当前请求核验，旧值保留到新候选冻结。
     std::optional<PendingLoadCommit> m_pendingLoadCommit;
     std::uint64_t m_nextLoadTransactionRevision = 0;
     // Host 多 View 全部清除已提交 stage 后，load owner 取走同版本候选并做一次共享提交。

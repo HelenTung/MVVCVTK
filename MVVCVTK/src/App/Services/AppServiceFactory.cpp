@@ -518,18 +518,20 @@ private:
             && m_service->m_renderSnapshot->binding
             ? m_service->m_renderSnapshot->binding->revision : 0;
         state.revision = m_revision;
+        const bool hasTransitionFailed = m_service->GetHasTransitionFailure();
+        state.hasPresentationFailed = !m_isAvailable || hasTransitionFailed;
         if (m_service->m_currentStrategy) {
             const auto transition = m_service->m_currentStrategy->GetTransitionState();
-            state.hasPresentationFailed = !m_isAvailable
+            state.hasPresentationFailed = state.hasPresentationFailed
                 || transition.status == RenderProductStatus::Failed
                 || transition.status == RenderProductStatus::Cancelled;
-            state.isPresentationPending = m_service->m_hasDataRefreshNeed.load()
+            state.isPresentationPending = !hasTransitionFailed && (m_service->m_hasDataRefreshNeed.load()
                 || m_service->m_hasSyncNeed.load()
                 || transition.status == RenderProductStatus::Preparing
                 || transition.status == RenderProductStatus::Ready
                 || (transition.status == RenderProductStatus::Active
                     && (transition.stats.isPreview
-                        || transition.stats.activeRevision != transition.stats.requestRevision));
+                        || transition.stats.activeRevision != transition.stats.requestRevision)));
         }
         return state;
     }

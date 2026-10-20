@@ -46,11 +46,14 @@
 #include <future>
 #include <algorithm>
 namespace Manual {
-namespace { struct ReadTaskCancelled {}; }
+namespace { struct ReadTaskCancelled {}; struct ReadTaskExpired {}; }
 class ModulePanel::ReadTask final {
 public:
-    // 0=工作中，1=已接纳取消，2=完成/提交已开始。
+    using Clock=std::chrono::steady_clock;
+    struct Timings final { Clock::time_point created=Clock::now(),started{},finished{}; };
+    // 0=工作中，1=已接纳取消，2=完成/提交已开始，3=期限已到。
     std::shared_ptr<std::atomic_int> phase = std::make_shared<std::atomic_int>(0);
+    std::shared_ptr<Timings> timings=std::make_shared<Timings>();
     std::future<QJsonObject> future;
     QTimer* timer = nullptr;
     ~ReadTask() { int running=0;phase->compare_exchange_strong(running,1);if(timer)delete timer;if(future.valid())future.wait(); }
@@ -246,38 +249,71 @@ void ModulePanel::SetFeedback(const QString& text,const char* tone)
 QString ModulePanel::GetFeedback() const { return m_feedback->text(); }
 ModulePanel::~ModulePanel(){CancelReadTasks();m_readTasks.clear();m_statistics->Cancel();delete m_statistics;}
 void ModulePanel::StartReadTask(std::uint64_t id, QString status,
-    std::function<QJsonObject(const ReadTaskContext&)> work, std::function<void()> onSucceeded)
+    std::function<QJsonObject(const ReadTaskContext&)> work, std::function<void()> onSucceeded, ReadTaskConfig config)
 {
     if(!m_readTasks.empty())throw std::runtime_error("请等待当前读取任务完成或取消后重试");
-    auto task=std::make_unique<ReadTask>();const auto phase=task->phase;
-    task->future=std::async(std::launch::async,[work=std::move(work),phase] {
+    using Clock=ReadTask::Clock;
+    if(config.timeout.count()<=0 || config.timeout>std::chrono::duration_cast<std::chrono::milliseconds>(Clock::duration::max())
+        || (config.preparationTime && config.preparationTime->count()<0))throw std::invalid_argument("读取任务需要有效的有限期限");
+    const auto budget=std::chrono::duration_cast<Clock::duration>(config.timeout);
+    const auto now=config.getNow?config.getNow():Clock::now();
+    if(now>Clock::time_point::max()-budget)throw std::invalid_argument("读取任务期限超出时钟范围");
+    const auto deadline=now+budget;
+    auto task=std::make_unique<ReadTask>();const auto phase=task->phase;const auto timings=task->timings;
+    task->future=std::async(std::launch::async,[work=std::move(work),phase,timings,deadline,getNow=config.getNow] {
+        timings->started=Clock::now();
+        struct FinishTiming {ReadTask::Timings& values;~FinishTiming(){values.finished=Clock::now();}} finish{*timings};
         ReadTaskContext context;
-        context.checkpoint=[phase]{if(phase->load()==1)throw ReadTaskCancelled{};};
-        context.commit=[phase](const std::function<void()>& publish){
+        context.getCancelled=[phase,deadline,getNow] {
+            auto state=phase->load();
+            if(state==0 && (getNow?getNow():Clock::now())>=deadline) {
+                int running=0;phase->compare_exchange_strong(running,3);state=phase->load();
+            }
+            return state==1 || state==3;
+        };
+        context.checkpoint=[phase,getCancelled=context.getCancelled] {
+            if(getCancelled()) {if(phase->load()==3)throw ReadTaskExpired{};throw ReadTaskCancelled{};}
+        };
+        context.commit=[phase,checkpoint=context.checkpoint](const std::function<void()>& publish){
+            checkpoint();
             int running=0;
             if(!phase->compare_exchange_strong(running,2)){
                 if(running==1)throw ReadTaskCancelled{};
+                if(running==3)throw ReadTaskExpired{};
                 throw std::logic_error("读取任务不能重复提交");
             }
             publish();
         };
         context.checkpoint();auto result=work(context);
+        context.checkpoint();
         int running=0;
-        if(!phase->compare_exchange_strong(running,2)&&running==1)throw ReadTaskCancelled{};
+        if(!phase->compare_exchange_strong(running,2)) {
+            if(running==1)throw ReadTaskCancelled{};
+            if(running==3)throw ReadTaskExpired{};
+        }
         return result;
     });
     task->timer=new QTimer(this);task->timer->setInterval(10);
-    connect(task->timer,&QTimer::timeout,this,[this,id,status=std::move(status),onSucceeded=std::move(onSucceeded)] {
+    connect(task->timer,&QTimer::timeout,this,[this,id,status=std::move(status),onSucceeded=std::move(onSucceeded),config] {
         auto found=m_readTasks.find(id);if(found==m_readTasks.end())return;
         auto& task=*found->second;
         if(task.future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
-        QJsonObject result;auto terminal=status;
-        try {result=task.future.get();if(onSucceeded)onSucceeded();}
+        QJsonObject result;auto terminal=status;Clock::time_point received{};
+        try {result=task.future.get();received=Clock::now();if(onSucceeded)onSucceeded();}
         catch(const ReadTaskCancelled&){terminal="Cancelled";result={{"message","读取任务已取消"}};}
+        catch(const ReadTaskExpired&){terminal="Failed";result={{"message","读取任务已达到配置期限"},{"failureReason","DeadlineExceeded"}};}
         catch(const std::exception& error){terminal="Failed";result={{"message",QString::fromUtf8(error.what())}};}
+        if(received==Clock::time_point{})received=Clock::now();
+        const auto timing=task.timings;
+        const QJsonObject measured{{"freezePreparationMs",config.preparationTime?QJsonValue(std::chrono::duration<double,std::milli>(*config.preparationTime).count()):QJsonValue()},
+            {"workerQueueMs",std::chrono::duration<double,std::milli>(timing->started-timing->created).count()},
+            {"workerExecutionMs",std::chrono::duration<double,std::milli>(timing->finished-timing->started).count()},
+            {"ownerReceiveMs",std::chrono::duration<double,std::milli>(received-timing->finished).count()},
+            {"timeoutMs",QString::number(config.timeout.count())}};
         // timer 的信号回调仍在执行，延迟销毁 QObject。
         task.timer->stop();task.timer->deleteLater();task.timer=nullptr;m_readTasks.erase(found);
-        setProperty("readTasksBusy",!m_readTasks.empty());SetComplete(id,terminal,std::move(result));
+        setProperty("readTasksBusy",!m_readTasks.empty());m_context.records.SetReadTaskTimings(id,measured);
+        SetComplete(id,terminal,std::move(result));
     });
     task->timer->start();m_readTasks.emplace(id,std::move(task));setProperty("readTasksBusy",true);
 }

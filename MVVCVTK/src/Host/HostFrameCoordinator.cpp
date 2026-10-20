@@ -314,12 +314,14 @@ HostFrameCoordinator::FlushStatus HostFrameCoordinator::SendFrame(
             ClearStage();
             return FlushStatus::Stopped;
         }
-        if (stageStatus == HostFrameStageStatus::Failed) {
+        if (stageStatus == HostFrameStageStatus::Failed
+            || stageStatus == HostFrameStageStatus::Deferred) {
             RestoreIntents(std::move(intents));
             restoreIntents = false;
             ClearStage();
             SendDisplayCompletions(false);
-            return FlushStatus::Failed;
+            return stageStatus == HostFrameStageStatus::Deferred
+                ? FlushStatus::Deferred : FlushStatus::Failed;
         }
         if (stageStatus == HostFrameStageStatus::Unchanged) {
             restoreIntents = false;

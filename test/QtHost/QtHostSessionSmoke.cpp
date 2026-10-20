@@ -345,6 +345,10 @@ bool SendFrame(
     if (!views.CollectFrameUpdates()) return false;
     const auto status = views.BuildFrameStage(committedEpoch + 1);
     if (status == HostFrameStageStatus::Failed) return false;
+    if (status == HostFrameStageStatus::Deferred) {
+        views.ClearFrameStage();
+        return true;
+    }
     if (status == HostFrameStageStatus::Unchanged) {
         views.SendFrameCompletions();
         return true;
