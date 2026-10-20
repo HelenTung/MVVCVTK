@@ -166,7 +166,8 @@ bool SendFrame(
     }
     if (!views.CollectFrameUpdates()) return true;
     const auto status = views.BuildFrameStage(committedEpoch + 1);
-    if (status == HostFrameStageStatus::Failed) {
+    if (status == HostFrameStageStatus::Failed
+        || status == HostFrameStageStatus::Deferred) {
         views.ClearFrameStage();
         return true;
     }
@@ -560,6 +561,7 @@ bool GetExplicitSceneInputsValid()
 bool GetSceneBindingValid()
 {
     auto core = GetLoadCore();
+    core.isHostDriven = true;
     if (!SetPrimaryBaseline(core)) return false;
     const auto original = core.sharedDataMgr->GetPrimaryImage();
     HostViewRuntimeRegistry views;
@@ -598,15 +600,30 @@ bool GetSceneBindingValid()
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     const auto mixed = views.GetViewStates();
+    const auto pendingRoute = directory->GetViewRoute({
+        "load-aux", false, HostRenderViewRole::Auxiliary });
+    const auto pendingView = pendingRoute ? pendingRoute->view.lock() : nullptr;
+    if (!pendingView) return false;
+    const auto pending = pendingView->GetViewState();
     if (mixed.size() != 2
         || mixed[0].dataRevision != mixed[1].dataRevision
         || mixed[0].bindingRevision != ready.bindingRevision
-        || mixed[1].bindingRevision != original->binding->revision)
+        || mixed[1].bindingRevision != original->binding->revision
+        || !pending.isPresentationPending || pending.hasPresentationFailed)
         return false;
     const auto rejected = views.BuildFrameStage(epoch + 1);
     views.ClearFrameStage();
-    if (rejected != HostFrameStageStatus::Failed
+    if (rejected != HostFrameStageStatus::Deferred
         || GetCommittedEpoch(views) != epoch) return false;
+    const auto deferred = views.SendFrameRender({{"load-primary", "load-aux"}, .001}, [] { return true; });
+    if (deferred.status != HostRenderStatus::Deferred || deferred.views.size() != 2
+        || !std::all_of(deferred.views.begin(), deferred.views.end(), [epoch](const auto& view) {
+            return view.status == HostRenderStatus::Deferred && view.sceneEpoch == epoch;
+        })) return false;
+    for (const auto& scene : views.GetSceneViewStates()) {
+        if (scene.sceneEpoch != epoch || !scene.presentation
+            || scene.presentation->bindingRevision != original->binding->revision) return false;
+    }
 
     if (!SendFrame(views, epoch) || views.GetFrameRenderPending()) return false;
     const auto scenes = views.GetSceneViewStates();

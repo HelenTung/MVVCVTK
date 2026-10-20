@@ -30,7 +30,9 @@ struct HostRenderViewRuntime final {
     HostRenderViewState BuildViewState() const;
     HostRenderViewState BuildViewState(const AppViewState& appState) const;
     HostSceneViewState BuildSceneViewState(std::vector<std::string> featureIds,
-        const HostSceneViewState* previous = nullptr) const;
+        const HostSceneViewState* previous = nullptr,
+        bool* isPresentationPending = nullptr,
+        bool* hasPresentationFailed = nullptr) const;
     bool GetIntentStampValid(const RenderInputStamp& expected) const;
     bool CollectUpdates() const;
     bool SendPendingUpdates() const;
