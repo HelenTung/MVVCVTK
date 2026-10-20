@@ -2,10 +2,21 @@
 #include "Host/Internal/HostFrameRuntime.h"
 #include "App/Services/PrimaryDataActivation.h"
 #include "App/Services/FeatureViewService.h"
+#include "App/Services/AppServiceFactory.h"
 #include "App/AppState.h"
+#include "App/AppStateEvents.h"
 #include "Data/DataManager.h"
+#include "Host/HostCommandRouter.h"
+#include "Host/HostViewRuntimeRegistry.h"
+#include "Host/VtkAppHostSession.h"
 #include "Interaction/AbstractViewContext.h"
+#include "Render/Support/BaseVisualStrategy.h"
+#include <vtkGenericOpenGLRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkRenderer.h>
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -444,6 +455,339 @@ bool GetPendingRollbackValid()
     return f.views[0].pendingRenderEpoch == 2 && f.views[1].pendingRenderEpoch == 2;
 }
 
+class CandidateStrategyProbe final : public BaseVisualStrategy {
+public:
+    RenderProductStatus status = RenderProductStatus::Idle;
+    int attachments = 0;
+    bool isDetachRejected = false;
+    void SetInputData(vtkSmartPointer<vtkDataObject>) override {}
+    bool SetProductCommit() override { return true; }
+    RenderTransitionState GetTransitionState() const override {
+        RenderTransitionState result;
+        result.status = status;
+        return result;
+    }
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {
+        ++attachments;
+        BaseVisualStrategy::AttachRenderer(std::move(renderer));
+    }
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {
+        if (isDetachRejected) throw std::runtime_error("candidate cleanup rejected");
+        BaseVisualStrategy::DetachRenderer(std::move(renderer));
+    }
+};
+
+class CandidateViewDirectory final : public IHostViewDirectory {
+public:
+    explicit CandidateViewDirectory(std::vector<HostRenderViewRuntime>& views) : m_views(views) {}
+    std::optional<HostDataRoute> GetDataRoute(const HostViewTarget&) const override { return {}; }
+    std::optional<HostViewRoute> GetViewRoute(const HostViewTarget& target) const override {
+        for (const auto& view : m_views) {
+            if ((!target.viewId.empty() && target.viewId != view.config.id)
+                || (target.isViewRoleUsed && target.viewRole != view.config.role)) continue;
+            return HostViewRoute{view.config.id, view.config.role, view.app.view,
+                view.interaction.update, view.context, {}};
+        }
+        return {};
+    }
+    std::weak_ptr<AppSessionPort> GetSessionPort() const override { return m_views[0].app.session; }
+    std::vector<HostInputRoute> GetInputRoutes(const HostViewTargets&) const override { return {}; }
+    bool StopView(std::string_view) override { return false; }
+private:
+    std::vector<HostRenderViewRuntime>& m_views;
+};
+
+struct RealCandidateFixture final {
+    std::shared_ptr<RawVolumeDataManager> data = std::make_shared<RawVolumeDataManager>();
+    std::shared_ptr<SharedStateBroadcaster> events = std::make_shared<SharedStateBroadcaster>();
+    std::shared_ptr<SharedInteractionState> state = std::make_shared<SharedInteractionState>(events);
+    std::vector<HostRenderViewRuntime> views{3};
+    std::shared_ptr<FeatureViewLease> lease = std::make_shared<FeatureViewLease>(std::this_thread::get_id());
+    std::array<AppFactoryResult, 3> ports;
+    std::array<std::shared_ptr<ContextProbe>, 3> contexts;
+    std::array<std::vector<std::shared_ptr<CandidateStrategyProbe>>, 3> strategies;
+    std::array<RenderProductStatus, 3> nextStatus{RenderProductStatus::Idle,
+        RenderProductStatus::Idle, RenderProductStatus::Idle};
+    HostFrameRuntime frames{views, lease, [](const auto&) { return std::vector<std::string>{}; }};
+    std::unique_ptr<HostFrameCoordinator> coordinator;
+    std::shared_ptr<CandidateViewDirectory> directory;
+    std::unique_ptr<HostCommandRouter> router;
+    VtkImageGridSnapshot original;
+    bool Build() {
+        ImageMetadata metadata;
+        metadata.identity.datasetId = "real-app-candidate-failure";
+        metadata.source.kind = ImageSourceKind::Memory;
+        metadata.source.uri = "memory://real-app-candidate-failure";
+        const auto layout = VolumeLayout::Create({2,2,2}, {1,1,1}, {},
+            std::array<double,9>{1,0,0,0,1,0,0,0,1}, metadata);
+        const auto buffer = layout ? VolumeBuffer::Create({0,1,2,3,4,5,6,7}, *layout)
+            : std::optional<VolumeBuffer>{};
+        if (!buffer || !data->SetFromBuffer(*buffer)
+            || !data->SetLoadCommit(data->GetLoadStage(), original)) return false;
+        for (std::size_t index = 0; index < ports.size(); ++index) {
+            AppServiceArgs args;
+            args.dataManager = data;
+            args.interactionState = state;
+            args.eventSource = events;
+            args.strategyCreate = [this, index](VizMode) {
+                auto strategy = std::make_shared<CandidateStrategyProbe>();
+                strategy->status = nextStatus[index];
+                strategies[index].push_back(strategy);
+                return strategy;
+            };
+            ports[index] = CreateAppPorts(std::move(args));
+            auto window = vtkSmartPointer<vtkRenderWindow>::New();
+            auto renderer = vtkSmartPointer<vtkRenderer>::New();
+            if (!ports[index].renderBind->SetRenderTarget(window, renderer)) return false;
+            AppViewUpdate initial;
+            initial.mode = VizMode::SliceTop_down;
+            initial.isoThreshold = 0.5;
+            if (!ports[index].app.view->SendViewUpdate(initial)) return false;
+            auto& view = views[index];
+            view.config.id = std::to_string(index);
+            view.config.role = index == 0 ? HostRenderViewRole::Primary3D : HostRenderViewRole::Auxiliary;
+            view.app = ports[index].app;
+            view.interaction = ports[index].interaction;
+            view.context = contexts[index] = std::make_shared<ContextProbe>();
+            view.isAvailable = true;
+        }
+        frames.BuildSceneStates();
+        frames.SetDriveMode(HostDriveMode::HostDriven);
+        frames.SetDataRead(data);
+        if (!frames.SetFrameGeneration(29)) return false;
+        HostFrameCoordinator::Callbacks callbacks;
+        callbacks.collectUpdates = [&] { return frames.CollectFrameUpdates(); };
+        callbacks.sendFeatureTicks = [] {};
+        callbacks.setIntents = [&](const auto& intents) { return frames.SetFrameIntents(intents); };
+        callbacks.applyFeatureUpdates = [&] { return frames.ApplyFrameUpdates(); };
+        callbacks.buildStage = [&](auto epoch) { return frames.BuildFrameStage(epoch); };
+        callbacks.setCommit = [&](auto epoch) { frames.SetFrameCommit(epoch); };
+        callbacks.sendRender = [&](auto epoch) { return frames.SendFrameRender(epoch); };
+        callbacks.getRenderPending = [&] { return frames.GetFrameRenderPending(); };
+        callbacks.sendCompletions = [&] { frames.SendFrameCompletions(); };
+        callbacks.clearStage = [&] { frames.ClearFrameStage(); };
+        coordinator = std::make_unique<HostFrameCoordinator>(29, std::move(callbacks));
+        directory = std::make_shared<CandidateViewDirectory>(views);
+        router = std::make_unique<HostCommandRouter>(directory);
+        return coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Completed
+            && coordinator->GetCommittedEpoch() == 1;
+    }
+    VtkImageGridSnapshot Select(const bool createsData, const DataRevisionRef& target = {}) {
+        const auto primary = data->GetPrimaryImage();
+        const DataRevisionRef next = createsData ? DataRevisionRef{data->CreateDataEntityId(), 1} : target;
+        DataTransaction transaction;
+        if (createsData) transaction.outputs.push_back({next.entityId, 0, primary->data->type,
+            {}, primary->data->payload, {}});
+        transaction.bindings.push_back({std::string(primaryVolumeBinding), primary->binding->revision,
+            true, primary->data->self, next});
+        PrimaryDataActivation activation(*data, *state);
+        return activation.SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded
+            ? data->GetPrimaryImage() : VtkImageGridSnapshot{};
+    }
+    bool Stop() {
+        if (coordinator) coordinator->Stop();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        bool stopped = true;
+        for (auto& port : ports) if (port.taskControl) stopped = port.taskControl->SetTaskStopping() && stopped;
+        for (auto& port : ports) if (port.taskControl) stopped = port.taskControl->StopTasks(deadline) && stopped;
+        return stopped;
+    }
+    ~RealCandidateFixture() { if (!Stop()) std::cerr << "Real candidate fixture did not stop its workers\n"; }
+};
+
+bool GetRealCandidateFailureValid(const RenderProductStatus terminal, const bool hasReadyPeer,
+    const bool rejectsCleanup = false)
+{
+    int completions = 0, recoveredCompletions = 0, blockedCompletions = 0;
+    bool completed = true, recovered = false;
+    RealCandidateFixture f;
+    const auto check = [](bool value, const char* reason) {
+        if (!value) std::cerr << "Real App candidate: " << reason << '\n';
+        return value;
+    };
+    if (!check(f.Build(), "fixture construction")) return false;
+    const auto oldStrategy = f.strategies[0].back();
+    f.nextStatus = {RenderProductStatus::Preparing, RenderProductStatus::Preparing,
+        hasReadyPeer ? RenderProductStatus::Idle : RenderProductStatus::Preparing};
+    const auto selected = f.Select(true);
+    if (!check(static_cast<bool>(selected), "new primary publication")) return false;
+    HostViewSetRequest request;
+    request.targetView.viewId = "0";
+    request.opacity = 0.75;
+    const auto display = [&](auto getApplied, auto complete) {
+        return f.coordinator->SendDisplayComplete(std::move(getApplied), std::move(complete));
+    };
+    if (!check(f.router->Dispatch(std::move(request), [&](bool succeeded) {
+        ++completions; completed = succeeded;
+    }, display), "real Router display request")) return false;
+    const auto preparing = f.coordinator->SendUpdates();
+    if (!check((preparing == HostFrameCoordinator::FlushStatus::Deferred
+            || (!hasReadyPeer && preparing == HostFrameCoordinator::FlushStatus::Completed))
+        && completions == 0 && f.strategies[0].back() != oldStrategy
+        && f.strategies[0].back()->attachments == 0
+        && f.ports[1].app.view->GetViewState().isPresentationPending,
+        "real candidate did not remain pending")) return false;
+    const auto previous = f.frames.GetSceneStates();
+    const auto epoch = f.coordinator->GetCommittedEpoch();
+    struct AllowCleanup final {
+        std::shared_ptr<CandidateStrategyProbe> strategy;
+        ~AllowCleanup() { strategy->isDetachRejected = false; }
+    } allowCleanup{f.strategies[0].back()};
+    allowCleanup.strategy->isDetachRejected = rejectsCleanup;
+    f.strategies[0].back()->status = terminal;
+    if (!check(f.coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Failed,
+        "terminal nextStrategy was hidden by another pending View")) return false;
+    const auto failed = f.ports[0].app.view->GetViewState();
+    if (!check(failed.hasPresentationFailed && !failed.isPresentationPending
+        && oldStrategy->status == RenderProductStatus::Idle
+        && completions == 1 && !completed && f.coordinator->GetCommittedEpoch() == epoch,
+        "real projection or exactly-once failed display completion")) return false;
+    const auto scenes = f.frames.GetSceneStates();
+    for (std::size_t index = 0; index < scenes.size(); ++index) {
+        if (!check(scenes[index].sceneEpoch == previous[index].sceneEpoch
+            && scenes[index].presentation && previous[index].presentation
+            && scenes[index].presentation->dataRevision == previous[index].presentation->dataRevision
+            && scenes[index].presentation->bindingRevision == previous[index].presentation->bindingRevision,
+            "terminal candidate changed the committed scene")) return false;
+    }
+    // 混批时连显式绘制也必须暂缓；一致的旧帧仍允许调用方单独重绘。
+    if (hasReadyPeer && !check(f.frames.SendFrameRender({{"0", "1", "2"}, .001},
+        [] { return true; }).status == HostRenderStatus::Deferred, "mixed candidate allowed an explicit draw")) return false;
+    if (!check(std::all_of(f.contexts.begin(), f.contexts.end(), [](const auto& context) { return context->renderCount == 0; }),
+        "terminal candidate allowed a draw")) return false;
+    // 无关图提交不使同一输入上的失败消失。
+    DataTransaction unrelated;
+    unrelated.outputs.push_back({f.data->CreateDataEntityId(), 0, f.original->data->type,
+        {}, f.original->data->payload, {}});
+    if (!check(f.data->SetDataCommit(std::move(unrelated)).status == DataCommitStatus::Succeeded
+        && f.ports[0].app.view->GetViewState().hasPresentationFailed
+        && f.coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Failed
+        && completions == 1, "unrelated graph commit hid or repeated the failure")) return false;
+    if (rejectsCleanup) {
+        HostViewSetRequest blocked;
+        blocked.targetView.viewId = "0";
+        blocked.mode = HostRenderMode::Volume;
+        bool blockedSucceeded = true;
+        if (!f.router->Dispatch(std::move(blocked), [&](bool succeeded) {
+            ++blockedCompletions; blockedSucceeded = succeeded;
+        }, display)) return false;
+        if (!check(f.coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Failed
+            && blockedCompletions == 1 && !blockedSucceeded
+            && f.coordinator->GetCommittedEpoch() == epoch,
+            "a new request hid failure to clear the prior candidate")) return false;
+        allowCleanup.strategy->isDetachRejected = false;
+    }
+    // 返回原数据但采用新 binding，旧候选终态不能因 ABA 再次生效。
+    const auto retryTarget = terminal == RenderProductStatus::Cancelled
+        ? selected->data->self : f.original->data->self;
+    const auto restored = hasReadyPeer ? f.Select(false, retryTarget) : selected;
+    if (!check(restored && (!hasReadyPeer || !f.ports[0].app.view->GetViewState().hasPresentationFailed),
+        "new input inherited a stale candidate failure")) return false;
+    f.nextStatus.fill(RenderProductStatus::Idle);
+    if (!hasReadyPeer) {
+        f.strategies[1].back()->status = RenderProductStatus::Idle;
+        f.strategies[2].back()->status = RenderProductStatus::Idle;
+    }
+    HostViewSetRequest retry;
+    retry.targetView.viewId = "0";
+    retry.opacity = 0.8;
+    if (!f.router->Dispatch(std::move(retry), [&](bool succeeded) {
+        ++recoveredCompletions; recovered = succeeded;
+    }, display)) return false;
+    if (!check(!f.ports[0].app.view->GetViewState().hasPresentationFailed,
+        "accepted new parameters inherited an old terminal state")) return false;
+    if (!check(f.coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Completed
+        && f.coordinator->GetCommittedEpoch() == epoch + 1
+        && completions == 1 && recoveredCompletions == 1 && recovered,
+        "new input did not recover exactly once")) return false;
+    for (const auto& scene : f.frames.GetSceneStates()) {
+        if (!check(scene.presentation && scene.presentation->dataRevision == restored->data->self
+            && scene.presentation->bindingRevision == restored->binding->revision,
+            "recovery used an old data or binding revision")) return false;
+    }
+    return check(f.Stop(), "real App workers did not stop");
+}
+
+class DetachWindowProbe final : public vtkGenericOpenGLRenderWindow {
+public:
+    static DetachWindowProbe* New() { return new DetachWindowProbe; }
+    vtkTypeMacro(DetachWindowProbe, vtkGenericOpenGLRenderWindow);
+    int draws = 0;
+    void Render() override { ++draws; InvokeEvent(vtkCommand::StartEvent); InvokeEvent(vtkCommand::EndEvent); }
+    void* GetGenericWindowId() override { return this; }
+protected:
+    DetachWindowProbe() { Mapped = 1; SetReadyForRendering(true); }
+};
+class DetachInteractorProbe final : public vtkRenderWindowInteractor {
+public:
+    static DetachInteractorProbe* New() { return new DetachInteractorProbe; }
+    vtkTypeMacro(DetachInteractorProbe, vtkRenderWindowInteractor);
+    void Initialize() override { Initialized = 1; Enabled = 1; }
+    void Start() override {}
+};
+class DetachFeatureProbe final : public HostFeature {
+public:
+    HostFeatureContext context;
+    int detaches = 0;
+    std::string_view GetFeatureId() const noexcept override { return "actual-detach-pending-frame"; }
+    bool AttachHost(const HostFeatureContext& value) override { context = value; return context.host && context.host->SetActiveViews({"detach"}); }
+    bool DetachHost() override { ++detaches; context = {}; return true; }
+    bool OnHostTick() override { return true; }
+};
+bool GetActualDetachPendingFrameValid()
+{
+    int completions = 0;
+    bool wasRevoked = false;
+    auto window = vtkSmartPointer<DetachWindowProbe>::New();
+    auto interactor = vtkSmartPointer<DetachInteractorProbe>::New();
+    window->SetInteractor(interactor);
+    interactor->SetRenderWindow(window);
+    HostRenderViewConfig view;
+    view.id = "detach";
+    view.role = HostRenderViewRole::Primary3D;
+    view.renderWindow = window;
+    view.inputMode = HostInputMode::HostInjected;
+    HostSessionConfig config;
+    config.driveMode = HostDriveMode::HostDriven;
+    config.renderViews = {view};
+    VtkAppHostSession session(std::move(config));
+    struct StopSession final {
+        VtkAppHostSession& session;
+        ~StopSession() { (void)session.Stop(); }
+    } stop{session};
+    auto feature = std::make_shared<DetachFeatureProbe>();
+    if (!session.BuildSession() || !session.AttachFeature(feature)) {
+        std::cerr << "Actual detach: session/feature construction\n";
+        return false;
+    }
+    const auto update = session.SendUpdates();
+    const auto before = session.GetSceneViewStates();
+    const auto saved = feature->context;
+    if (update.status != HostUpdateStatus::Completed || update.renderViewIds.empty()
+        || before.size() != 1 || window->draws != 0
+        || !saved.host->SendOwnerComplete([&] {
+            ++completions;
+            wasRevoked = !GetDataEntityIdValid(saved.data->CreateDataEntityId());
+        })) {
+        std::cerr << "Actual detach: pending frame/owner completion status=" << static_cast<int>(update.status)
+            << " renders=" << update.renderViewIds.size() << " scenes=" << before.size()
+            << " draws=" << window->draws << '\n';
+        return false;
+    }
+    if (!session.DetachFeature(*feature) || feature->detaches != 1
+        || completions != 1 || !wasRevoked || window->draws != 0) {
+        std::cerr << "Actual detach: detach outcome count=" << feature->detaches
+            << " completes=" << completions << " revoked=" << wasRevoked << " draws=" << window->draws << '\n';
+        return false;
+    }
+    const auto after = session.GetSceneViewStates();
+    return after.size() == 1 && after[0].sceneEpoch == before[0].sceneEpoch
+        && after[0].activeFeatureIds == before[0].activeFeatureIds
+        && !session.DetachFeature(*feature) && completions == 1
+        && session.SendUpdates().status == HostUpdateStatus::Completed
+        && window->draws == 0 && session.Stop() && completions == 1;
+}
+
 class ReadyProbe final : public IStateEventSink {
 public:
     void SendFlags(UpdateFlags flags) override {
@@ -532,6 +876,12 @@ int main(int argc, char** argv)
     check(GetInputTransitionBarrierValid(true, TransitionExit::Cancelled), "cancelled candidate terminates a deferred display request exactly once");
     check(GetInputTransitionBarrierValid(true, TransitionExit::Stop), "Stop cancels a deferred input transition exactly once");
     check(GetInputTransitionBarrierValid(true, TransitionExit::Detach), "Detach cancels deferred display ownership without blocking convergence");
+    for (const auto terminal : {RenderProductStatus::Failed, RenderProductStatus::Cancelled})
+        for (const bool readyPeer : {false, true})
+            check(GetRealCandidateFailureValid(terminal, readyPeer), "real AppPort candidate terminal fails the frame and Router completion");
+    check(GetActualDetachPendingFrameValid(), "actual DetachFeature drains owned completion while a frame is pending without drawing");
+    check(GetRealCandidateFailureValid(RenderProductStatus::Failed, true, true),
+        "new request reports prior-candidate cleanup failure and later recovers");
     check(GetRenderRetryValid(), "render retry preserves new dirty and completed views");
     check(GetStoppedStageValid(), "stopped view cannot reappear from staged projection");
     check(GetProjectionReuseValid(), "stable projection refreshes independent state and samples feature IDs once");

@@ -910,11 +910,11 @@ void AppRuntime::SetVizMode(VizMode mode)
     {
         std::lock_guard<std::mutex> lock(m_transitionMutex);
         if (m_pendingVizModeInt.load() == nextMode
-            && !m_hasTransitionFailure.load()) return;
+            && !m_transitionFailure.has_value()) return;
         if (m_transitionRevision == (std::numeric_limits<std::uint64_t>::max)()) return;
         m_pendingVizModeInt.store(nextMode);
         ++m_transitionRevision;
-        m_hasTransitionFailure = false;
+        m_transitionFailure.reset();
     }
     m_hasDataRefreshNeed = true;
     SetDirty();
@@ -1184,8 +1184,8 @@ void AppRuntime::SetVisualConfig(const PreInitConfig& cfg)
     m_viewState->SetPreInitConfig(cfg);
     if (cfg.hasIso) m_hasExplicitIso = true;
     // 首次配置保留原有 bootstrap 语义，由数据事件/加载事务驱动首个候选。
-    if (m_hasVisualConfig && (hasModeChanged || m_hasTransitionFailure.load())) {
-        m_hasTransitionFailure = false;
+    if (m_hasVisualConfig && (hasModeChanged || m_transitionFailure.has_value())) {
+        m_transitionFailure.reset();
         m_hasDataRefreshNeed = true;
         m_isDirty = true;
     }
@@ -1895,23 +1895,13 @@ bool AppRuntime::SendPendingUpdates()
 
     // spacing / mode 等非 load 结构变化继续使用独立门铃，不与 load 终态混槽。
     if (m_hasDataRefreshNeed.exchange(false)) {
-        std::uint64_t requestRevision = 0;
-        {
-            std::lock_guard<std::mutex> lock(m_transitionMutex);
-            requestRevision = m_transitionRevision;
-        }
         const auto status = BuildPipeline();
         if (status == DataStageStatus::Preparing) m_hasDataRefreshNeed = true;
-        std::lock_guard<std::mutex> lock(m_transitionMutex);
-        if (requestRevision == m_transitionRevision) {
-            m_hasTransitionFailure = status == DataStageStatus::Failed
-                || status == DataStageStatus::Cancelled;
-        }
     }
     const bool isStrategySet = SetStrategyState();
 
     // completion 只排入 owner 槽；具体 frame pump 在所需 Render 返回后派发。
-    return isStrategySet;
+    return isStrategySet && !GetHasTransitionFailure();
 }
 
 bool AppRuntime::SendReloadUpdate()
@@ -2178,6 +2168,11 @@ bool AppRuntime::SetViewUpdateCommit(
         if (!m_viewState || !m_viewState->SetUpdateCommit(isCommitted, pendingFlags)) return false;
         if (isCommitted && m_suppliedAutoWindowUpdate.has_value())
             m_hasSuppliedAutoWindow = *m_suppliedAutoWindowUpdate;
+        if (isCommitted && m_transitionFailure) {
+            // 新接受的展示请求属于一次明确重试；旧失败不能污染新参数（包括 ABA）。
+            m_transitionFailure.reset();
+            m_hasDataRefreshNeed = true;
+        }
         m_suppliedAutoWindowUpdate.reset();
         m_hasViewUpdate = false;
     }
@@ -2210,7 +2205,10 @@ bool AppRuntime::ClearRenderInput(const DataEntityId& entity) noexcept
         m_renderSnapshot.reset();
         m_autoDisplayDefaults.reset();
         m_hasDataRefreshNeed = false;
-        m_hasTransitionFailure = false;
+        {
+            const std::lock_guard<std::mutex> lock(m_transitionMutex);
+            m_transitionFailure.reset();
+        }
         m_pendingFlags = 0;
         SetDirty();
         return true;
@@ -2403,6 +2401,44 @@ VtkRenderInputSnapshot AppRuntime::GetPrimaryRenderInput() const {
     return VtkRenderInputView::FromMesh(graph,binding,m_dataManager->GetSurfaceMesh(graph,*binding->target));
 }
 
+bool AppRuntime::GetDataStageIdentityCurrent(const DataStageIdentity& identity,
+    const VtkRenderInputSnapshot& input) const
+{
+    // 调用方持有 m_transitionMutex；serial 覆盖一次冻结全部参数的候选尝试。
+    // 主绑定按值另行核验，不能把同指针、同数据重绑或无关图提交当作相同请求。
+    if (!m_dataStageIdentity || identity.serial != m_dataStageIdentity->serial
+        || identity.transitionRevision != m_transitionRevision
+        || identity.mode != static_cast<VizMode>(m_pendingVizModeInt.load())
+        || !input || !input->data || identity.dataRevision != input->data->self
+        || identity.binding.has_value() != input->binding.has_value()) return false;
+    return !identity.binding || (identity.binding->name == input->binding->name
+        && identity.binding->revision == input->binding->revision
+        && identity.binding->target == input->binding->target);
+}
+
+void AppRuntime::SetTransitionFailure(const DataStageIdentity& identity,
+    const DataStageStatus status)
+{
+    if (status != DataStageStatus::Failed && status != DataStageStatus::Cancelled) return;
+    const auto input = GetPrimaryRenderInput();
+    const std::lock_guard<std::mutex> lock(m_transitionMutex);
+    if (GetDataStageIdentityCurrent(identity, input)) m_transitionFailure = identity;
+}
+
+bool AppRuntime::GetHasTransitionFailure() const
+{
+    std::optional<DataStageIdentity> failure;
+    {
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        failure = m_transitionFailure;
+    }
+    if (!failure) return false;
+    const auto input = GetPrimaryRenderInput();
+    const std::lock_guard<std::mutex> lock(m_transitionMutex);
+    return m_transitionFailure && m_transitionFailure->serial == failure->serial
+        && GetDataStageIdentityCurrent(*failure, input);
+}
+
 DataStageStatus AppRuntime::BuildPipeline()
 {
     if (!GetIsOwnerThread() || !m_dataManager) return DataStageStatus::Failed;
@@ -2410,25 +2446,50 @@ DataStageStatus AppRuntime::BuildPipeline()
     if (m_dataStage && !m_dataStage->isRefresh) return DataStageStatus::Preparing;
     const auto snapshot = GetPrimaryRenderInput();
     if (!snapshot) return DataStageStatus::Idle;
+    DataStageIdentity requested;
+    {
+        const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        requested.serial = m_dataStageIdentity ? m_dataStageIdentity->serial : 0;
+        requested.transitionRevision = m_transitionRevision;
+        requested.mode = static_cast<VizMode>(m_pendingVizModeInt.load());
+        requested.dataRevision = snapshot->data->self;
+        requested.binding = snapshot->binding;
+    }
+    const auto fail = [&](const DataStageStatus status) {
+        if (requested.serial == 0) {
+            const std::lock_guard<std::mutex> lock(m_transitionMutex);
+            if (m_dataStageIdentity) return status;
+            requested.serial = 1;
+            m_dataStageIdentity = requested;
+        }
+        // 新请求也可能在旧候选清理阶段失败，尚未创建 nextStrategy。
+        // 只归属调用开始时的输入与模式；重入新尝试会使 serial/代数核验拒绝旧结果。
+        SetTransitionFailure(requested, status);
+        return status;
+    };
     if (m_dataStage && (!GetSameInput(m_dataStage->nextSnapshot, snapshot)
             || !GetStageCurrent(*m_dataStage))) {
-        if (!ClearDataStage(m_dataStage->transactionRevision)) return DataStageStatus::Failed;
+        if (!ClearDataStage(m_dataStage->transactionRevision)) return fail(DataStageStatus::Failed);
     }
     std::uint64_t revision = m_dataStage ? m_dataStage->transactionRevision : 0;
     if (!m_dataStage) {
         if (m_nextLoadTransactionRevision == (std::numeric_limits<std::uint64_t>::max)()) {
-            return DataStageStatus::Failed;
+            return fail(DataStageStatus::Failed);
         }
         revision = ++m_nextLoadTransactionRevision;
-        const auto started = StartDataStage(snapshot, revision);
-        if (!m_dataStage) return started;
-        m_dataStage->isRefresh = true;
+        const auto started = StartDataStage(snapshot, revision, {}, true);
+        if (!m_dataStage) return fail(started);
     }
+    const auto identity = m_dataStage->identity;
     const auto ready = SetDataStageReady(snapshot, revision);
     if (ready == DataStageStatus::Preparing) return ready;
     if (ready != DataStageStatus::Ready || !SetViewStage(snapshot, revision)) {
-        (void)ClearDataStage(revision);
-        return ready == DataStageStatus::Cancelled ? ready : DataStageStatus::Failed;
+        if (m_dataStage && m_dataStage->identity.serial == identity.serial) {
+            if (ready == DataStageStatus::Ready) m_dataStage->status = DataStageStatus::Failed;
+            (void)ClearDataStage(revision);
+        }
+        const auto terminal = ready == DataStageStatus::Cancelled ? ready : DataStageStatus::Failed;
+        return fail(terminal);
     }
     SetDataStageComplete(revision);
     return DataStageStatus::Ready;
@@ -2508,7 +2569,8 @@ void AppRuntime::SendAutoDisplayDefaults()
 
 DataStageStatus AppRuntime::StartDataStage(
     const VtkRenderInputSnapshot& snapshot,
-    const std::uint64_t transactionRevision,const std::optional<RenderEffectChange>& effectChange)
+    const std::uint64_t transactionRevision,const std::optional<RenderEffectChange>& effectChange,
+    const bool isRefresh)
 {
     if (!GetIsOwnerThread() || transactionRevision == 0
         || !snapshot || !snapshot->GetValid()
@@ -2533,6 +2595,7 @@ DataStageStatus AppRuntime::StartDataStage(
     } else if(!snapshot->meshView||snapshot->mesh->GetNumberOfPoints()==0)return DataStageStatus::Failed;
 
     DataStage stage;
+    stage.isRefresh = isRefresh;
     stage.effectChange=effectChange;stage.oldEffect=m_renderEffect.lock();
     stage.nextEffect=effectChange?effectChange->replacement:stage.oldEffect;
     stage.oldSnapshot = m_renderSnapshot;
@@ -2546,14 +2609,30 @@ DataStageStatus AppRuntime::StartDataStage(
         stage.mode = static_cast<VizMode>(m_pendingVizModeInt.load());
         stage.transitionRevision = m_transitionRevision;
         stage.nextParams = GetRenderParams(UpdateFlags::All);
+        if (m_dataStageIdentity
+            && m_dataStageIdentity->serial == (std::numeric_limits<std::uint64_t>::max)())
+            return DataStageStatus::Failed;
+        DataStageIdentity identity;
+        identity.serial = m_dataStageIdentity ? m_dataStageIdentity->serial + 1 : 1;
+        identity.transitionRevision = stage.transitionRevision;
+        identity.dataRevision = snapshot->data->self;
+        identity.binding = snapshot->binding;
+        identity.mode = stage.mode;
+        m_dataStageIdentity = std::move(identity);
+        stage.identity = *m_dataStageIdentity;
+        m_transitionFailure.reset();
     }
+    const auto finish = [&](const DataStageStatus status) {
+        if (isRefresh) SetTransitionFailure(stage.identity, status);
+        return status;
+    };
     stage.transactionRevision = transactionRevision;
     stage.status = DataStageStatus::Preparing;
-    if(!stage.oldCamera.isValid)return DataStageStatus::Failed;
+    if(!stage.oldCamera.isValid)return finish(DataStageStatus::Failed);
     if(snapshot->image) {
-        if(!PrimaryDataActivation::GetDataReadyState(snapshot->imageView,m_sharedState.get(),stage.readyState))return DataStageStatus::Failed;
+        if(!PrimaryDataActivation::GetDataReadyState(snapshot->imageView,m_sharedState.get(),stage.readyState))return finish(DataStageStatus::Failed);
     } else {
-        if(!snapshot->binding)return DataStageStatus::Failed;
+        if(!snapshot->binding)return finish(DataStageStatus::Failed);
         stage.readyState.hasImageGeometry=false;stage.readyState.dataRevision=snapshot->data->self;
         stage.readyState.bindingRevision=snapshot->binding->revision;
         snapshot->mesh->GetCenter(stage.readyState.cursorWorld.data());
@@ -2569,7 +2648,7 @@ DataStageStatus AppRuntime::StartDataStage(
             const auto low = stage.readyState.scalarRange[0];
             const auto high = stage.readyState.scalarRange[1];
             if (!std::isfinite(low) || !std::isfinite(high) || low > high)
-                return DataStageStatus::Failed;
+                return finish(DataStageStatus::Failed);
             // 统计尚未完成时保持原同步默认；后台结果不进入数据准备关键路径。
             stage.previousIso = stage.nextParams.isoValue;
             stage.nextParams.isoValue = GetAutoDisplayIso(snapshot).value_or(low * 0.5 + high * 0.5);
@@ -2585,7 +2664,7 @@ DataStageStatus AppRuntime::StartDataStage(
         !stage.nextParams.volumeTransferFunction.opacityNodes.empty();
     if (m_viewState->GetTransferAuto()) {
         const auto function = GetDefaultVolumeTransfer(snapshot);
-        if (!function) return DataStageStatus::Failed;
+        if (!function) return finish(DataStageStatus::Failed);
         stage.nextParams.volumeTransferFunction = *function;
         stage.hasDefaultTransfer = true;
     }
@@ -2596,11 +2675,11 @@ DataStageStatus AppRuntime::StartDataStage(
         || !GetTransferRangeValid(
             stage.nextParams.volumeTransferFunction,
             stage.readyState.scalarRange)) {
-        return DataStageStatus::Failed;
+        return finish(DataStageStatus::Failed);
     }
     const auto autoWindowLevel = GetAutoWindowLevel(
         stage.readyState.scalarRange);
-    if (!autoWindowLevel) return DataStageStatus::Failed;
+    if (!autoWindowLevel) return finish(DataStageStatus::Failed);
     stage.autoWindowLevel = *autoWindowLevel;
     if (const auto iso = GetAutoDisplayIso(snapshot)) stage.autoWindowLevel.windowCenter = *iso;
     if (m_viewState->GetWindowLevelMode()
@@ -2622,13 +2701,10 @@ DataStageStatus AppRuntime::StartDataStage(
         }
     }
 
-    stage.nextStrategy = snapshot->mesh?CreateMeshRenderStrategy():CreateStrategy(stage.mode);
-    if (!stage.nextStrategy
-        || stage.nextStrategy == stage.oldStrategy) {
-        return DataStageStatus::Failed;
-    }
-
     try {
+        stage.nextStrategy = snapshot->mesh?CreateMeshRenderStrategy():CreateStrategy(stage.mode);
+        if (!stage.nextStrategy || stage.nextStrategy == stage.oldStrategy)
+            return finish(DataStageStatus::Failed);
         constexpr auto producerFlags = static_cast<UpdateFlags>(
             static_cast<int>(UpdateFlags::Quality)
             | static_cast<int>(UpdateFlags::Denoise)
@@ -2664,7 +2740,7 @@ DataStageStatus AppRuntime::StartDataStage(
     if (stage.nextStrategy && effect && stage.isEffectAttached) {
         (void)stage.nextStrategy->DetachRenderEffect(effect.get());
     }
-    return DataStageStatus::Failed;
+    return finish(DataStageStatus::Failed);
 }
 
 DataStageStatus AppRuntime::SetDataStageReady(
@@ -2684,7 +2760,7 @@ DataStageStatus AppRuntime::SetDataStageReady(
         const auto effectChange=m_dataStage->effectChange;
         if (!ClearDataStage(transactionRevision)) return DataStageStatus::Failed;
         // Load 只替换显示候选，保留原事务号/输入和最终 callback。
-        const auto status = StartDataStage(snapshot, transactionRevision,effectChange);
+        const auto status = StartDataStage(snapshot, transactionRevision,effectChange,isRefresh);
         if (m_dataStage) m_dataStage->isRefresh = isRefresh;
         return status;
     }
@@ -2934,6 +3010,9 @@ bool AppRuntime::ClearDataStage(
     if (m_currentStrategy == m_dataStage->nextStrategy) {
         return false;
     }
+
+    // 在销毁候选之前保留实际终态；清理中的重入新请求会用新的 serial 使旧终态失效。
+    if (m_dataStage->isRefresh) SetTransitionFailure(m_dataStage->identity, m_dataStage->status);
 
     const auto effect = m_dataStage->nextEffect;
     bool isCleared = true;
