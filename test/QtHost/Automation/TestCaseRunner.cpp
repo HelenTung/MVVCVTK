@@ -72,7 +72,10 @@
 #include <QPointer>
 #include <QElapsedTimer>
 #include <QList>
+#include <QProxyStyle>
+#include <QStyleOptionComboBox>
 #include <exception>
+#include <stdexcept>
 #include <QAbstractItemModel>
 #include <QKeyEvent>
 #include <QSettings>
@@ -140,21 +143,24 @@ void DrivePopupInteraction(const std::function<void()>& open,const std::function
     retry.setTimerType(Qt::CoarseTimer);retry.setInterval(pollMs);
     deadline.setTimerType(Qt::CoarseTimer);deadline.setSingleShot(true);
     const auto stop=[&]{retry.stop();deadline.stop();};
+    const auto expire=[&]{expired=true;retry.stop();closePopups();};
     QObject::connect(&deadline,&QTimer::timeout,&deadline,[&] {
         const auto remaining=timeoutMs-elapsed.elapsed();
         if(remaining>0){deadline.start(static_cast<int>(std::max<qint64>(pollMs,remaining)));return;}
-        expired=true;stop();closePopups();
+        expire();
     });
     QObject::connect(&retry,&QTimer::timeout,&retry,[&] {
-        try {if(complete()){completed=true;stop();}}
-        catch(...){failure=std::current_exception();stop();closePopups();}
+        if(elapsed.elapsed()>=timeoutMs){expire();return;}
+        // 回调返回成功后，同步 open 仍可能停在原生嵌套循环，期限保留到它真正返回。
+        try {if(complete()){completed=true;retry.stop();}}
+        catch(...){failure=std::current_exception();retry.stop();closePopups();}
     });
     retry.start();deadline.start(timeoutMs);
     try {open();}
     catch(...){stop();closePopups();throw;}
     stop();
     if(failure)std::rethrow_exception(failure);
-    if(expired || !completed){closePopups();throw std::runtime_error(failureMessage);}
+    if(expired || !completed || elapsed.elapsed()>=timeoutMs){closePopups();throw std::runtime_error(failureMessage);}
 }
 namespace {
 QPixmap GrabWindow(TestWindow& window)
@@ -164,17 +170,52 @@ QPixmap GrabWindow(TestWindow& window)
 bool GetComboEnabled(QComboBox* combo,int index) { return combo->model()->flags(combo->model()->index(index,0)).testFlag(Qt::ItemIsEnabled); }
 void SelectComboIndex(QComboBox* combo,int index)
 {
-    if(combo->currentIndex()==index)return;
+    constexpr int pollMs=20,timeoutMs=5000;
+    auto* view=combo->view();auto* popup=view->window();
+    const bool alreadyOpen=!popup->isHidden() || QApplication::activePopupWidget()==popup;
+    if(combo->currentIndex()==index && !alreadyOpen)return;
+    QElapsedTimer elapsed;elapsed.start();
+    const auto waitFor=[&](const std::function<bool()>& ready,const char* message) {
+        while(!ready() && elapsed.elapsed()<timeoutMs) {
+            QEventLoop loop;QTimer observer;observer.setTimerType(Qt::CoarseTimer);observer.setInterval(pollMs);
+            QObject::connect(&observer,&QTimer::timeout,&loop,[&]{if(ready() || elapsed.elapsed()>=timeoutMs)loop.quit();});
+            observer.start();loop.exec();
+        }
+        if(elapsed.elapsed()>=timeoutMs || !ready()) {
+            combo->hidePopup();popup->close();throw std::runtime_error(message);
+        }
+    };
+    const auto waitUntilClosed=[&] {
+        waitFor([&]{return popup->isHidden() && !view->isVisible() && QApplication::activePopupWidget()!=popup;},
+            "原生下拉列表未在夹具期限内关闭");
+    };
+    if(alreadyOpen) {
+        waitFor([&]{return popup->isVisible() && view->isVisible() && QApplication::activePopupWidget()==popup;},
+            "已有下拉列表未在夹具期限内就绪");
+        if(combo->currentIndex()==index || !combo->isVisible()) {
+            QKeyEvent cancel(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(view,&cancel);
+            waitUntilClosed();
+            if(combo->currentIndex()==index)return;
+        }
+    }
     if(combo->isVisible()){
         // 展开后移动高亮，Enter 才选定；关闭列表时逐项按 Down 会实际打开每个中间表单。
-        QKeyEvent open(QEvent::KeyPress,Qt::Key_Down,Qt::AltModifier);QApplication::sendEvent(combo,&open);
-        auto* view=combo->view();
+        // Qt5 的展开动画会延后真正的 popup；未激活就按 Enter，动画结束可能重现旧列表。
+        // 证据见任务报告“下拉列表动画与残留弹窗”；原生 Coarse/20ms 同时避免 Win32 短 timer 唤醒缺口。
+        if(popup->isHidden()) {
+            QKeyEvent open(QEvent::KeyPress,Qt::Key_Down,Qt::AltModifier);QApplication::sendEvent(combo,&open);
+        }
+        waitFor([&]{return popup->isVisible() && view->isVisible() && QApplication::activePopupWidget()==popup;},
+            "原生下拉列表未在夹具期限内就绪");
         QKeyEvent first(QEvent::KeyPress,Qt::Key_Home,Qt::NoModifier);QApplication::sendEvent(view,&first);
         for(int attempt=0;view->currentIndex().row()!=index&&attempt<=combo->count();++attempt){
             QKeyEvent next(QEvent::KeyPress,view->currentIndex().row()<index?Qt::Key_Down:Qt::Key_Up,Qt::NoModifier);QApplication::sendEvent(view,&next);
         }
         QKeyEvent enter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier);QApplication::sendEvent(view,&enter);
-        if(combo->currentIndex()!=index)throw std::runtime_error("原生下拉列表未选中目标条目");
+        const bool selected=combo->currentIndex()==index;
+        if(!selected){combo->hidePopup();popup->close();}
+        waitUntilClosed();
+        if(!selected)throw std::runtime_error("原生下拉列表未选中目标条目");
         return;
     }
     QKeyEvent home(QEvent::KeyPress,Qt::Key_Home,Qt::NoModifier);QApplication::sendEvent(combo,&home);
@@ -242,6 +283,60 @@ void CheckPopupInteraction()
         },"popup assertion fixture did not complete");
     }catch(const std::runtime_error& error){preserved=std::string(error.what())=="intentional popup assertion";}
     Check(preserved && attempted && !failing.isVisible(),"popup assertion is rethrown after closing the native nested loop");
+
+    QMenu unfinished;unfinished.addAction("回调已完成但入口未返回");bool dispatched=false,unfinishedExpired=false;
+    try {
+        DrivePopupInteraction([&]{unfinished.exec(QPoint(30,30));},[&] {
+            if(QApplication::activePopupWidget()!=&unfinished)return false;
+            dispatched=true;return true;
+        },"completed callback left its popup open",intervalMs*5);
+    }catch(const std::runtime_error& error){unfinishedExpired=std::string(error.what())=="completed callback left its popup open";}
+    Check(dispatched && unfinishedExpired && !unfinished.isVisible(),
+        "popup deadline remains armed after completion until the synchronous entry returns");
+
+    struct RestoreEffects {
+        bool general=QApplication::isEffectEnabled(Qt::UI_General),combo=QApplication::isEffectEnabled(Qt::UI_AnimateCombo);
+        ~RestoreEffects(){QApplication::setEffectEnabled(Qt::UI_General,general);QApplication::setEffectEnabled(Qt::UI_AnimateCombo,combo);}
+    } restoreEffects;
+    QApplication::setEffectEnabled(Qt::UI_General,true);QApplication::setEffectEnabled(Qt::UI_AnimateCombo,true);
+    class AnimatedComboStyle final:public QProxyStyle {
+        int styleHint(QStyle::StyleHint hint,const QStyleOption* option,const QWidget* widget,QStyleHintReturn* data)const override {
+            return hint==QStyle::SH_ComboBox_Popup?0:QProxyStyle::styleHint(hint,option,widget,data);
+        }
+    };
+    class DelayedCombo final:public QComboBox {
+    public:
+        explicit DelayedCombo(int delayMs) {
+            opening.setTimerType(Qt::CoarseTimer);opening.setSingleShot(true);opening.setInterval(delayMs);
+            QObject::connect(&opening,&QTimer::timeout,this,[this]{++openings;QComboBox::showPopup();});
+        }
+        void showPopup()override{opening.start();returnedBeforeVisible=QApplication::activePopupWidget()!=view()->window();}
+        QTimer opening;bool returnedBeforeVisible=false;int openings=0;
+    } combo(intervalMs*3);
+    auto* style=new AnimatedComboStyle;style->setParent(&combo);combo.setStyle(style);
+    combo.addItems({"第一项","第二项","第三项"});combo.resize(240,32);combo.show();QCoreApplication::processEvents();
+    int activations=0;QObject::connect(&combo,QOverload<int>::of(&QComboBox::activated),&combo,[&](int){++activations;});
+    QStyleOptionComboBox option;option.initFrom(&combo);
+    Check(QApplication::isEffectEnabled(Qt::UI_AnimateCombo) && !combo.testAttribute(Qt::WA_DontShowOnScreen)
+        && !combo.style()->styleHint(QStyle::SH_ComboBox_Popup,&option,&combo),"native combo animation is enabled for the popup fixture");
+    SelectComboIndex(&combo,2);
+    Check(combo.returnedBeforeVisible && combo.openings==1 && combo.currentIndex()==2 && activations==1
+        && combo.view()->window()->isHidden() && QApplication::activePopupWidget()!=combo.view()->window(),
+        "delayed animated combo selects once and closes before navigation continues");
+    combo.QComboBox::showPopup();SelectComboIndex(&combo,2);
+    Check(combo.currentIndex()==2 && activations==1 && combo.view()->window()->isHidden(),
+        "same-index selection closes its existing popup without activating another operation");
+
+    QMenu blocked;blocked.addAction("保持原菜单动作");bool sawResidual=false,residualExpired=false;
+    QTimer residue;residue.setTimerType(Qt::CoarseTimer);residue.setSingleShot(true);residue.setInterval(intervalMs);
+    QObject::connect(&residue,&QTimer::timeout,&combo,[&]{combo.QComboBox::showPopup();});
+    try {
+        DrivePopupInteraction([&]{residue.start();blocked.exec(QPoint(30,30));},[&] {
+            sawResidual|=QApplication::activePopupWidget()==combo.view()->window();return false;
+        },"unrelated combo popup cannot satisfy a menu interaction",intervalMs*25);
+    }catch(const std::runtime_error& error){residualExpired=std::string(error.what())=="unrelated combo popup cannot satisfy a menu interaction";}
+    Check(sawResidual && residualExpired && !blocked.isVisible() && combo.view()->window()->isHidden()
+        && combo.currentIndex()==2 && activations==1,"unrelated residual combo is rejected and closed without dispatching a menu action");
 }
 QJsonObject GetCaptureScene(const HostSceneViewState& scene)
 {
