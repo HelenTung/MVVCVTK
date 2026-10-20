@@ -42,7 +42,6 @@
 #include <QFileInfo>
 #include <QFileDialog>
 #include <QGridLayout>
-#include <QVector>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTemporaryDir>
@@ -2787,13 +2786,13 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             if(step["checkViewTextFit"].toBool())CheckViewToolbarText(window);
             if(step.contains("expectedDpr"))Check(window.devicePixelRatioF()==GetNumber(step,"expectedDpr"),"the capture uses the requested application scale");
             if(step["checkPanelTextFit"].toBool()) {
-                QVector<QRect> previousGeometry;int stablePasses=0;
+                std::vector<QRect> previousGeometry;int stablePasses=0;
                 Check(Wait([&] {
                     // 约束变化可能继续投递 LayoutRequest；按实际几何收敛等待，不放宽文字或留白断言。
                     QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);
                     auto* scroll=page->findChild<QScrollArea*>("operationScroll");auto* footer=page->findChild<QWidget*>("businessCommandFooter");
-                    QVector<QRect> geometry{page->geometry(),scroll->geometry(),scroll->widget()->geometry(),footer->geometry()};
-                    for(auto* child:footer->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->isVisible())geometry.append(child->geometry());
+                    std::vector<QRect> geometry{page->geometry(),scroll->geometry(),scroll->widget()->geometry(),footer->geometry()};
+                    for(auto* child:footer->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->isVisible())geometry.push_back(child->geometry());
                     if(geometry==previousGeometry)++stablePasses;else {previousGeometry=geometry;stablePasses=0;}
                     return stablePasses>=2;
                 },static_cast<int>(getWaitMilliseconds(step))),"module layout geometry settles before inspection");
