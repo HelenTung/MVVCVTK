@@ -1278,6 +1278,94 @@ int GetIsoIndexReleaseFailCount()
         "Stop preserves an in-flight CPU upload reader and returns all bytes when its final reader exits") ? 0 : 1);
 }
 
+int GetIsoIndexCandidateFailCount()
+{
+    int failures = 0;
+    auto image = BuildIsoImage();
+    const auto request = GetIsoRequest(image, 1, VolumeQuality::Ultra, 0.0);
+    auto product = IsoSurfaceProductBuilder().BuildProduct(request, RenderTaskToken{}).product;
+    if (!product || !product->triangleIndices)
+        return GetCaseResult(false, "Iso index-only fixture has an immutable mesh and disposable cache") ? 0 : 1;
+    auto firstUpload = product->triangleIndices->TakeIndices();
+    if (!firstUpload)
+        return GetCaseResult(false, "Iso index-only fixture can consume its initial CPU indices") ? 0 : 1;
+    std::vector<unsigned int> reference;
+    vtkOpenGLIndexBufferObject::AppendTriangleIndexBuffer(reference,
+        product->surface->GetPolys(), product->surface->GetPoints(), 0, nullptr, nullptr);
+    firstUpload.reset();
+    const auto mesh = product->meshBytes;
+    const auto meshTime = product->surface->GetMeshMTime();
+    auto lane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator resources([lane](RenderLaneWork work) {return lane->Start(std::move(work));});
+    auto channel = resources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    std::shared_ptr<const std::vector<unsigned int>> candidate;
+    RenderTaskRequest work; work.requestRevision = 1;
+    work.estimatedBytes = *IsoSurfaceProductBuilder::GetIndexEstimatedBytes(product);
+    work.work = [&](RenderTaskToken token) {candidate = IsoSurfaceProductBuilder().BuildIndexCandidate(product, token);};
+    bool valid = resources.SetIsoSurfaceProduct(request.key, product)
+        && channel->StartTask(std::move(work)) == RenderTaskAdmission::Accepted && lane->SendOne()
+        && candidate && *candidate == reference && product->GetActualBytes() == mesh
+        && !product->triangleIndices->GetHasIndices()
+        && product->surface->GetMeshMTime() == meshTime;
+    if (!valid) return GetCaseResult(false, "Index-only preparation preserves exact VTK indices and immutable geometry") ? 0 : 1;
+    const auto bytes = candidate->capacity() * sizeof(unsigned int);
+    std::weak_ptr<const std::vector<unsigned int>> weakCandidate = candidate;
+    valid = resources.GetResourceState().pendingBytes == bytes
+        && resources.GetResourceState().cacheBytes == mesh
+        && !resources.SetCpuBudgetBytes(mesh) && valid;
+    product->triangleIndices->SetPreparedIndices(candidate);
+    candidate.reset();
+    auto upload = product->triangleIndices->TakeIndices();
+    auto otherReader = upload;
+    upload.reset();
+    valid = otherReader && *otherReader == reference && resources.GetResourceState().pendingBytes == bytes && valid;
+    otherReader.reset();
+    valid = weakCandidate.expired() && resources.GetResourceState().pendingBytes == 0
+        && resources.GetResourceState().cacheBytes == mesh && resources.SetCpuBudgetBytes(mesh) && valid;
+    failures += GetCaseResult(valid,
+        "Index-only candidate charges independent pending bytes once and refunds after its last upload reader, including a weak observer") ? 0 : 1;
+
+    bool tokenWasStopped = true;
+    RenderTaskRequest limited; limited.requestRevision = 2; limited.estimatedBytes = 0;
+    limited.work = [&](RenderTaskToken token) {
+        candidate = IsoSurfaceProductBuilder().BuildIndexCandidate(product, token);
+        tokenWasStopped = token.GetIsStopped();
+    };
+    valid = channel->StartTask(std::move(limited)) == RenderTaskAdmission::Accepted && lane->SendOne()
+        && !candidate && !tokenWasStopped && channel->GetState().status == RenderProductStatus::Ready
+        && resources.GetIsoSurfaceProduct(request.key) == product
+        && resources.GetResourceState().pendingBytes == 0;
+    failures += GetCaseResult(valid,
+        "Insufficient optional index-only workspace preserves a successful cached mesh without cancelling its token") ? 0 : 1;
+
+    const auto estimate = *IsoSurfaceProductBuilder::GetIndexEstimatedBytes(product);
+    valid = resources.SetCpuBudgetBytes(mesh + estimate);
+    bool sawReservation = false;
+    RenderTaskRequest cancelled; cancelled.requestRevision = 3; cancelled.estimatedBytes = 0;
+    cancelled.onNeeded = [&] {
+        sawReservation = channel->GetState().stats.candidateBytes > 0;
+        return !sawReservation;
+    };
+    cancelled.work = [&](RenderTaskToken token) {candidate = IsoSurfaceProductBuilder().BuildIndexCandidate(product, token);};
+    valid = channel->StartTask(std::move(cancelled)) == RenderTaskAdmission::Accepted && lane->SendOne()
+        && sawReservation && !candidate && resources.GetResourceState().runningBytes == 0
+        && resources.GetResourceState().pendingBytes == 0 && valid;
+    failures += GetCaseResult(valid,
+        "Cancelling an index-only candidate after reservation discards its private buffer and preserves cached geometry") ? 0 : 1;
+
+    RenderTaskRequest finalWork; finalWork.requestRevision = 4; finalWork.estimatedBytes = estimate;
+    finalWork.work = [&](RenderTaskToken token) {candidate = IsoSurfaceProductBuilder().BuildIndexCandidate(product, token);};
+    valid = channel->StartTask(std::move(finalWork)) == RenderTaskAdmission::Accepted && lane->SendOne() && candidate;
+    if (candidate) product->triangleIndices->SetPreparedIndices(candidate);
+    candidate.reset(); product.reset(); channel.reset();
+    valid = resources.StartStop() && resources.Stop(std::chrono::steady_clock::now() + std::chrono::seconds(1)) && valid;
+    const auto stopped = resources.GetResourceState();
+    failures += GetCaseResult(valid && stopped.activeBytes == 0 && stopped.pendingBytes == 0
+        && stopped.runningBytes == 0 && stopped.cacheBytes == 0,
+        "Stop evicts an unuploaded index-only cache without reentering its coordinator lock or leaking a lease") ? 0 : 1;
+    return failures;
+}
+
 int GetIsoIndexFailCount()
 {
     int failures = 0;
@@ -1447,6 +1535,47 @@ int GetIsoIndexFailCount()
             actor->GetProperty()->VertexVisibilityOff(); valid = samePixels("surface-return") && valid;
             // GPU 资源被释放后，同一不可变 CPU 产品必须重新上传，不能沿用旧 handle。
             optimized->ReleaseGraphicsResources(window); valid = samePixels("resource-reset") && valid;
+            params.volumeQuality = VolumeQuality::Low;
+            valid = strategy.SetVisualState(params, UpdateFlags::Quality) && lane->SendOne()
+                && strategy.SetProductCommit() && valid;
+            auto* lowSurface = vtkPolyDataMapper::SafeDownCast(optimized)->GetInput();
+            (void)pixels(); // 消耗Low索引，随后回到已释放CPU缓存的原生产品。
+            const auto beforeReturn = lane->GetStartCount();
+            const auto buildsBeforeReturn = resources->GetResourceState().productBuildCount;
+            params.volumeQuality = VolumeQuality::Ultra;
+            const bool accepted = strategy.SetVisualState(params, UpdateFlags::Quality);
+            valid = accepted && strategy.GetTransitionState().status == RenderProductStatus::Preparing
+                && vtkPolyDataMapper::SafeDownCast(optimized)->GetInput() == lowSurface
+                && lane->GetStartCount() == beforeReturn + 1 && lane->SendOne()
+                && resources->GetResourceState().pendingBytes > 0 && valid;
+            // 就绪但未提交的索引被新缓存请求取代，应立即丢弃邮箱缓冲。
+            params.volumeQuality = VolumeQuality::Low;
+            valid = strategy.SetVisualState(params, UpdateFlags::Quality)
+                && resources->GetResourceState().pendingBytes == 0
+                && vtkPolyDataMapper::SafeDownCast(optimized)->GetInput() == lowSurface && valid;
+            params.volumeQuality = VolumeQuality::Ultra;
+            valid = strategy.SetVisualState(params, UpdateFlags::Quality)
+                && strategy.GetTransitionState().status == RenderProductStatus::Preparing
+                && lane->GetStartCount() == beforeReturn + 2 && lane->SendOne()
+                && strategy.SetProductCommit()
+                && vtkPolyDataMapper::SafeDownCast(optimized)->GetInput() == product->surface
+                && resources->GetResourceState().productBuildCount == buildsBeforeReturn
+                && product->triangleIndices->GetHasIndices() && valid;
+            valid = samePixels("quality-return") && resources->GetResourceState().pendingBytes == 0 && valid;
+            params.volumeQuality = VolumeQuality::Low;
+            valid = strategy.SetVisualState(params, UpdateFlags::Quality) && lane->SendOne()
+                && strategy.SetProductCommit() && valid;
+            (void)pixels();
+            const auto used = resources->GetResourceState();
+            const auto startsBeforeFallback = lane->GetStartCount();
+            // 恰好容纳现存产品，拒绝可选重装配；原几何与原VTK绘制仍成功。
+            params.volumeQuality = VolumeQuality::Ultra;
+            valid = resources->SetCpuBudgetBytes(used.activeBytes + used.cacheBytes + used.pendingBytes + used.runningBytes)
+                && strategy.SetVisualState(params, UpdateFlags::Quality)
+                && strategy.GetTransitionState().status == RenderProductStatus::Active
+                && lane->GetStartCount() == startsBeforeFallback
+                && vtkPolyDataMapper::SafeDownCast(optimized)->GetInput() == product->surface && valid;
+            valid = samePixels("quality-budget-fallback") && resources->GetResourceState().pendingBytes == 0 && valid;
         }
         strategy.DetachRenderer(renderer);
         legacy->ReleaseGraphicsResources(window); optimized->ReleaseGraphicsResources(window);
@@ -1455,7 +1584,7 @@ int GetIsoIndexFailCount()
     const auto renderProduct = IsoSurfaceProductBuilder().BuildProduct(request, RenderTaskToken{});
     failures += GetCaseResult(checkRender(renderProduct.product, true)
         && renderProduct.product->GetActualBytes() == meshBytes,
-        "Prepared Iso indices release CPU storage and points/selection/representation/resource-reset fallbacks match legacy RGBA exactly") ? 0 : 1;
+        "Prepared Iso indices release CPU storage; quality reuse, budget, points, selection and resource-reset paths match legacy RGBA exactly") ? 0 : 1;
     failures += GetCaseResult(checkRender(fallback.product, false),
         "Optional Iso budget fallback renders exactly the same nonempty RGBA as the original mapper") ? 0 : 1;
 
@@ -1531,7 +1660,7 @@ int GetIsoIndexFailCount()
     failures += GetCaseResult(validLease && weakProduct.expired() && afterRelease.pendingBytes == 0
         && afterRelease.activeBytes == 0 && afterRelease.runningBytes == 0 && afterRelease.cacheBytes == 0,
         "An externally retained Iso actor owns its CPU indices until the final mapper reader releases them") ? 0 : 1;
-    return failures + GetIsoIndexReleaseFailCount() + GetIsoIndexProfileFailCount();
+    return failures + GetIsoIndexReleaseFailCount() + GetIsoIndexCandidateFailCount() + GetIsoIndexProfileFailCount();
 }
 
 int GetVolumeBuilderFailCount()

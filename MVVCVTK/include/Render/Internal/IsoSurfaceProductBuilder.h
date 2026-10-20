@@ -35,6 +35,10 @@ public:
         std::weak_ptr<const void> owner, std::function<void()> onReleased);
     ~IsoSurfaceIndexCache();
     std::shared_ptr<const std::vector<unsigned int>> TakeIndices();
+    bool GetHasIndices() const;
+    std::uint64_t GetExpectedBytes() const noexcept;
+    // 仅owner提交后台重装配的独立缓冲；该缓冲由自己的任务租约计费。
+    void SetPreparedIndices(std::shared_ptr<const std::vector<unsigned int>> indices);
     std::uint64_t GetBytes() const noexcept;
 private:
     class Impl;
@@ -72,6 +76,7 @@ struct IsoSurfaceBuildRequest final {
 struct IsoSurfaceBuildResult final {
     RenderProductFailure failureReason = RenderProductFailure::None;
     std::shared_ptr<const IsoSurfaceProduct> product;
+    std::shared_ptr<const std::vector<unsigned int>> preparedIndices;
     std::string message;
 };
 
@@ -80,6 +85,12 @@ public:
     // 首段只准入图像/计数工作区；worker 计数后、提取网格前追加网格预留。
     static std::optional<std::uint64_t> GetEstimatedBytes(
         const IsoSurfaceBuildRequest& request);
+    static std::optional<std::uint64_t> GetIndexEstimatedBytes(
+        const std::shared_ptr<const IsoSurfaceProduct>& product);
+    // 复用不可变几何，只在worker私有壳上装配；失败只丢可选索引。
+    std::shared_ptr<const std::vector<unsigned int>> BuildIndexCandidate(
+        const std::shared_ptr<const IsoSurfaceProduct>& product,
+        const RenderTaskToken& stopToken) const;
     IsoSurfaceBuildResult BuildProduct(
         const IsoSurfaceBuildRequest& request,
         const RenderTaskToken& stopToken) const;

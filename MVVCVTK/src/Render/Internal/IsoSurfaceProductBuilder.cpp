@@ -348,9 +348,11 @@ class IsoSurfaceIndexCache::Impl final {
 public:
     std::mutex mutex;
     std::unique_ptr<std::vector<unsigned int>> indices;
+    std::shared_ptr<const std::vector<unsigned int>> preparedIndices;
     std::weak_ptr<const void> owner;
     std::function<void()> onReleased;
     std::atomic<std::uint64_t> bytes{0};
+    std::uint64_t expectedBytes = 0;
 };
 
 IsoSurfaceIndexCache::IsoSurfaceIndexCache(std::vector<unsigned int> indices,
@@ -359,6 +361,7 @@ IsoSurfaceIndexCache::IsoSurfaceIndexCache(std::vector<unsigned int> indices,
 {
     m_impl->indices = std::make_unique<std::vector<unsigned int>>(std::move(indices));
     m_impl->bytes.store(m_impl->indices->capacity() * sizeof(unsigned int));
+    m_impl->expectedBytes = m_impl->bytes.load();
     m_impl->owner = std::move(owner);
     m_impl->onReleased = std::move(onReleased);
 }
@@ -370,10 +373,30 @@ std::uint64_t IsoSurfaceIndexCache::GetBytes() const noexcept
     return m_impl->bytes.load(std::memory_order_acquire);
 }
 
+bool IsoSurfaceIndexCache::GetHasIndices() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->mutex);
+    return m_impl->indices || m_impl->preparedIndices;
+}
+
+std::uint64_t IsoSurfaceIndexCache::GetExpectedBytes() const noexcept
+{
+    return m_impl->expectedBytes;
+}
+
+void IsoSurfaceIndexCache::SetPreparedIndices(
+    std::shared_ptr<const std::vector<unsigned int>> indices)
+{
+    std::lock_guard<std::mutex> lock(m_impl->mutex);
+    if (!m_impl->indices && !m_impl->preparedIndices)
+        m_impl->preparedIndices = std::move(indices);
+}
+
 std::shared_ptr<const std::vector<unsigned int>> IsoSurfaceIndexCache::TakeIndices()
 {
     // 不持缓存锁执行归还通知，避免与协调器的缓存驱逐锁形成反向顺序。
     std::unique_lock<std::mutex> lock(m_impl->mutex);
+    if (!m_impl->indices) return std::move(m_impl->preparedIndices);
     auto owner = m_impl->owner.lock();
     if (!owner || !m_impl->indices) return {};
     auto* indices = m_impl->indices.release();
@@ -386,6 +409,55 @@ std::shared_ptr<const std::vector<unsigned int>> IsoSurfaceIndexCache::TakeIndic
             m_impl->bytes.store(0, std::memory_order_release);
             if (m_impl->onReleased) m_impl->onReleased();
         });
+}
+
+std::optional<std::uint64_t> IsoSurfaceProductBuilder::GetIndexEstimatedBytes(
+    const std::shared_ptr<const IsoSurfaceProduct>& product)
+{
+    if (!product || !product->triangleIndices) return {};
+    RenderWorkBudget budget;
+    budget.Add(1, product->triangleIndices->GetExpectedBytes());
+    // 与原装配的4096个cell切片一致，四边形是受支持的最大单元。
+    budget.Add(5ULL * 4096 + 1, sizeof(vtkIdType));
+    budget.Add(1, 4096);
+    return budget.GetBytes();
+}
+
+std::shared_ptr<const std::vector<unsigned int>> IsoSurfaceProductBuilder::BuildIndexCandidate(
+    const std::shared_ptr<const IsoSurfaceProduct>& product,
+    const RenderTaskToken& stopToken) const
+{
+    try {
+        if (!product || !product->surface || !product->inputUse.GetIsPublished()
+            || product->triangleIndicesTime == 0
+            || product->triangleIndicesTime != product->surface->GetMeshMTime()
+            || stopToken.GetIsStopped()) return {};
+        // 共享几何只读；VTK遍历器、临时cell和索引均属于本worker候选。
+        auto surface = vtkSmartPointer<vtkPolyData>::New();
+        surface->ShallowCopy(product->surface);
+        auto indices = BuildTriangleIndices(surface, 0, stopToken);
+        if (!indices || stopToken.GetIsStopped() || !product->inputUse.GetIsPublished()
+            || product->triangleIndicesTime != product->surface->GetMeshMTime()) return {};
+        RenderWorkBudget retained;
+        retained.Add(indices->capacity(), sizeof(unsigned int));
+        const auto bytes = retained.GetBytes();
+        if (!bytes || !stopToken.TrySetActualBytes(*bytes)) return {};
+        // 沿既有产品租约登记独立分配身份，避免重复计入缓存几何的mesh字节。
+        auto owner = std::make_shared<const unsigned char>(0);
+        auto values = std::make_unique<std::vector<unsigned int>>(std::move(*indices));
+        std::shared_ptr<const std::vector<unsigned int>> candidate(values.release(),
+            [owner](const std::vector<unsigned int>* data) mutable noexcept {
+                delete data;
+                // 先释放存储，再使原有弱租约失效；即使缓存被锁内驱逐也不反向取锁。
+                owner.reset();
+            });
+        if (!stopToken.SetProductOwner(owner, *bytes)) return {};
+        return candidate;
+    }
+    catch (...) {
+        // 可选重装配不可把已成功的缓存几何改报失败。
+        return {};
+    }
 }
 
 std::optional<std::uint64_t> IsoSurfaceProductBuilder::GetEstimatedBytes(
