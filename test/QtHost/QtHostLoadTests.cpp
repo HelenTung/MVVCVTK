@@ -237,16 +237,47 @@ bool SetPrimaryBaseline(HostCoreServices& core)
 }
 
 bool SendSceneReady(HostViewRuntimeRegistry& views,
-    const DataRevisionRef& input, std::uint64_t& epoch)
+    const DataRevisionRef& input, std::uint64_t& epoch, DataBindingRevision expectedBinding = 0)
 {
+    const auto previous = views.GetSceneViewStates();
+    const auto oldEpoch = previous.empty() ? 0 : previous.front().sceneEpoch;
+    const auto oldBinding = previous.empty() || !previous.front().presentation
+        ? 0 : previous.front().presentation->bindingRevision;
+    const auto started = std::chrono::steady_clock::now();
     for (int poll = 0; poll < 1000; ++poll) {
         if (!SendFrame(views, epoch)) return false;
         const auto scenes = views.GetSceneViewStates();
+        if (expectedBinding != 0) {
+            // 缓存索引可在worker等待额外帧；提交前保持旧一致场景，
+            // 提交时两视图必须原子切到目标代次，不能出现混epoch/混binding。
+            const bool isConsistent = scenes.size() == 2
+                && scenes.front().presentation
+                && std::all_of(scenes.begin(), scenes.end(), [&](const auto& scene) {
+                    return scene.presentation && scene.presentation->dataRevision == input
+                        && scene.sceneEpoch == scenes.front().sceneEpoch
+                        && scene.presentation->bindingRevision == scenes.front().presentation->bindingRevision;
+                });
+            if (!isConsistent || (scenes.front().presentation->bindingRevision != expectedBinding
+                && (scenes.front().sceneEpoch != oldEpoch
+                    || scenes.front().presentation->bindingRevision != oldBinding))
+                || (scenes.front().presentation->bindingRevision == expectedBinding
+                    && expectedBinding != oldBinding && scenes.front().sceneEpoch <= oldEpoch)) {
+                std::cerr << "Scene binding wait observed a mixed or unexpected frame; poll=" << poll << '\n';
+                return false;
+            }
+        }
         if (!views.GetFrameRenderPending() && epoch != 0
             && scenes.size() == 2
             && std::all_of(scenes.begin(), scenes.end(), [&](const auto& scene) {
-                return scene.presentation && scene.presentation->dataRevision == input;
-            })) return true;
+                return scene.presentation && scene.presentation->dataRevision == input
+                    && (expectedBinding == 0 || scene.presentation->bindingRevision == expectedBinding);
+            })) {
+            if (expectedBinding != 0)
+                std::cout << "SCENE_BIND_READY polls=" << poll + 1 << " elapsed_ms="
+                    << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()
+                    << " binding=" << expectedBinding << '\n';
+            return true;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     std::cerr << "Scene fixture did not become ready; epoch=" << epoch << '\n';
@@ -625,7 +656,8 @@ bool GetSceneBindingValid()
             || scene.presentation->bindingRevision != original->binding->revision) return false;
     }
 
-    if (!SendFrame(views, epoch) || views.GetFrameRenderPending()) return false;
+    if (!SendSceneReady(views, original->data->self, epoch, ready.bindingRevision)
+        || views.GetFrameRenderPending()) return false;
     const auto scenes = views.GetSceneViewStates();
     return scenes.size() == 2 && scenes[0].presentation && scenes[1].presentation
         && scenes[0].presentation->bindingRevision == ready.bindingRevision
