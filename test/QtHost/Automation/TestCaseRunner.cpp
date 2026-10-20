@@ -19,6 +19,7 @@
 #include "Support/SceneNodes.h"
 #include "Support/CatalogNodes.h"
 #include "Support/ResultReport.h"
+#include "Support/ReferenceDataSource.h"
 #include "ReportWorkflowTests.h"
 #include "Support/WorkbenchStyle.h"
 #include <QTabWidget>
@@ -48,6 +49,7 @@
 #include <QImage>
 #include <QSet>
 #include <QTimer>
+#include <QThread>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QMouseEvent>
@@ -65,6 +67,8 @@
 #include <QContextMenuEvent>
 #include <iostream>
 #include <functional>
+#include <chrono>
+#include <future>
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -1784,6 +1788,86 @@ void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& dir
         window.GetWorkflow().onNavigate("Artifact", "Ring", {}); QCoreApplication::processEvents(); window.grab().save("artifact-buttons-ui.png");
     }
 }
+void CheckReadTaskStop()
+{
+    TestWindow closing;closing.SetViewsVisible(false);closing.show();
+    Check(Wait([&]{return closing.GetIsReady() || !closing.GetFailure().isEmpty();},5000)
+        && closing.GetIsReady(),"read Stop fixture initializes its actual Host session");
+    auto* data=closing.GetModule("Data");
+    std::promise<void> started,resume;auto release=resume.get_future().share();
+    const auto id=closing.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(id,"Observed",[&](const ReadTaskContext& context) {
+        started.set_value();release.wait();context.checkpoint();return QJsonObject{};
+    });
+    const bool reached=started.get_future().wait_for(std::chrono::seconds(5))==std::future_status::ready;
+    const bool stopped=closing.StopSession();
+    const bool pending=!closing.GetRecords().GetRecord(id)["isTerminal"].toBool();
+    resume.set_value();
+    const bool drained=Wait([&]{return closing.StopSession();},5000);
+    QCoreApplication::processEvents();
+    const auto record=closing.GetRecords().GetRecord(id);
+    Check(reached && !stopped && pending && drained && !data->property("readTasksBusy").toBool(),
+        "Stop remains retryable until the read worker and owner completion have drained");
+    Check(record["status"]=="Cancelled" && record["completeCount"].toInt()==1,
+        "Stop delivers the read cancellation once instead of a Stopped record followed by late completion");
+}
+#if defined(MANUAL_ROI)
+void CheckRoiReadTasks(TestWindow& window,DataRevisionRef roi,DataRevisionRef source,const QJsonObject& expected)
+{
+    class ReadFixture final : public HostFeature {
+    public:
+        ReferenceDataSource reader;
+        std::string_view GetFeatureId() const noexcept override {return "roi-read-task-regression";}
+        bool AttachHost(const HostFeatureContext& context) override {return reader.AttachHost(context);}
+        bool DetachHost() override {return reader.DetachHost();}
+        bool OnHostTick() override {return false;}
+    };
+    QTemporaryDir directory;Check(directory.isValid(),"ROI read output fixture exists");
+    const auto path=directory.filePath("mask.raw");const QByteArray original("preserved ROI output");
+    QFile file(path);Check(file.open(QIODevice::WriteOnly) && file.write(original)==original.size(),"ROI read fixture preserves an existing target");file.close();
+    const auto fixture=std::make_shared<ReadFixture>();
+    Check(window.GetSession()->AttachFeature(fixture),"ROI read fixture obtains the actual trusted data port on the owner thread");
+    const auto work=fixture->reader.CreateRoiReadTask(roi,source,path);
+    const auto failedWork=fixture->reader.CreateRoiReadTask(roi,source,path+"/mask.raw");
+    Check(window.GetSession()->DetachFeature(*fixture),"ROI read work is frozen before its adapter detaches");
+    auto* data=window.GetModule("Data");
+    std::promise<void> reading,resume;auto release=resume.get_future().share();bool offOwner=false,heartbeat=false;
+    const auto owner=QThread::currentThread();
+    const auto cancelled=window.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(cancelled,"Observed",[&](const ReadTaskContext& context) {
+        offOwner=QThread::currentThread()!=owner;int checkpoints=0;auto controlled=context;
+        // 第二个检查点在实际掩码读取内；取消必须穿过底层的异常转换后回到协调器。
+        controlled.checkpoint=[&] {if(++checkpoints==2){reading.set_value();release.wait();}context.checkpoint();};
+        return work(controlled);
+    });
+    const bool reached=reading.get_future().wait_for(std::chrono::seconds(5))==std::future_status::ready;
+    QTimer::singleShot(0,&window,[&]{heartbeat=true;});
+    const bool responsive=Wait([&]{return heartbeat;},5000);
+    const auto accepted=data->CancelReadTasks();resume.set_value();
+    GetComplete(window,cancelled,"Cancelled",5000);
+    Check(reached && responsive && offOwner && accepted==1,"ROI mask cancellation is cooperative while the owner event loop stays responsive");
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==original,"cancelled ROI mask read leaves the existing output intact");file.close();
+    std::promise<void> committing,finish;auto finishCommit=finish.get_future().share();bool ownerComplete=false;
+    const auto committed=window.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(committed,"Observed",[&](const ReadTaskContext& context) {
+        auto controlled=context;
+        controlled.commit=[&](const std::function<void()>& publish) {
+            context.commit([&]{committing.set_value();finishCommit.wait();publish();});
+        };
+        return work(controlled);
+    },[&]{ownerComplete=QThread::currentThread()==owner;});
+    const bool began=committing.get_future().wait_for(std::chrono::seconds(5))==std::future_status::ready;
+    const auto late=data->CancelReadTasks();finish.set_value();
+    const auto result=GetComplete(window,committed,"Observed",5000)["result"].toObject();
+    Check(began && late==0 && ownerComplete && result==expected,"frozen ROI read preserves exact results and completes on the owner after the commit boundary");
+    const QByteArray allSelected(static_cast<int>(expected["gridCount"].toString().toULongLong()),char(1));
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==allSelected,"whole-source threshold exports exactly one selected byte per source voxel");file.close();
+    const auto failed=window.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(failed,"Observed",failedWork);
+    GetComplete(window,failed,"Failed",5000);
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==allSelected,"ROI output failure does not replace the prior complete mask");
+}
+#endif
 void CheckSharedRoi(TestWindow& window)
 {
 #if defined(MANUAL_ROI)
@@ -1989,7 +2073,10 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Click(window,"Roi","Threshold",{{"roi",""},{"outputMode","CreateNew"},
         {"grayRange",GetValues(image->scalarRange)}}),"PreviewReady");
     const auto whole=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
-    const auto beforeClose=GetComplete(window,Send(window,"Data","ReadRoi",{{"roi",whole},{"maskPath",""}}),"Observed")["result"].toObject();
+    const auto readId=Send(window,"Data","ReadRoi",{{"roi",whole},{"maskPath",""}});
+    Check(window.GetModule("Data")->property("readTasksBusy").toBool()
+        && !window.GetRecords().GetRecord(readId)["isTerminal"].toBool(),"Data.ReadRoi returns to the owner before completing its full mask scan");
+    const auto beforeClose=GetComplete(window,readId,"Observed")["result"].toObject();
     GetComplete(window,Click(window,"Roi","Close",{{"roi",whole},{"outputMode","CreateNew"},
         {"radius",1.0},{"radiusUnit","Voxels"}}),"PreviewReady");
     const auto closed=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
@@ -2001,6 +2088,7 @@ void CheckSharedRoi(TestWindow& window)
         && beforeClose["voxelCount"]==afterClose["voxelCount"]
         && beforeClose["binaryMaskSha256"]==afterClose["binaryMaskSha256"],
         "closing a saved full-source threshold preserves all members when committed through the real ROI buttons");
+    CheckRoiReadTasks(window,GetRef(whole),image->dataRevision,beforeClose);
 #endif
 }
 void StartSelfTest(TestWindow& window)
@@ -2456,6 +2544,7 @@ void StartSelfTest(TestWindow& window)
     Check(reportOwner.expired(),"session closing releases native report rows while the report widget remains alive");
     Check(!closingReports->GetReportIds().contains("session-closing-native-rows"),"closing removes the native document while late terminal records remain available");
     Check(window.GetRecords().GetRecord(pendingLoad)["completeCount"].toInt() == 1, "Stop delivers late completion once while receiver lives");
+    CheckReadTaskStop();
 }
 QJsonValue GetResolved(const QJsonValue& value, const QJsonObject& results)
 {

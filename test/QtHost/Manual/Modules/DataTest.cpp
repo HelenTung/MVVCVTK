@@ -186,7 +186,7 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
         const auto catalog=panel->GetSession()->GetRoiDescriptors();
         if(catalog.empty())throw std::runtime_error("ROI unavailable");
         const auto ref=GetText(p,"roi")=="latest"?catalog.back().revision:GetRef(p["roi"]);
-        panel->SetComplete(id,"Observed",reference->ReadRoi(ref,input->dataRevision,GetText(p,"maskPath")));
+        panel->StartReadTask(id,"Observed",reference->CreateRoiReadTask(ref,input->dataRevision,GetText(p,"maskPath")));
     },TestPolicy::Read);
     return panel;
 }

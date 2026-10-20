@@ -1,5 +1,6 @@
 // 测试用途：为功能测试受控发布名义参考和二值掩码，保持真实数据图修订链。
 #include "ReferenceDataSource.h"
+#include "Modules/ModulePanel.h"
 #include "Host/VtkAppHostSession.h"
 #include "App/Services/FeatureViewService.h"
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include "Data/DataPayloads.h"
 #include <QCryptographicHash>
 #include <QFile>
+#include <QSaveFile>
 #include <QFileInfo>
 #include <QDir>
 #include <QJsonDocument>
@@ -184,36 +186,48 @@ QJsonObject ReferenceDataSource::ReadWallInputs(DataRevisionRef labelsRef, DataR
         {"meshTriangleCount", QString::number(mesh->GetTriangleIndices().size() / 3)}};
 }
 
-QJsonObject ReferenceDataSource::ReadRoi(DataRevisionRef ref, DataRevisionRef source, const QString& maskPath)
+std::function<QJsonObject(const ReadTaskContext&)> ReferenceDataSource::CreateRoiReadTask(
+    DataRevisionRef ref, DataRevisionRef source, const QString& maskPath)
 {
+    if (!m_data) throw std::invalid_argument("可信输入适配器尚未挂载");
     const auto graph = m_data->GetDataGraph();
     const auto read = m_data->GetRoi(graph, ref, source);
     const auto data = m_data->GetData(graph, source);
     const auto image = data ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(data->payload) : nullptr;
     if (!read.roi || !image) throw std::runtime_error("ROI/source unavailable");
-    const auto& grid = image->GetGeometry();
-    RoiMaskRequest request; request.region.offset = {0,0,0};
-    for (int a=0;a<3;++a) request.region.size[a]=grid.dimensions[a];
-    request.chunkBytes=roiChunkBytes;
-    QFile output(maskPath);
-    if (!maskPath.isEmpty() && (!QDir().mkpath(QFileInfo(maskPath).absolutePath()) || !output.open(QIODevice::WriteOnly)))
-        throw std::runtime_error("无法保存 ROI 掩码");
-    std::uint64_t selected=0,total=0; QCryptographicHash hash(QCryptographicHash::Sha256);
-    for (;;) {
-        const auto chunk=read.roi->GetMaskChunk(request);
-        if (chunk.error!=RoiError::None) throw std::runtime_error("ROI read failed");
-        for (auto value:chunk.values) selected += value!=0;
-        total+=chunk.values.size();
-        if (!maskPath.isEmpty() && output.write(reinterpret_cast<const char*>(chunk.values.data()),static_cast<qint64>(chunk.values.size())) != static_cast<qint64>(chunk.values.size()))
-            throw std::runtime_error("ROI 掩码输出不完整");
-        hash.addData(reinterpret_cast<const char*>(chunk.values.data()),static_cast<int>(chunk.values.size()));
-        if(chunk.isComplete)break;
-        request.voxelOffset=chunk.nextOffset;
-    }
-    return {{"roi",GetRefText(ref)},{"source",GetRefText(source)}, {"bounds",GetValues(read.roi->GetBounds())},
-        {"voxelCount",QString::number(selected)},{"gridCount",QString::number(total)},
-        {"volumeMM3",selected*grid.spacing[0]*grid.spacing[1]*grid.spacing[2]},
-        {"binaryMaskSha256",QString::fromLatin1(hash.result().toHex())}};
+    // 不把适配器或 Host port 带到工作线程，源切换/Detach 后仍读同一冻结修订。
+    return [roi=read.roi,grid=image->GetGeometry(),ref,source,maskPath](const ReadTaskContext& context) {
+        context.checkpoint();
+        RoiMaskRequest request; request.region.offset = {0,0,0};
+        for (int a=0;a<3;++a) request.region.size[a]=grid.dimensions[a];
+        request.chunkBytes=roiChunkBytes;
+        // 底层按行检查；其异常转为 Cancelled 后，再由 checkpoint 恢复协调器的取消终态。
+        request.getCancelled=[&context] { context.checkpoint(); return false; };
+        QSaveFile output(maskPath);
+        if (!maskPath.isEmpty() && (!QDir().mkpath(QFileInfo(maskPath).absolutePath()) || !output.open(QIODevice::WriteOnly)))
+            throw std::runtime_error("无法保存 ROI 掩码");
+        std::uint64_t selected=0,total=0; QCryptographicHash hash(QCryptographicHash::Sha256);
+        for (;;) {
+            const auto chunk=roi->GetMaskChunk(request);
+            context.checkpoint();
+            if (chunk.error!=RoiError::None) throw std::runtime_error("ROI read failed");
+            for (auto value:chunk.values) selected += value!=0;
+            total+=chunk.values.size();
+            if (!maskPath.isEmpty() && output.write(reinterpret_cast<const char*>(chunk.values.data()),static_cast<qint64>(chunk.values.size())) != static_cast<qint64>(chunk.values.size()))
+                throw std::runtime_error("ROI 掩码输出不完整");
+            hash.addData(reinterpret_cast<const char*>(chunk.values.data()),static_cast<int>(chunk.values.size()));
+            if(chunk.isComplete)break;
+            request.voxelOffset=chunk.nextOffset;
+        }
+        context.checkpoint();
+        if (!maskPath.isEmpty()) context.commit([&output] {
+            if (!output.commit()) throw std::runtime_error("ROI 掩码提交失败");
+        });
+        return QJsonObject{{"roi",GetRefText(ref)},{"source",GetRefText(source)}, {"bounds",GetValues(roi->GetBounds())},
+            {"voxelCount",QString::number(selected)},{"gridCount",QString::number(total)},
+            {"volumeMM3",selected*grid.spacing[0]*grid.spacing[1]*grid.spacing[2]},
+            {"binaryMaskSha256",QString::fromLatin1(hash.result().toHex())}};
+    };
 }
 ReferenceInput ReferenceDataSource::LoadReference(const QString& path, DataRevisionRef source, DataRevisionRef mesh)
 {
