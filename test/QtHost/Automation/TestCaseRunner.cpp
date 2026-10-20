@@ -485,6 +485,7 @@ void CheckUiAndRecords(TestWindow& window)
     }
     window.GetWorkflow().onNavigate("Data", "Load", {});
     Check(workspaces->currentIndex() == 0 && tabs->itemData(tabs->currentIndex()) == "Data", "cross-workspace navigation returns to input");
+    Check(window.GetModule("Data")->GetFeedback().isEmpty(),"navigation instructions stay in help and the log without reserving fixed feedback height");
     auto* diagnostics=window.findChild<QAction*>("showDiagnostics");
     auto* details=window.findChild<QWidget*>("diagnosticDetails");
     auto* showResults=window.findChild<QToolButton*>("showBusinessStatistics");

@@ -676,7 +676,14 @@ void TestWindow::BuildSession()
             m_browsers->addWidget(page->GetBrowser()); m_pages->addWidget(page);
             m_statisticsPages->addWidget(page->GetStatisticsWidget());
             page->GetStatisticsWidget()->SetCompact(true);
-            page->onMessage = [this,page](const QString& message) { AppendLog(message,page->GetDisplayName());m_feedbackText=message;page->SetFeedback(message); };
+            page->onMessage = [this,page](const QString& message) {
+                AppendLog(message,page->GetDisplayName());m_feedbackText=message;
+                // 选操作时的通用说明已在帮助中；固定反馈区保留业务结果与需要处理的提示。
+                const auto action=page->GetCurrentAction();const auto description=GetActionDescription(page->GetName(),action);
+                const auto prefix=page->GetDisplayName()+" · ";
+                if(message!=prefix+description && message!=prefix+GetActionText(page->GetName(),action)+" ｜ "+description)
+                    page->SetFeedback(message);
+            };
         }
         m_workflow.onCopyParameters = [this](const QString& module, const QString& action, const QJsonObject& patch) {
             auto* page = GetModule(module);
