@@ -180,7 +180,10 @@ void CheckWorkbenchV1(TestWindow& window)
         }
         Require(advancedRegion && regionDetails && !advancedRegion->isHidden() && advancedRegion->isAncestorOf(regionDetails),"sphere ROI retains its metadata in the advanced group when matrix fields are inapplicable");
         advancedRegion->findChild<QToolButton*>("sectionToggle")->click();regionDetails->findChild<QToolButton*>("sectionToggle")->click();QCoreApplication::processEvents();
-        Require(begin->GetField("group")->isVisible() && begin->GetField("description")->isVisible(),"sphere ROI metadata can still be expanded and edited");begin->SetValue(saved);
+        Require(begin->GetField("group")->isVisible() && begin->GetField("description")->isVisible(),"sphere ROI metadata can still be expanded and edited");
+        advancedRegion->findChild<QToolButton*>("sectionToggle")->setChecked(false);regionDetails->findChild<QToolButton*>("sectionToggle")->setChecked(false);
+        begin->SetPatch({{"shape",saved.toObject()["shape"]}});
+        Require(begin->GetValue()==saved && begin->GetField("radius"),"restoring the tested shape retains all visible and hidden parameter editors");
         roi->SelectAction("Difference");auto* form=roi->GetParameterEditor("Difference");
         Require(!form->GetField("operands")->isHidden() && form->GetField("radius")->isHidden(),"difference offers operands without unrelated morphology parameters");
         auto* primary=roi->findChild<QPushButton*>("businessPrimary");auto* scroll=roi->findChild<QScrollArea*>("operationScroll");
