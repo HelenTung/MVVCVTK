@@ -1,5 +1,6 @@
 // 测试用途：启动交互式功能手动测试窗口；自动回归由独立自动化项目执行。
 #include "App/TestWindow.h"
+#include "Support/WorkbenchStyle.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QSurfaceFormat>
@@ -9,11 +10,13 @@
 
 int main(int argc, char* argv[])
 {
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
     auto format = QVTKOpenGLNativeWidget::defaultFormat(); format.setSamples(0); format.setAlphaBufferSize(8);
     QSurfaceFormat::setDefaultFormat(format);
     QApplication app(argc, argv);
+    app.setStyleSheet(Manual::GetWorkbenchStyle());
     QCommandLineParser parser;
     parser.setApplicationDescription("全功能手动测试；结构化参数支持 JSON 导入。");
     parser.addHelpOption();

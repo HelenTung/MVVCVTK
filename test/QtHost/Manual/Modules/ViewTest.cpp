@@ -210,6 +210,13 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
         auto* isoField = display->GetField("iso");
         if (applied && !isoField->findChild<QCheckBox*>("specified")->isChecked())
             isoField->SetDefaultValue(applied->isoThreshold);
+        if(applied){
+            display->GetField("mode")->SetDefaultValue(ModeName(applied->viewMode));
+            display->GetField("opacity")->SetDefaultValue(applied->material.opacity);
+            display->GetField("windowLevel")->SetDefaultValue(QJsonArray{applied->windowLevel.windowWidth,applied->windowLevel.windowCenter});
+            QString quality;switch(applied->volumeQuality){case HostVolumeQuality::Auto:quality="Auto";break;case HostVolumeQuality::Low:quality="Low";break;case HostVolumeQuality::High:quality="High";break;case HostVolumeQuality::XHigh:quality="XHigh";break;case HostVolumeQuality::Ultra:quality="Ultra";break;}
+            display->GetField("quality")->SetDefaultValue(quality);
+        }
         display->GetField("axes")->SetAppliedBoolean(applied ? QJsonValue(applied->isAxesVisible) : QJsonValue(), viewId, applied ? QString() : "当前没有可用视图");
         auto* visibility = panel->GetParameterEditor("Visibility");
         const auto scope = visibility->GetField("viewScope")->GetValue().toString();
@@ -233,7 +240,10 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
             QJsonArray colors,opacities;for(const auto& node:applied->volumeTransferFunction.colorNodes)colors.append(QJsonArray{node.scalar,node.r,node.g,node.b});for(const auto& node:applied->volumeTransferFunction.opacityNodes)opacities.append(QJsonArray{node.scalar,node.opacity});
             const QJsonObject transfer{{"colorNodes",colors},{"opacityNodes",opacities}};if(specified("transfer"))dirty=dirty || p["transfer"].toObject()!=transfer;
             appliedValues={{"mode",ModeName(applied->viewMode)},{"iso",applied->isoThreshold},{"windowLevel",QJsonArray{applied->windowLevel.windowWidth,applied->windowLevel.windowCenter}},{"transfer",transfer}};
-            if(ModeName(effectiveMode).contains("IsoSurface")){markers.append(QJsonObject{{"label","已应用 ISO"},{"value",applied->isoThreshold}});if(specified("iso"))markers.append(QJsonObject{{"label","草稿 ISO"},{"value",p["iso"]}});}
+            if(ModeName(effectiveMode).contains("IsoSurface")){
+                markers.append(QJsonObject{{"label","已应用 ISO · 只读参照"},{"value",applied->isoThreshold},{"style","dashed"}});
+                markers.append(QJsonObject{{"label","显示 ISO"},{"key","iso"},{"editable",true},{"value",specified("iso")?p["iso"]:QJsonValue(applied->isoThreshold)}});
+            }
             else if(ModeName(effectiveMode).startsWith("Slice")){const auto width=applied->windowLevel.windowWidth,center=applied->windowLevel.windowCenter;markers.append(QJsonObject{{"label","窗口下界"},{"value",center-width*0.5}});markers.append(QJsonObject{{"label","窗口上界"},{"value",center+width*0.5}});}
             else for(const auto& node:applied->volumeTransferFunction.opacityNodes)markers.append(QJsonObject{{"label","传递节点"},{"value",node.scalar}});
         }catch(const std::exception&){dirty=true;}

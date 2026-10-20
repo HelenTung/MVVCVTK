@@ -12,7 +12,9 @@
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QToolButton>
-#include <QSplitter>
+#include <QDockWidget>
+#include <QVTKOpenGLNativeWidget.h>
+#include <QToolBar>
 #include <QSettings>
 #include <QApplication>
 #include <QStyle>
@@ -22,11 +24,17 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QFocusEvent>
+#include <QShortcutEvent>
 #include <QLocale>
 #include <QMenu>
+#include <QTemporaryDir>
 #include <QLayout>
 #include <stdexcept>
+#include <algorithm>
+#include <array>
+#include <functional>
 #include <cmath>
+#include <algorithm>
 namespace Manual {
 namespace {
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
@@ -40,14 +48,16 @@ void CheckNavigationWidth(TestWindow& window)
             if(!groups->model()->flags(groups->model()->index(group,0)).testFlag(Qt::ItemIsEnabled))continue;
             groups->setCurrentIndex(group);
             for(int module=0;module<modules->count();++module) {
-                modules->setCurrentIndex(module);QCoreApplication::processEvents();
+                modules->setCurrentIndex(module);QCoreApplication::processEvents();QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);window.layout()->activate();window.findChild<QToolBar*>("quickToolbar")->layout()->activate();QCoreApplication::processEvents();
                 CheckViewToolbarText(window);
-                for(auto* combo:{groups,modules}) {
-                    QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
-                    const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
-                    Require(combo->fontMetrics().horizontalAdvance(combo->currentText())<=field.width(),"every current category and module name fits its actual text field at all three window sizes");
-                    Require(window.rect().contains(QRect(combo->mapTo(&window,QPoint()),combo->size())),"navigation selectors remain inside the minimum-width window");
-                }
+                auto* steps=window.findChild<QTabBar*>("workflowSteps");Require(steps&&steps->isVisible(),"work steps remain visible at each supported width");
+                Require(window.rect().contains(QRect(steps->mapTo(&window,QPoint()),steps->size())),"work steps remain inside the minimum-width window");
+                auto* context=window.findChild<QToolBar*>("contextToolbar");Require(context && !context->actions().isEmpty(),"the current step exposes one layer of tools");
+                auto* toolbar=window.findChild<QToolBar*>("quickToolbar");
+                for(auto* entry:toolbar->actions())if(entry->isVisible())if(auto* widget=toolbar->widgetForAction(entry)){
+                    if(widget->sizePolicy().horizontalPolicy()==QSizePolicy::Expanding&&widget->objectName().isEmpty())continue;
+                    const auto message=QString("toolbar entry fits: window %1, group %2, name [%3], text [%4], visible %5, width %6, x %7, bar %8").arg(window.width()).arg(group).arg(widget->objectName(),entry->text()).arg(widget->isVisible()).arg(widget->width()).arg(widget->mapTo(toolbar,QPoint()).x()).arg(toolbar->width());Require(widget->isVisible()&&toolbar->rect().contains(QRect(widget->mapTo(toolbar,QPoint()),widget->size())),message.toUtf8().constData());}
+                for(int i=0;i<steps->count();++i){const auto message=QString("workflow stage fits: window %1, group %2, tab %3 [%4,%5 %6x%7], bar %8x%9").arg(window.width()).arg(group).arg(i).arg(steps->tabRect(i).x()).arg(steps->tabRect(i).y()).arg(steps->tabRect(i).width()).arg(steps->tabRect(i).height()).arg(steps->width()).arg(steps->height());Require(steps->rect().contains(steps->tabRect(i)),message.toUtf8().constData());}
             }
         }
     }
@@ -95,6 +105,7 @@ void CheckModulePanelText(ModulePanel& panel)
     for(auto* label:panel.findChildren<QLabel*>("parameterTitle")) {
         auto* field=label->parentWidget();
         if(label->visibleRegion().isEmpty() || !field->property("propertyRow").toBool())continue;
+        const auto font=label->font();Require((font.pixelSize()>0?font.pixelSize():font.pointSizeF()*label->logicalDpiY()/72.0)>=16,"property typography meets the 16 px desktop baseline");
         QWidget* body=nullptr;
         for(auto* child:field->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->property("parameterValue").toBool())body=child;
         const auto below=field->property("vectorBelow").toBool();
@@ -126,25 +137,46 @@ void CheckModulePanelText(ModulePanel& panel)
 }
 void CheckWorkbenchV1(TestWindow& window)
 {
-    CheckNavigationWidth(window);
-    auto* split=window.findChild<QSplitter*>("workbenchSplit");
-    auto* objects=window.findChild<QToolButton*>("toggleObjectColumn");
-    auto* parameters=window.findChild<QToolButton*>("toggleParameterColumn");
-    auto* viewArea=window.findChild<QWidget*>("viewArea");
-    objects->setChecked(true);parameters->setChecked(true);QCoreApplication::processEvents();
-    const auto originalSizes=split->sizes();const int originalCanvas=viewArea->width();
-    for(const auto& entry:{std::pair<int,QToolButton*>{0,objects},{2,parameters}}) {
-        entry.second->setFocus();
-        QKeyEvent press(QEvent::KeyPress,Qt::Key_Space,Qt::NoModifier),release(QEvent::KeyRelease,Qt::Key_Space,Qt::NoModifier);
-        QApplication::sendEvent(entry.second,&press);QApplication::sendEvent(entry.second,&release);QCoreApplication::processEvents();
-        Require(split->widget(entry.first)->isHidden() && viewArea->width()>originalCanvas,"keyboard collapse gives the released sidebar width to the views");
-        Require(window.focusWidget()==entry.second,"collapsed sidebar leaves logical keyboard focus on its expand button");
-        QSettings preferences(QCoreApplication::applicationDirPath()+"/QtFeatureWorkbench.ini",QSettings::IniFormat);
-        Require(!preferences.value(entry.first==0?"layout/objectsVisible":"layout/parametersVisible").toBool(),"collapsed state is written to persistent preferences");
-        QApplication::sendEvent(entry.second,&press);QApplication::sendEvent(entry.second,&release);QCoreApplication::processEvents();
-        Require(split->widget(entry.first)->isVisible() && std::abs(split->sizes()[entry.first]-originalSizes[entry.first])<=2,"keyboard expansion restores the last sidebar width");
+    {
+        QTemporaryDir directory;Require(directory.isValid(),"startup Stop regression has isolated layout settings");const auto saved=qApp->property("workbenchLayoutPath");qApp->setProperty("workbenchLayoutPath",directory.filePath("startup.ini"));
+        {TestWindow initializing;initializing.BuildSession();Require(!initializing.GetIsReady()&&initializing.GetSession(),"phased initialization returns after the owner Session stage");Require(initializing.StopSession(),"Stop can finish between initialization phases");QCoreApplication::processEvents();Require(!initializing.GetIsReady(),"queued initialization cannot resume after Stop");}
+        qApp->setProperty("workbenchLayoutPath",saved);
     }
+    CheckNavigationWidth(window);
+    auto* objects=window.findChild<QToolButton*>("toggleObjectColumn");auto* parameters=window.findChild<QToolButton*>("toggleParameterColumn");
+    window.ResetLayout();objects->setChecked(true);parameters->setChecked(true);QCoreApplication::processEvents();
+    auto* primary=window.findChild<QWidget*>("primary3D");
+    for(const auto& entry:{std::pair<QString,QToolButton*>{"sceneDock",objects},{"parameterDock",parameters}}){
+        auto* dock=window.findChild<QDockWidget*>(entry.first);const auto width=dock->width(),canvas=primary->width();auto* action=window.findChild<QAction*>(entry.first=="sceneDock"?"toggleObjectDock":"toggleParameterDock");Require(action&&!action->shortcut().isEmpty(),"window menu exposes a bound keyboard action");
+        QShortcutEvent shortcut(action->shortcut(),0);QApplication::sendEvent(action,&shortcut);QCoreApplication::processEvents();
+        Require(dock->isHidden()&&primary->width()>canvas,"keyboard collapse gives the released dock width to the views");Require(window.focusWidget()==window.findChild<QToolButton*>("windowLayoutMenu"),"collapse leaves focus on the visible window menu");
+        QSettings preferences(window.GetLayoutPath(),QSettings::IniFormat);Require(!preferences.value("docks/state").toByteArray().isEmpty()&&!preferences.contains("layout/objectWidth"),"one native dock state replaces legacy column preferences");
+        QApplication::sendEvent(action,&shortcut);QCoreApplication::processEvents();const auto widthMessage=QString("expansion restores dock %1: expected %2, actual %3, cached %4, window %5").arg(entry.first).arg(width).arg(dock->width()).arg(dock->property("expandedSize").toSize().width()).arg(window.width());Require(dock->isVisible()&&std::abs(dock->width()-width)<=2,widthMessage.toUtf8().constData());
+    }
+    const auto layout=window.saveState(1);struct RestoreLayoutOnExit { TestWindow& window; QByteArray state; ~RestoreLayoutOnExit(){window.restoreState(state,1);} } restoreLayout{window,layout};auto* gray=window.findChild<QDockWidget*>("grayHistogramDock");gray->show();gray->setFloating(true);gray->resize(640,400);window.SaveLayout();gray->setFloating(false);gray->hide();window.RestoreLayout();QCoreApplication::processEvents();Require(gray->isFloating()&&!gray->isHidden(),"saved native layout restores floating visibility");
+    gray->setFloating(false);window.addDockWidget(Qt::TopDockWidgetArea,gray);window.SaveLayout();window.addDockWidget(Qt::BottomDockWidgetArea,gray);window.RestoreLayout();Require(window.dockWidgetArea(gray)==Qt::TopDockWidgetArea,"native layout restores a moved edge");
+    window.ResetLayout();Require(!gray->isFloating()&&gray->isHidden()&&!window.findChild<QDockWidget*>("parameterDock")->isHidden(),"reset restores the default windows without reconstructing the Session");
+    Require(window.restoreState(layout,1),"the original test layout remains restorable");
+    const auto sessionBefore=window.GetSession();Require(static_cast<bool>(sessionBefore),"view dock checks start with the existing Session");
+    const auto statesBefore=sessionBefore->GetRenderViewStates();Require(statesBefore.size()==4,"the existing Session exposes four render view states");
+    const std::array<QString,4> viewIds{"primary-3d","slice-top-down","slice-front-back","slice-left-right"};
+    std::array<QVTKOpenGLNativeWidget*,4> viewWidgets{};std::array<vtkRenderWindow*,4> renderWindows{};
+    for(std::size_t i=0;i<viewIds.size();++i){const auto objectName=i==0?QString("primary3D"):viewIds[i];viewWidgets[i]=window.findChild<QVTKOpenGLNativeWidget*>(objectName);Require(viewWidgets[i],"each existing view widget remains discoverable");renderWindows[i]=viewWidgets[i]->renderWindow();Require(renderWindows[i],"each existing view retains its render window");}
+    for(const auto area:{Qt::LeftDockWidgetArea,Qt::RightDockWidgetArea,Qt::TopDockWidgetArea,Qt::BottomDockWidgetArea}){
+        for(const auto& id:viewIds){auto* dock=window.findChild<QDockWidget*>("viewDock_"+id);Require(dock,"each view has its native dock");dock->setFloating(true);QCoreApplication::processEvents();Require(dock->isFloating(),"view dock can enter floating mode");dock->setFloating(false);QCoreApplication::processEvents();Require(!dock->isFloating(),"view dock can leave floating mode");
+            Require((dock->allowedAreas()&Qt::AllDockWidgetAreas)==Qt::AllDockWidgetAreas,"view docks allow all four native edges");window.addDockWidget(area,dock);QCoreApplication::processEvents();Require(window.dockWidgetArea(dock)==area,"view dock moves to each requested native edge");}
+    }
+    Require(window.GetSession()==sessionBefore,"view dock movement preserves the shared Session pointer");
+    for(std::size_t i=0;i<viewIds.size();++i)Require(viewWidgets[i]->renderWindow()==renderWindows[i],"view dock movement preserves each QVTK render window");
+    const auto statesAfter=sessionBefore->GetRenderViewStates();Require(statesAfter.size()==statesBefore.size(),"view dock movement preserves render view state count");
+    for(const auto& before:statesBefore){const auto after=std::find_if(statesAfter.begin(),statesAfter.end(),[&](const auto& value){return value.id==before.id;});Require(after!=statesAfter.end()&&after->role==before.role,"view dock movement preserves every render view ID and role");}
+    Require(window.restoreState(layout,1),"view dock movement leaves the original layout restorable");QCoreApplication::processEvents();
     ParameterEditor optional("Roi","SetDraft","boxToSource",QJsonValue(),QJsonValue());
+    const QJsonObject deferredValues{{"name","按需构建"},{"shape","Sphere"},{"centerMM",QJsonValue()},{"radius",1.23456789012345},{"sizeMM",QJsonValue()},{"direction3D",QJsonArray{1,0,0,0,1,0,0,0,1}},{"boxToSource",QJsonValue()}};
+    ParameterEditor deferred("Roi","Begin",{},deferredValues,deferredValues,nullptr,false,{},true,true);int deferredEdits=0;deferred.onEdited=[&]{++deferredEdits;};
+    Require(!deferred.GetFieldsBuilt()&&deferred.GetHasInputs()&&deferred.findChildren<QLineEdit*>().isEmpty(),"hidden action metadata does not construct any property inputs");
+    const QJsonObject expectedDeferred{{"name","按需构建"},{"shape","Sphere"},{"centerMM",QJsonValue()},{"radius",1.23456789012345}};
+    Require(deferred.GetValue()==expectedDeferred&&deferred.GetFieldsBuilt()&&deferredEdits==0,"first demand preserves exact values, applicable fields and the no-edit construction contract");
     int optionalEdits=0;optional.onEdited=[&]{++optionalEdits;};
     QJsonArray identity;for(int i=0;i<16;++i)identity.append(i%5==0?1:0);
     optional.SetValue(identity);optional.SetValue(QJsonValue());
@@ -187,10 +219,10 @@ void CheckWorkbenchV1(TestWindow& window)
             if(section->property("sectionName")=="精确参数")advancedRegion=section;
             if(section->property("sectionName")=="更多信息")regionDetails=section;
         }
-        Require(advancedRegion && regionDetails && !advancedRegion->isHidden() && advancedRegion->isAncestorOf(regionDetails),"sphere ROI retains its metadata in the advanced group when matrix fields are inapplicable");
-        advancedRegion->findChild<QToolButton*>("sectionToggle")->click();regionDetails->findChild<QToolButton*>("sectionToggle")->click();QCoreApplication::processEvents();
+        Require(advancedRegion && !regionDetails && !advancedRegion->isHidden() && advancedRegion->isAncestorOf(begin->GetField("group")) && advancedRegion->isAncestorOf(begin->GetField("description")),"sphere ROI retains all metadata in its single advanced group when matrix fields are inapplicable");
+        advancedRegion->findChild<QToolButton*>("sectionToggle")->click();QCoreApplication::processEvents();
         Require(begin->GetField("group")->isVisible() && begin->GetField("description")->isVisible(),"sphere ROI metadata can still be expanded and edited");
-        advancedRegion->findChild<QToolButton*>("sectionToggle")->setChecked(false);regionDetails->findChild<QToolButton*>("sectionToggle")->setChecked(false);
+        advancedRegion->findChild<QToolButton*>("sectionToggle")->setChecked(false);
         begin->SetPatch({{"shape",saved.toObject()["shape"]}});
         Require(begin->GetValue()==saved && begin->GetField("radius"),"restoring the tested shape retains all visible and hidden parameter editors");
         roi->SelectAction("Difference");auto* form=roi->GetParameterEditor("Difference");
@@ -218,17 +250,18 @@ void CheckWorkbenchV1(TestWindow& window)
             if(section->property("sectionName")=="高级设置")advanced=section;
             if(section->property("sectionName")=="专家设置")expert=section;
         }
-        Require(advanced && expert && advanced->isAncestorOf(expert),"surface expert parameters are nested inside advanced settings");
+        Require(advanced && !expert && advanced->isAncestorOf(form->GetField("minimumObjectVoxels")) && advanced->isAncestorOf(form->GetField("parentGeneration")),"surface retains its expert parameters in one advanced group");
         form->SetPatch({{"initialIsoValue",QJsonValue()},{"materialRange",QJsonValue()}});
     }
     if(auto* alignment=window.GetModule("Alignment"))if(!alignment->GetActions().isEmpty()) {
-        window.GetWorkflow().onNavigate("Alignment","ImportReference",{});auto* tasks=alignment->findChild<QComboBox*>("businessTaskTabs");
-        for(int index=0;index<tasks->count();++index) {
-            tasks->setCurrentIndex(index);QCoreApplication::processEvents();
-            for(auto* combo:{tasks,alignment->findChild<QComboBox*>("parameterTabs")}) {
+        window.GetWorkflow().onNavigate("Alignment","ImportReference",{});auto* operations=alignment->findChild<QComboBox*>("parameterTabs");
+        for(const auto* action:{"ImportReference","EvaluateVoxelVolume","InspectGeometry","InspectSection","EvaluateSurface","ExportReport"})Require(operations->findData(action)>=0,"the single operation selector retains every measurement task family");
+        for(int index=0;index<operations->count();++index) {
+            operations->setCurrentIndex(index);QCoreApplication::processEvents();
+            for(auto* combo:{operations}) {
                 QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
                 const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
-                Require(combo->fontMetrics().horizontalAdvance(combo->currentText())<=field.width(),"all five alignment task names and their current operations fit the actual selector fields");
+                Require(combo->fontMetrics().horizontalAdvance(combo->currentText())<=field.width(),"all measurement operations fit the actual single selector field");
             }
         }
     }
@@ -286,6 +319,41 @@ void CheckWorkbenchV1(TestWindow& window)
     Require(intervals==0,"old histogram interval selection cannot edit a new ROI preview");
     QCoreApplication::sendEvent(plot,&intervalPress);QCoreApplication::sendEvent(plot,&release);
     Require(intervals==1,"unchanged histogram source still accepts one interval selection");
+    const auto intervalCount=intervals;
+    const auto invalidatedDrag=[&](const QString& label,const std::function<void()>& invalidate){
+        statistics.SetHistogram(histogram);statistics.SetMarkers(histogram["markers"].toArray());statistics.SetInteractionModes({"编辑 ISO","另一用途"});modes->setCurrentIndex(1);QCoreApplication::processEvents();
+        statistics.onMarker=[&](const QString&,double){++edits;};statistics.onInterval=[&](double,double){++intervals;};
+        QCoreApplication::sendEvent(plot,&press);QCoreApplication::sendEvent(plot,&move);invalidate();QCoreApplication::sendEvent(plot,&release);
+        Require(edits==1 && intervals==intervalCount,label.toUtf8().constData());
+    };
+    invalidatedDrag("context changes discard a pending marker and interval gesture",[&]{statistics.SetInteractionContext("changed");});
+    invalidatedDrag("mode changes discard a pending marker and interval gesture",[&]{modes->setCurrentIndex(2);modes->setCurrentIndex(1);});
+    invalidatedDrag("Cancel discards a pending marker and interval gesture",[&]{statistics.Cancel();});
+    invalidatedDrag("hide and show discard a pending marker and interval gesture",[&]{statistics.hide();statistics.show();});
+    invalidatedDrag("range reset discards a pending marker and interval gesture",[&]{statistics.findChild<QToolButton*>("resetHistogramRange")->click();});
+    invalidatedDrag("focus out discards a pending marker and interval gesture",[&]{QFocusEvent lost(QEvent::FocusOut,Qt::OtherFocusReason);QApplication::sendEvent(&statistics,&lost);});
+    invalidatedDrag("removing marker editability discards a pending marker and interval gesture",[&]{statistics.SetMarkers({QJsonObject{{"key","iso"},{"label","ISO"},{"value",50},{"editable",false}}});});
+    statistics.SetHistogram(histogram);statistics.SetMarkers(histogram["markers"].toArray());statistics.SetInteractionModes({"编辑 ISO","另一用途"});modes->setCurrentIndex(1);statistics.SetInteractionContext("keyboard");
+    statistics.onMarker=[&](const QString&,double value){latest=value;++edits;};statistics.onInterval=[&](double,double){++intervals;};
+    QKeyEvent right(QEvent::KeyPress,Qt::Key_Right,Qt::NoModifier);QApplication::sendEvent(plot,&right);Require(edits==1,"Right only previews a marker candidate");
+    QKeyEvent enter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier);QApplication::sendEvent(plot,&enter);Require(edits==2 && latest==51,"Return commits the one-unit marker step exactly once");
+    QApplication::sendEvent(plot,&enter);Require(edits==2,"a second Return without a candidate does not recommit");
+    QCoreApplication::sendEvent(plot,&press);QCoreApplication::sendEvent(plot,&move);QApplication::sendEvent(plot,&escape);QApplication::sendEvent(plot,&enter);Require(edits==2,"Escape cancels a keyboard candidate before Return");
+    modes->setCurrentIndex(0);QApplication::sendEvent(plot,&right);QApplication::sendEvent(plot,&enter);Require(edits==2,"view mode arrows and Return never commit a marker");
+    statistics.SetInteractionContext("numeric");modes->setCurrentIndex(1);statistics.onMarker=[&](const QString&,double value){latest=value;++edits;};
+    auto* markerValue=statistics.findChild<QLineEdit*>("histogramMarkerValue");auto* applyMarker=statistics.findChild<QPushButton*>("applyHistogramMarker");
+    const QString preciseText("12.345678901234567");const double preciseValue=preciseText.toDouble();
+    markerValue->setFocus();markerValue->selectAll();QKeyEvent exactText(QEvent::KeyPress,Qt::Key_1,Qt::NoModifier,preciseText);QApplication::sendEvent(markerValue,&exactText);
+    QKeyEvent numericEnter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier);QApplication::sendEvent(markerValue,&numericEnter);
+    Require(edits==3 && latest==preciseValue,"textEdited numeric input submits the exact double once on Enter");
+    const auto savedLocale=QLocale();QLocale::setDefault(QLocale(QLocale::German,QLocale::Germany));
+    statistics.SetMarkers({QJsonObject{{"key","iso"},{"label","ISO"},{"value",1.234},{"editable",true}}});
+    markerValue->selectAll();QKeyEvent localeText(QEvent::KeyPress,Qt::Key_1,Qt::NoModifier,"1.234");QApplication::sendEvent(markerValue,&localeText);QApplication::sendEvent(markerValue,&numericEnter);
+    QLocale::setDefault(savedLocale);Require(edits==4&&latest==1.234,"canonical precise decimal cannot become a localized thousands group");
+    markerValue->selectAll();QKeyEvent staleText(QEvent::KeyPress,Qt::Key_1,Qt::NoModifier,preciseText);QApplication::sendEvent(markerValue,&staleText);
+    statistics.SetInteractionContext("numeric-changed");applyMarker->click();Require(edits==4,"a context change invalidates a pending numeric marker submission");
+    statistics.SetInteractionContext("numeric-view");modes->setCurrentIndex(0);markerValue->selectAll();QKeyEvent viewText(QEvent::KeyPress,Qt::Key_1,Qt::NoModifier,preciseText);QApplication::sendEvent(markerValue,&viewText);applyMarker->click();
+    Require(edits==4,"view mode cannot submit a numeric marker value");
     statistics.hide();
     window.GetWorkflow().onNavigate("Data","Load",{});
 }

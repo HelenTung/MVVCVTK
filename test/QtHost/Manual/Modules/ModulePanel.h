@@ -86,7 +86,9 @@ public:
     QJsonObject GetActionParameters(const QString& action) const;
     void SendBusinessAction(const QString& action, bool usesOutput = false);
     BusinessStatistics* GetStatisticsWidget() const { return m_statistics; }
+    BusinessStatistics* GetGrayStatisticsWidget() const { return m_grayStatistics; }
     void RefreshStatistics();
+    void RefreshGrayStatistics();
     void ShowSources(DataRevisionRef root);
     QString GetName() const { return m_name; }
     QString GetDisplayName() const;
@@ -98,6 +100,7 @@ public:
     std::function<void(bool)> setColorVisible;
     std::function<void(const QString&,bool,int)> setViewLegend;
     void SelectAction(const QString& action);
+    void SetInitialAction(const QString& action);
     bool SelectNodeGroup(const QString& id);
     bool SelectPartTarget(const QJsonObject& binding);
     void RefreshWorkflow();
@@ -113,6 +116,7 @@ public:
     std::function<void()> onObserve;
     std::function<void(const QString&,const QJsonObject&)> onParametersEdited;
     std::function<bool()> onStatistics;
+    std::function<bool()> onGrayStatistics;
     std::function<GrayStatisticsScope()> getGrayScope;
     std::function<void()> onStop;
     // 关闭会话时释放分页快照；页面和业务完成回调仍保留到 Host 停止完成。
@@ -122,10 +126,13 @@ public:
     std::function<QString(const QString&, const QJsonObject&)> validateAction;
 protected:
     TestContext m_context;
+    void showEvent(QShowEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 private:
+    void QueueFocusOrder();
+    bool m_focusOrderQueued=false;
     class ReadTask;
     std::map<std::uint64_t, std::unique_ptr<ReadTask>> m_readTasks;
     struct Entry { QJsonObject defaults; Action action; TestPolicy policy; bool exitTools = false; };
@@ -148,6 +155,7 @@ private:
     QPushButton* m_primary = nullptr;
     QPushButton* m_viewReport = nullptr;
     BusinessStatistics* m_statistics = nullptr;
+    BusinessStatistics* m_grayStatistics = nullptr;
     QWidget* m_nextActions = nullptr;
     QGridLayout* m_nextLayout = nullptr;
     QStringList m_nextActionIds;
@@ -167,10 +175,14 @@ private:
     QVBoxLayout* m_commandLayout = nullptr;
     QWidget* m_currentCommands = nullptr;
     QLabel* m_feedback = nullptr;
+    QString m_feedbackText;
+    QString m_feedbackTone="neutral";
+    bool m_commandHeightQueued=false;
     std::map<QString, QWidget*> m_commandRows;
     std::map<QString, QLabel*> m_requirements;
     QWidget* m_requirementArea = nullptr;
     QToolButton* m_requirementToggle = nullptr;
+    QGridLayout* m_requirementCommands=nullptr;
     QLabel* m_currentRequirement = nullptr;
     QLineEdit* m_nodeSearch = nullptr;
     QSet<QString> m_searchExpanded;
@@ -203,6 +215,7 @@ private:
     bool m_parameterFocusQueued = false;
     void QueueParameterFocus();
     void SetCommandHeight();
+    void SetRequirementLayout();
     void SetNode(QTreeWidgetItem* item);
     void SelectSceneItem(QTreeWidgetItem* item);
     void FilterNodes();

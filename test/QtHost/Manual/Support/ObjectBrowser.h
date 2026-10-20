@@ -15,7 +15,7 @@ public:
     explicit ObjectBrowser(QWidget* parent = nullptr);
     void SetObjects(const QJsonObject& graph, const QJsonArray& regions,
         const QJsonArray& moduleNodes, const QString& current, const QStringList& roiActions,
-        std::optional<double> currentOpacity = {});
+        std::optional<double> currentOpacity = {},const QString& currentName = {});
     std::function<void(const QString&, const QString&, const QJsonObject&)> onAction;
     std::function<void(const QString&,const QString&)> onReport;
 private:

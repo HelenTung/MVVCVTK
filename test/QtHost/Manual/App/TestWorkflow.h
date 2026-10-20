@@ -52,6 +52,8 @@ public:
     // 仅记录编辑工具的返回位置；区域仍由 Host 目录拥有。
     QJsonObject roiConsumer;
     std::function<void(const QString&)> onShowStatistics;
+    // 所属线程同步导航；无业务接纳/完成回调，调用后可查询界面，不能跨线程调用。
+    std::function<void(const QString&)> onShowHistogram;
     std::function<bool(DataRevisionRef,std::uint32_t)> highlightSurfaceObject;
     std::map<QString,std::function<QVector<ReportDocument>(const QJsonObject&,const QSet<QString>&)>> readReports;
     // owner thread 只冻结输入；返回的纯只读准备任务可在后台建立文件索引。

@@ -25,6 +25,7 @@
 #include <QHeaderView>
 #include <QTimer>
 #include <QDialog>
+#include <QDockWidget>
 #include <QComboBox>
 #include <QApplication>
 #include <QDir>
@@ -630,7 +631,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
     auto* panel=window.GetModule(module);Require(panel!=nullptr,"business report module exists");
     const auto actions=panel->GetActions();window.GetWorkflow().onNavigate(module,actions.contains(action)?action:actions.value(0),{});
     QCoreApplication::processEvents();
-    auto* open=panel->findChild<QPushButton*>("viewBusinessReport");auto* dialog=window.findChild<QDialog*>("operationReports");
+    auto* open=panel->findChild<QPushButton*>("viewBusinessReport");auto* dialog=window.findChild<QDockWidget*>("reportDock");
     Require(open&&dialog&&open->isVisible()&&open->isEnabled(),"native report has a visible enabled user entry");
     if(module=="Surface")Require(open->property("reportResult").toString()==summary["generation"].toString(),"surface business report button targets the exact generation instead of its shared mesh");
     for(auto* parent=open->parentWidget();parent;parent=parent->parentWidget())if(auto* scroll=qobject_cast<QScrollArea*>(parent)) {
@@ -649,7 +650,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         const auto path=previewPath+QString("-%1-%2.png").arg(reportIndex).arg(suffix);
         Require(!QFileInfo::exists(path),"report preview never overwrites an existing screenshot");
         Require(QDir().mkpath(QFileInfo(path).absolutePath()),"report preview output directory exists");
-        const auto pixels=dialog->grab();Require(!pixels.isNull()&&pixels.save(path),"actual visible report preview screenshot saved");return path;
+        QElapsedTimer captureClock;captureClock.start();const auto pixels=dialog->grab();window.SetSynchronousSpan("Automation.ReportCapture",captureClock.nsecsElapsed());Require(!pixels.isNull()&&pixels.save(path),"actual visible report preview screenshot saved");return path;
     };
     QTemporaryDir directory;
     ReportRowId inspectionRows=0;

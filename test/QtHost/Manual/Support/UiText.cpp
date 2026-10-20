@@ -394,7 +394,7 @@ ParameterChoices GetParameterChoices(const QString& module, const QString& key)
     if (module == "Artifact" && key == "mode") return {{"Wrap", "环绕"}, {"Reflect", "反射"}};
     if (module == "Wall" && key == "mode") return {{"Continuous", "连续色标"}, {"Tolerance", "公差分布"}};
     if (module == "Wall" && key == "unit") return {{"Millimeter", "毫米（与源几何一致）"}};
-    if (key == "evidenceKind") return {{"unconfigured", "未声明"}, {"real-data", "真实数据"}, {"synthetic-regression", "合成回归"}};
+    if (key == "evidenceKind") return {{"unconfigured", "未声明"},{"unconfigured-template","尚未配置参考"}, {"real-data", "真实数据"}, {"synthetic-regression", "合成回归"}};
     if (key == "unit") return {{"ModelUnit", "模型单位"}, {"Millimeter", "毫米"}, {"Meter", "米"}};
     if (key == "method") return {{"SequentialPlanes", "依次拟合平面"}, {"PlaneTwoHoles", "一面两孔"}, {"Rps", "参考点系统"}, {"ConstrainedBestFit", "约束最佳拟合"}};
     if (key == "association") return {{"LeastSquares", "最小二乘"}, {"SequentialLeastSquares", "顺序最小二乘"}};
@@ -438,20 +438,36 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
 }
 QString GetParameterGroup(const QString& module, const QString& key)
 {
+    if(module=="Data" && QStringList{"dimensions","spacingLPS"}.contains(key))return "尺寸与间距";
+    if(module=="View") {
+        if(key=="viewId" || key=="viewScope")return "目标视图";
+        if(key=="mode")return "呈现模式";
+        if(QStringList{"iso","windowLevel","transfer"}.contains(key))return "阈值与灰度";
+        if(key=="quality" || key=="opacity")return "显示质量";
+        return "显示辅助";
+    }
+    if(module=="Roi" && key=="name")return "输出命名";
+    if(module=="Roi" && (key=="shape" || key=="selectionMode"))return "区域工具";
+    if(module=="Surface" && (key=="initialIsoValue" || key=="materialRange"))return "初始阈值";
+    if(module=="Wall" && (key=="source" || key=="mesh" || key=="labels"))return "测量输入";
+    if(module=="Wall" && key=="evaluationRoi")return "评价范围";
+    if(module=="Rotation" && key=="worldAxis")return "旋转轴";
+    if(module=="Rotation" && key=="worldCenter")return "旋转中心";
+    if(module=="Rotation" && key=="angleDeg")return "旋转角度";
     if(module=="Artifact" && key=="processingRoi")return "输入与结果";
     if(module=="Data" && (key=="originLPS" || key=="directionLPS"))return "高级几何";
     if(module=="Artifact" && QStringList{"protectionRoi","qualityRoi","timeoutMs","angularMin","threshMin","threshMax","mode","maxCorrection","slabDepth"}.contains(key))return "高级设置";
     if(module=="Wall" && QStringList{"materialLabels","materialThreshold","coneAngleDegrees","directionCount","boundaryPolicy","maxBoundaryError"}.contains(key))return "高级设置";
     if(module=="Roi" && QStringList{"boxToSource","direction3D","planeToSource","sourceToView","viewToClip","contours","pathMM","sourceToTarget","meshToSource"}.contains(key))return "精确参数";
     if(module=="Roi" && QStringList{"roi","operands","outputMode","targetSource","domainRoi"}.contains(key))return "输入与输出";
-    if(module=="Roi" && QStringList{"group","description","isArchived"}.contains(key))return "更多信息";
+    if(module=="Roi" && QStringList{"group","description","isArchived"}.contains(key))return "精确参数";
     if(module=="Roi")return QStringList{"name","group","description","shape","selectionMode","isArchived"}.contains(key)?"区域信息":"区域几何";
     if(module=="Surface") {
-        if(key=="parentGeneration")return "专家设置";
-        if(QStringList{"componentSelection","seedModelPoint","analysisRoi","minimumObjectVoxels"}.contains(key))return "高级设置";
+        if(key=="parentGeneration")return "高级设置";
+        if(QStringList{"componentSelection","seedModelPoint","minimumObjectVoxels"}.contains(key))return "高级设置";
     }
     if (key.endsWith("Roi") || key == "roi") return "作用范围";
-    if (key == "sourceDigest" || key == "evidenceKind") return "高级与诊断";
+    if (key == "sourceDigest" || key == "evidenceKind") return module=="Data"?"高级几何":"高级设置";
     if (QStringList{"source", "labels", "mesh", "result", "inspection", "deviation", "voxelVolume", "target", "parts", "revision", "filePath", "datasetId", "archivePath", "reference"}.contains(key))
         return "输入与结果";
     if (QStringList{"matrix", "boxToSource", "directionLPS", "dimensions", "spacingLPS", "originLPS", "initialPoses", "worldAxis", "worldCenter", "angleDeg", "slice"}.contains(key))

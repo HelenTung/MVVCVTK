@@ -108,11 +108,31 @@
 #include <vtkPropPicker.h>
 #include <vtkVolume.h>
 #include <QVTKOpenGLNativeWidget.h>
+#include <QDockWidget>
+#include <QToolBar>
+#include <QTabBar>
 namespace Manual {
 namespace {
+QPixmap GrabWindow(TestWindow& window)
+{
+    QElapsedTimer clock;clock.start();const auto result=window.grab();window.SetSynchronousSpan("Automation.Capture",clock.nsecsElapsed());return result;
+}
 bool GetComboEnabled(QComboBox* combo,int index) { return combo->model()->flags(combo->model()->index(index,0)).testFlag(Qt::ItemIsEnabled); }
 void SelectComboIndex(QComboBox* combo,int index)
 {
+    if(combo->currentIndex()==index)return;
+    if(combo->isVisible()){
+        // 展开后移动高亮，Enter 才选定；关闭列表时逐项按 Down 会实际打开每个中间表单。
+        QKeyEvent open(QEvent::KeyPress,Qt::Key_Down,Qt::AltModifier);QApplication::sendEvent(combo,&open);
+        auto* view=combo->view();
+        QKeyEvent first(QEvent::KeyPress,Qt::Key_Home,Qt::NoModifier);QApplication::sendEvent(view,&first);
+        for(int attempt=0;view->currentIndex().row()!=index&&attempt<=combo->count();++attempt){
+            QKeyEvent next(QEvent::KeyPress,view->currentIndex().row()<index?Qt::Key_Down:Qt::Key_Up,Qt::NoModifier);QApplication::sendEvent(view,&next);
+        }
+        QKeyEvent enter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier);QApplication::sendEvent(view,&enter);
+        if(combo->currentIndex()!=index)throw std::runtime_error("原生下拉列表未选中目标条目");
+        return;
+    }
     QKeyEvent home(QEvent::KeyPress,Qt::Key_Home,Qt::NoModifier);QApplication::sendEvent(combo,&home);
     for(int i=0;i<index;++i){QKeyEvent next(QEvent::KeyPress,Qt::Key_Down,Qt::NoModifier);QApplication::sendEvent(combo,&next);}
 }
@@ -248,7 +268,7 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
             images.emplace_back(name,std::move(frame));
         }
         Check(images.size()==4,"business capture contains one 3D and three 2D views");
-        const auto context=window.grab();Check(!context.isNull(),"business window context is captured in memory");
+        const auto context=GrabWindow(window);Check(!context.isNull(),"business window context is captured in memory");
         const auto after=GetBusinessCaptureState(window,step);
         if(!after||*before!=*after)return false; // 整组丢弃，等待现有公共状态稳定后重拍。
 
@@ -315,11 +335,17 @@ bool GetEnabled(TestWindow& window, const QString& module)
     if (!enabled) std::cout << "NOT BUILT: " << module.toStdString() << std::endl;
     return enabled;
 }
+QPoint GetNodePoint(QTreeWidget* tree,QTreeWidgetItem* item)
+{
+    const auto row=tree->visualItemRect(item);
+    return QRect(tree->columnViewportPosition(0),row.top(),tree->columnWidth(0),row.height()).intersected(tree->viewport()->rect()).center();
+}
 void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers modifiers = Qt::NoModifier)
 {
     const auto key = item->data(0, Qt::UserRole).toJsonObject()["id"].toString();
-    if(auto* statistics=tree->window()->findChild<QToolButton*>("showBusinessStatistics"))statistics->setChecked(true);
-    if(auto* results=tree->window()->findChild<QTabWidget*>("workbenchResultTabs"))results->setCurrentIndex(1);
+    auto* main=qobject_cast<QMainWindow*>(tree->window());if(!main)main=tree->parentWidget()->findChild<QMainWindow*>();
+    for(auto* parent=tree->parentWidget();parent;parent=parent->parentWidget())if(auto* host=qobject_cast<QMainWindow*>(parent)){main=host;break;}
+    if(main){if(auto* scene=main->findChild<QDockWidget*>("sceneDock")){scene->show();scene->raise();}if(auto* filter=main->findChild<QComboBox*>("sceneView"))filter->setCurrentIndex(1);}
     for (auto* page = tree->parentWidget(); page; page = page->parentWidget()) {
         auto* tabs = qobject_cast<QTabWidget*>(page->parentWidget() ? page->parentWidget()->parentWidget() : nullptr);
         if (tabs && tabs->indexOf(page) >= 0) { tabs->setCurrentWidget(page); break; }
@@ -330,14 +356,36 @@ void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers m
     Check(item != nullptr, "scene selection resolves stable ID after pending updates");
     for (auto* parent = item->parent(); parent; parent = parent->parent()) parent->setExpanded(true);
     tree->scrollToItem(item); tree->doItemsLayout();
-    const auto point = tree->visualItemRect(item).center();
+    const auto point = GetNodePoint(tree,item);
+    Check(tree->itemAt(point)==item,"scene selection clicks the visible object-name cell");
     QMouseEvent press(QEvent::MouseButtonPress, point, Qt::LeftButton, Qt::LeftButton, modifiers);
     QMouseEvent release(QEvent::MouseButtonRelease, point, Qt::LeftButton, Qt::NoButton, modifiers);
     QApplication::sendEvent(tree->viewport(), &press); QApplication::sendEvent(tree->viewport(), &release);
 }
+void NavigateTool(TestWindow& window,const QString& module,const QString& action={})
+{
+    auto* panel=window.GetModule(module);Check(panel,"navigation names a compiled module");
+    if(window.findChild<QDockWidget*>("parameterDock")->isHidden())window.findChild<QAction*>("toggleParameterDock")->trigger();
+    const int stage=QStringList{"Data","View","Rotation","Artifact"}.contains(module)?0:module=="Surface"?1:QStringList{"Roi","Crop"}.contains(module)?2:3;
+    auto* stages=window.findChild<QTabBar*>("workflowSteps");Check(stages&&stages->isVisible()&&stages->isTabEnabled(stage),"the new workflow stage is visible and enabled");
+    const auto point=stages->tabRect(stage).center();
+    QMouseEvent press(QEvent::MouseButtonPress,point,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier),release(QEvent::MouseButtonRelease,point,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+    QApplication::sendEvent(stages,&press);QApplication::sendEvent(stages,&release);QCoreApplication::processEvents();
+    if(!panel->isVisible()){
+        auto* tools=window.findChild<QToolBar*>("contextToolbar");QAction* entry=nullptr;
+        for(auto* candidate:tools->actions())if(candidate->data().toString()==module)entry=candidate;
+        auto* button=entry?qobject_cast<QToolButton*>(tools->widgetForAction(entry)):nullptr;
+        Check(button&&button->isVisible()&&button->isEnabled(),"the new contextual module button is visible and enabled");button->click();QCoreApplication::processEvents();
+    }
+    Check(panel->isVisible(),"actual workflow and contextual buttons reveal the requested module");
+    if(!action.isEmpty()){
+        auto* choices=panel->findChild<QComboBox*>("parameterTabs");const auto index=choices->findData(action);
+        if(index>=0){Check(choices->isVisible()&&GetComboEnabled(choices,index),"the single operation selector exposes the requested form");SelectComboIndex(choices,index);QCoreApplication::processEvents();}
+    }
+}
 std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {}, int timeoutMs = 2000)
 {
-    auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
+    auto* panel = window.GetModule(module); NavigateTool(window,module,action);
     // 普通模块从会话命令上下文执行；ROI 保存保留当前草稿和对象选择。
     if(module!="Roi") {
         auto* tree=panel->GetCatalogTree();ClickNode(tree,tree->topLevelItem(0));
@@ -418,7 +466,7 @@ void CheckFourViewGeometry(TestWindow& window)
 {
     const auto views = window.findChildren<QVTKOpenGLNativeWidget*>(); const auto original = window.size();
     auto* layoutChoice = window.findChild<QComboBox*>("viewLayout");
-    layoutChoice->setCurrentIndex(layoutChoice->findData("FourViews"));QCoreApplication::processEvents();
+    window.findChild<QAction*>("viewLayout_FourViews")->trigger();QCoreApplication::processEvents();
     const auto sameSize = [&] {
         if (views.size() != 4) return false;
         int minWidth = views.front()->width(), maxWidth = minWidth, minHeight = views.front()->height(), maxHeight = minHeight;
@@ -431,14 +479,17 @@ void CheckFourViewGeometry(TestWindow& window)
             && std::all_of(views.begin(),views.end(),[](const auto* view){return view->width()>=view->minimumWidth() && view->height()>=view->minimumHeight();});
     };
     Check(window.minimumSize()!=window.maximumSize(),"manual window has a resizable default size");
-    Check(Wait(sameSize,3000),"four-view layout has equal image regions inside the current window");
+    const bool equal=Wait(sameSize,3000);
+    if(!equal)for(const auto* view:views)std::cerr<<"Viewport geometry "<<view->objectName().toStdString()<<'='<<view->width()<<'x'<<view->height()<<std::endl;
+    Check(equal,"four-view layout has equal image regions inside the current window");
     const auto windows = window.GetSession()->GetRenderViewStates();
     auto* primary = window.findChild<QVTKOpenGLNativeWidget*>("primary3D");
     const auto primarySize = primary->size();
     auto* renderWindow = primary->renderWindow();
     layoutChoice->setCurrentIndex(layoutChoice->findData("ThreeDOnly")); QCoreApplication::processEvents();
-    Check(Wait([&] { return primary->width() > primarySize.width() && primary->height() > primarySize.height(); },3000),
-        "3D-only layout expands the existing primary viewport");
+    const bool expanded=Wait([&] { return primary->width() > primarySize.width() && primary->height() > primarySize.height(); },3000);
+    if(!expanded)std::cerr<<"3D geometry before="<<primarySize.width()<<"x"<<primarySize.height()<<" actual="<<primary->width()<<"x"<<primary->height()<<std::endl;
+    Check(expanded,"3D-only layout expands the existing primary viewport");
     for (const auto* view : views) if (view != primary) Check(!view->isVisible(), "slice viewports are hidden in 3D-only layout");
     Check(primary->renderWindow() == renderWindow && window.GetSession()->GetRenderViewStates().size() == windows.size(),
         "layout switching preserves the original render windows and host view identities");
@@ -461,13 +512,13 @@ void CheckUiAndRecords(TestWindow& window)
     auto* tabs = window.findChild<QComboBox*>("featureTabs");
     auto* pages = window.findChild<QStackedWidget*>("parameterPages");
     auto* browsers = window.findChild<QStackedWidget*>("browserStack");
-    Check(workspaces && workspaces->count() == 3 && tabs && tabs->isVisible(),
+    Check(workspaces && workspaces->count()==4 && tabs && window.findChild<QTabBar*>("workflowSteps")->isVisible(),
         "task workspaces organize horizontal module navigation");
     QSet<QString> moduleIds;
-    QStringList remembered{"", "", ""};
+    QStringList remembered{"","","",""};
     {
-        const QStringList groups[]{ {"Data","View","Rotation"},{"Roi","Crop","Artifact","Part","Surface"},{"Alignment","Wall","Gap"} };
-        for(int group=0;group<3;++group) {
+        const QStringList groups[]{{"Data","View","Rotation","Artifact"},{"Surface"},{"Roi","Crop"},{"Part","Alignment","Wall","Gap"}};
+        for(int group=0;group<4;++group) {
             const bool hasModules=std::any_of(groups[group].begin(),groups[group].end(),[&](const QString& id){return GetEnabled(window,id);});
             Check(GetComboEnabled(workspaces,group)==hasModules,"workspace availability follows its compiled business modules");
             if(!hasModules)continue;
@@ -506,11 +557,11 @@ void CheckUiAndRecords(TestWindow& window)
     help->setChecked(false);
     const auto compactSize=window.size();
     diagnostics->trigger();Check(Wait([&]{return details->isVisible() && window.size()==compactSize;},3000),"diagnostics expand within the unchanged outer window");
-    window.grab().save("diagnostics-expanded.png");showResults->setChecked(false);Check(Wait([&]{return !details->isVisible() && window.size()==compactSize;},3000),"closing diagnostics keeps the prior outer size");
-    auto* objectToggle=window.findChild<QToolButton*>("toggleObjectColumn");auto* objects=window.findChild<QWidget*>("objectColumn");objectToggle->click();Check(objects->isHidden(),"object sidebar can be collapsed");objectToggle->click();Check(objects->isVisible(),"object sidebar can be restored");
+    GrabWindow(window).save("diagnostics-expanded.png");showResults->setChecked(false);Check(Wait([&]{return !details->isVisible() && window.size()==compactSize;},3000),"closing diagnostics keeps the prior outer size");
+    auto* objectToggle=window.findChild<QToolButton*>("toggleObjectColumn");auto* objects=window.findChild<QDockWidget*>("sceneDock");objectToggle->click();Check(objects->isHidden(),"object sidebar can be collapsed");objectToggle->click();Check(objects->isVisible(),"object sidebar can be restored");
     const auto resized=compactSize+QSize(40,20);window.resize(resized);
     Check(Wait([&]{return window.size()==resized;},3000),"user can resize the main window beyond its default size");
-    window.resize(compactSize);QCoreApplication::processEvents();window.grab().save("workbench-default.png");
+    window.resize(compactSize);QCoreApplication::processEvents();GrabWindow(window).save("workbench-default.png");
     window.showMaximized();Check(Wait([&]{return window.isMaximized();},3000),"main window can be maximized");QCoreApplication::processEvents();
     diagnostics->trigger();
     Check(Wait([&]{return window.isMaximized() && details->isVisible();},3000),"diagnostics keep a maximized window maximized");
@@ -568,7 +619,8 @@ void CheckUiAndRecords(TestWindow& window)
         page->SelectAction(initial);
         const auto stop = page->GetActions().contains("Stop") ? QString("Stop") : QString("Cancel");
         page->SelectAction(stop);
-        Check(page->GetParameterEditor(initial)->isVisible() && page->findChild<QPushButton*>("action_" + stop)->isVisible(),
+        Check(page->GetParameterEditor(initial)->isVisible() && window.findChild<QPushButton*>("stopCalculation")->isVisible()
+            && page->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_"+stop),
             "stop remains a direct button without replacing the active algorithm parameters");
     }
     auto* view = window.GetModule("View");
@@ -929,9 +981,10 @@ std::uint64_t ClickNodeAction(TestWindow& window, QTreeWidget* tree, QTreeWidget
     // 工作台的来源/历史已位于视图区；先结束“隐藏视图也可提交输入”的独立场景。
     window.SetViewsVisible(true);
     item=FindNode(tree,nodeId);Check(item!=nullptr,"scene context target survives business-page navigation");
-    ClickNode(tree, item); tree->scrollToItem(tree->currentItem()); tree->doItemsLayout();
+    ClickNode(tree, item); item=FindNode(tree,nodeId);tree->scrollToItem(item);tree->doItemsLayout();
     Check(tree->isVisible(),"scene context menu uses a visible history tree");
-    const auto point = tree->visualItemRect(tree->currentItem()).center();
+    const auto point = GetNodePoint(tree,item);
+    Check(tree->itemAt(point)==item,"scene context menu targets the exact requested object-name cell");
     const auto clicked = std::make_shared<bool>(false);
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
     QMetaObject::invokeMethod(&window, [clicked, action] {
@@ -993,11 +1046,11 @@ void CheckParameterLayout(TestWindow& window)
     const auto commandBounds = QRect(primary->mapTo(view,QPoint()),primary->size());
     Check(window.size() == originalSize && primary->isVisible() && view->rect().contains(commandBounds),
         "the stage primary fits inside the fixed parameter column");
-    window.grab().save("manual-layout-1280.png");
+    GrabWindow(window).save("manual-layout-1280.png");
     QCoreApplication::processEvents();
     const auto canvasSize = window.findChild<QWidget*>("primary3D")->size();
     window.findChild<QPushButton*>("showResultReport")->click(); QCoreApplication::processEvents();
-    auto* reportWindow = window.findChild<QDialog*>("operationReports");
+    auto* reportWindow = window.findChild<QDockWidget*>("reportDock");
     Check(reportWindow && reportWindow->isVisible() && window.findChild<QWidget*>("primary3D")->size() == canvasSize,
         "result report opens independently without reducing the four-view canvas");
     reportWindow->hide();
@@ -1159,7 +1212,7 @@ void CheckParameterLayout(TestWindow& window)
         QCoreApplication::processEvents();
         window.GetWorkflow().onNavigate("Part", "Split", {});
         Check(Wait([&] { return qAbs(card->mapTo(splitScroll->viewport(), QPoint()).y()) < 30; }, 3000), "edited card can be focused again without resetting rows");
-        window.grab().save("parameter-ui-split.png");
+        GrabWindow(window).save("parameter-ui-split.png");
         QJsonArray longSeeds; for (int index = 0; index < 12; ++index) longSeeds.append(seeds->GetValue().toArray().first());
         seeds->SetValue(longSeeds);
         QCoreApplication::processEvents();
@@ -1170,11 +1223,11 @@ void CheckParameterLayout(TestWindow& window)
         Check(splitCommand->isVisible() && splitCommand->mapTo(window.GetModule("Part"),QPoint()) == commandPosition
             && window.GetModule("Part")->rect().contains(QRect(commandPosition,splitCommand->size())),
             "scrolling a long form leaves the stage primary in its fixed position");
-        window.grab().save("manual-layout-long-form-1280.png");
+        GrabWindow(window).save("manual-layout-long-form-1280.png");
         Check(window.size()==originalSize,"long parameter forms never resize the complete window");QCoreApplication::processEvents();
         seeds->SetValue(original);
     }
-    window.GetWorkflow().onNavigate("Data", "Load", {}); QCoreApplication::processEvents(); window.grab().save("parameter-ui-data.png");
+    window.GetWorkflow().onNavigate("Data", "Load", {}); QCoreApplication::processEvents(); GrabWindow(window).save("parameter-ui-data.png");
 }
 void CheckBooleanControls(TestWindow& window)
 {
@@ -1259,7 +1312,7 @@ void CheckBooleanRequests(TestWindow& window)
     GetComplete(window, Click(window, "View", "Set", {{"mode", "CompositeIsoSurface"}}), "Succeeded");
     panel->SetParameterPatch("Set", {{"mode", QJsonValue()}});
     panel->SetParameterPatch("Visibility", {{"viewScope", "primary-3d"}});
-    window.GetWorkflow().onNavigate("View", "Visibility", {}); QCoreApplication::processEvents(); window.grab().save("applied-state-view.png");
+    window.GetWorkflow().onNavigate("View", "Visibility", {}); QCoreApplication::processEvents(); GrabWindow(window).save("applied-state-view.png");
     GetComplete(window, Click(window, "View", "Visibility", {{"viewScope", "all"}, {"planes", true}, {"crosshair", true}, {"ruler", true}}), "Succeeded");
     panel->SetParameters("Set", original);
 }
@@ -1339,7 +1392,7 @@ void CheckViewCapabilities(TestWindow& window)
         const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
         toolbar->setCurrentIndex(index); toolbar->activated(index); GetComplete(window, id, "Succeeded");
         panel->Observe(); hasField("iso", index == 0); hasField("transfer", index == 1); hasField("quality", true);
-        QCoreApplication::processEvents(); window.grab().save(index ? "view-volume-capabilities.png" : "view-iso-capabilities.png");
+        QCoreApplication::processEvents(); GrabWindow(window).save(index ? "view-volume-capabilities.png" : "view-iso-capabilities.png");
     }
 }
 void SendCropDrag(TestWindow& window, const std::array<double,3>& fraction)
@@ -1499,7 +1552,7 @@ void CheckCropWorkflow(TestWindow& window)
     Check(window.GetSession()->GetImageDescriptor()->dataRevision == original.dataRevision, "restore returns exact crop source");
     GetComplete(window, Click(window, "Crop", "RestoreSource"), "Succeeded");
     window.GetWorkflow().onNavigate("Crop", "Box", {});
-    QCoreApplication::processEvents(); window.grab().save("scene-ui-crop.png");
+    QCoreApplication::processEvents(); GrabWindow(window).save("scene-ui-crop.png");
     CheckIdle(window);
     GetComplete(window,Click(window,"Crop","CloseDocument"),"Succeeded");
     Check(panel->GetObservedState()["documents"].toArray().isEmpty(),"all explicitly created crop documents close");
@@ -1766,7 +1819,7 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
         "wall scene contains the current visible result");
     Check(!FindNode(wall->GetSceneTree(), "published-graph") && FindNode(wall->GetCatalogTree(), "published-graph"),
         "wall scene objects exclude the independent published-result catalog");
-    window.GetWorkflow().onNavigate("Wall", "SetDisplay", {}); QCoreApplication::processEvents(); window.grab().save("wall-manual-ui.png");
+    window.GetWorkflow().onNavigate("Wall", "SetDisplay", {}); QCoreApplication::processEvents(); GrabWindow(window).save("wall-manual-ui.png");
     GetComplete(window, Click(window, "Wall", "Clear"), "Succeeded");
     wall->Observe(); Check(wall->GetObservedState()["activeResult"].toString().isEmpty() && !wall->GetObservedState()["viewedIsActive"].toBool(), "wall clear removes activation while retained historical results remain readable");
 }
@@ -1807,9 +1860,9 @@ void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& dir
             "returning to Part displays the completed result exactly once");
     }
     CheckFourViewGeometry(window);
-    QCoreApplication::processEvents(); window.grab().save("four-view-part-ui.png");
+    QCoreApplication::processEvents(); GrabWindow(window).save("four-view-part-ui.png");
     if (GetEnabled(window, "Artifact")) {
-        window.GetWorkflow().onNavigate("Artifact", "Ring", {}); QCoreApplication::processEvents(); window.grab().save("artifact-buttons-ui.png");
+        window.GetWorkflow().onNavigate("Artifact", "Ring", {}); QCoreApplication::processEvents(); GrabWindow(window).save("artifact-buttons-ui.png");
     }
 }
 void CheckReadTaskStop()
@@ -2228,10 +2281,11 @@ void StartSelfTest(TestWindow& window)
     Check(logText.contains(QRegularExpression("\\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}\\] \\[显示与导航\\]")),
         "diagnostic lines carry an unambiguous timestamp and originating module");
     const auto* operationState=window.findChild<QLabel*>("operationState");
-    Check(operationState->text().contains("显示与导航") && operationState->text().contains("拒绝")
-        && operationState->accessibleName()=="会话状态："+operationState->text(),"a background module rejection remains visible with a synchronized accessible status");
+    Check(operationState->text().contains("拒绝") && operationState->accessibleName().contains("显示与导航")
+        && operationState->accessibleName().contains("拒绝") && operationState->toolTip().contains(operationState->accessibleName().mid(QString("会话状态：").size())),"a background module rejection remains visible with a synchronized complete accessible status");
     window.GetWorkflow().onNavigate("View","Reset",{});QCoreApplication::processEvents();
-    Check(view->findChild<QLabel*>("moduleFeedback")->isVisible() && view->GetFeedback().contains("操作被拒绝"),
+    Check(view->findChild<QLabel*>("moduleFeedback")->isVisible() && view->GetFeedback().contains("操作被拒绝")
+        && view->findChild<QLabel*>("moduleFeedback")->text()==view->GetFeedback(),
         "rejection also stays visible inside its owning module");
     log.close();
     QFile filledLog(window.GetLogPath());Check(filledLog.open(QIODevice::Append),"rotation fixture can extend this session's own log");
@@ -2338,7 +2392,7 @@ void StartSelfTest(TestWindow& window)
     GetComplete(window, ClickNodeAction(window, dataTree, sourceNode, "UseData"), "Succeeded");
     Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == initialIso,
         "reselecting the same data preserves the initial ISO");
-    window.grab().save("scene-ui-data-graph.png");
+    GrabWindow(window).save("scene-ui-data-graph.png");
     GetComplete(window, Click(window, "View", "Reset", {{"viewId", "missing"}}), "Failed");
     GetComplete(window, Send(window, "Data", "Select", {{"revision", GetRefText(original.dataRevision)}, {"expectedBindingRevision", "0"}}), "Failed");
     GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"iso", 50.0}}), "Succeeded");
@@ -2405,7 +2459,7 @@ void StartSelfTest(TestWindow& window)
         GetComplete(window, Send(window, "Part", "SetState", {{"target", target["binding"]}, {"name", "节点刷新测试零件"}}), "Succeeded");
         Check(Wait([&] { const auto* item = partNode(target["binding"].toObject()); return item && item->text(0).contains("节点刷新测试零件") && editTree->selectedItems().size() == 2; }),
             "scene rebuild preserves multi-selection by stable part identity");
-        QCoreApplication::processEvents(); window.grab().save("scene-ui-parts.png");
+        QCoreApplication::processEvents(); GrabWindow(window).save("scene-ui-parts.png");
         GetComplete(window, SendUnavailable(window, "Part", "Commit"), "Rejected");
         GetComplete(window, Click(window, "Part", "EditSelected", {{"target", target["binding"]}}), "ParametersCopied");
         Check(editPanel == window.GetModule("Part") && editPanel->GetCurrentAction() == "Paint"
@@ -2589,7 +2643,7 @@ void StartSelfTest(TestWindow& window)
             bool hasResidual = false;
             for (QTreeWidgetItemIterator it(resultTree); *it; ++it) hasResidual = hasResidual || (*it)->data(0, Qt::UserRole).toJsonObject()["id"].toString().startsWith("residual:");
             Check(hasResidual, "alignment residuals are visible as result nodes");
-            QCoreApplication::processEvents(); window.grab().save("scene-ui-alignment.png");
+            QCoreApplication::processEvents(); GrabWindow(window).save("scene-ui-alignment.png");
             GetComplete(window, Send(window, "Alignment", "Activate"), "FullyDetermined");
             CheckOverlaySwitch(window, "Alignment");
             GetComplete(window, Send(window, "Alignment", "Start"), "Rejected");
@@ -2851,6 +2905,12 @@ QJsonObject CheckPartDisplay(TestWindow& window)
 void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeoutMs)
 {
     const auto script = LoadJson(path);
+    const auto audit=script["uiAudit"].toObject();
+    if(!audit.isEmpty()){
+        if(audit.contains("fontPoints")){auto font=qApp->font();font.setPointSizeF(GetNumber(audit,"fontPoints"));qApp->setFont(font);}
+        if(audit["dark"].toBool()){auto palette=qApp->palette();palette.setColor(QPalette::Window,QColor("#18212c"));palette.setColor(QPalette::WindowText,QColor("#e5edf5"));palette.setColor(QPalette::Text,QColor("#e5edf5"));palette.setColor(QPalette::Base,QColor("#222e3c"));qApp->setPalette(palette);}
+        qApp->setProperty("uiAuditGrayscale",audit["grayscale"].toBool());qApp->setStyleSheet(GetWorkbenchStyle());QCoreApplication::processEvents();
+    }
     const auto steps=script["steps"].toArray();
     const bool unbounded=std::any_of(steps.cbegin(),steps.cend(),[](const auto& step){const auto timeout=step.toObject().value("timeoutMs");return timeout.isUndefined() || (timeout.isDouble() && timeout.toDouble()==0);});
     const auto shutdown=script.contains("shutdownTimeoutMs")?GetNumber(script,"shutdownTimeoutMs"):(unbounded?0.:30000.);
@@ -2894,7 +2954,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             const bool iso = view->viewMode == HostRenderMode::IsoSurface || view->viewMode == HostRenderMode::CompositeIsoSurface;
             hasHiddenSource = hasHiddenSource || (iso && view->material.opacity <= 0);
             if (!hasPreparationCapture && script.contains("partPreparationScreenshot")) {
-                hasPreparationCapture = window.grab().save(GetText(script, "partPreparationScreenshot"));
+                hasPreparationCapture = GrabWindow(window).save(GetText(script, "partPreparationScreenshot"));
             }
         });
         previewWatch.start(100);
@@ -2908,7 +2968,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         return static_cast<int>(timeout);
     };
     for(const auto value:script["steps"].toArray())
-        if(!value.toObject()["generateKnownTransformReference"].toBool() && value.toObject()["control"]!="checkPage" && value.toObject()["control"]!="editParameters") {
+        if(!value.toObject()["generateKnownTransformReference"].toBool() && value.toObject()["control"]!="checkPage" && value.toObject()["control"]!="editParameters" && value.toObject()["control"]!="dockLayout" && value.toObject()["control"]!="histogramIso" && value.toObject()["control"]!="surfaceHistogramIso") {
             (void)getWaitMilliseconds(value.toObject());
             (void)GetExpectedStatuses(value.toObject());
         }
@@ -2942,18 +3002,102 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
     };
     for (const auto value : script["steps"].toArray()) {
         const auto step = value.toObject();
+        std::cout<<"UI_CONTROL control="<<step["control"].toString().toStdString()<<" module="<<step["module"].toString().toStdString()<<" action="<<step["action"].toString().toStdString()<<std::endl;
         const auto params = GetResolved(step["parameters"], results).toObject();
+        if(step["control"]=="dockLayout") {
+            const auto session=window.GetSession();const auto beforeViews=session->GetRenderViewStates();QMap<QString,vtkRenderWindow*> windows;
+            for(auto* view:window.findChildren<QVTKOpenGLNativeWidget*>())windows[view->objectName()]=view->renderWindow();
+            if(step["reset"].toBool())window.ResetLayout();
+            const auto area=[](const QString& value){if(value=="Left")return Qt::LeftDockWidgetArea;if(value=="Right")return Qt::RightDockWidgetArea;if(value=="Top")return Qt::TopDockWidgetArea;if(value=="Bottom")return Qt::BottomDockWidgetArea;throw std::invalid_argument("unknown dock area");};
+            for(const auto item:step["docks"].toArray()){
+                const auto entry=item.toObject();auto* dock=window.findChild<QDockWidget*>(GetText(entry,"name"));Check(dock,"layout control names an existing dock");
+                if(entry.contains("area")){dock->setFloating(false);window.addDockWidget(area(GetText(entry,"area")),dock);}
+                if(entry.contains("splitWith")){auto* anchor=window.findChild<QDockWidget*>(GetText(entry,"splitWith"));Check(anchor,"split anchor exists");window.splitDockWidget(anchor,dock,entry["orientation"]=="Vertical"?Qt::Vertical:Qt::Horizontal);}
+                if(entry.contains("tabWith")){auto* anchor=window.findChild<QDockWidget*>(GetText(entry,"tabWith"));Check(anchor,"tab anchor exists");window.tabifyDockWidget(anchor,dock);}
+                if(entry.contains("floating"))dock->setFloating(entry["floating"].toBool());
+                if(dock->isFloating()){dock->resize(700,400);dock->move(window.pos()+QPoint(40,40));}
+                if(entry.contains("visible"))dock->setVisible(entry["visible"].toBool());if(entry["raise"].toBool())dock->raise();
+            }
+            QCoreApplication::processEvents();if(step["save"].toBool())window.SaveLayout();if(step["restore"].toBool())window.RestoreLayout();QCoreApplication::processEvents();
+            for(const auto item:step["check"].toArray()) {const auto entry=item.toObject();auto* dock=window.findChild<QDockWidget*>(GetText(entry,"name"));Check(dock,"checked dock exists");if(entry.contains("area"))Check(window.dockWidgetArea(dock)==area(GetText(entry,"area")),"dock restores its requested edge");if(entry.contains("floating"))Check(dock->isFloating()==entry["floating"].toBool(),"dock restores its floating state");if(entry.contains("visible"))Check(!dock->isHidden()==entry["visible"].toBool(),"dock restores explicit visibility");if(entry.contains("tabWith"))Check(window.tabifiedDockWidgets(dock).contains(window.findChild<QDockWidget*>(GetText(entry,"tabWith"))),"dock restores its tab group");}
+            Check(session==window.GetSession() && session->GetRenderViewStates().size()==beforeViews.size(),"layout preserves the live Session and all Host view identities");
+            for(auto* view:window.findChildren<QVTKOpenGLNativeWidget*>())Check(windows.value(view->objectName())==view->renderWindow(),"floating and docking retain the original VTK render window");
+            if(step.contains("screenshot"))Check(GrabWindow(window).save(GetText(step,"screenshot")),"dock layout captured from the actual window");
+            if(step.contains("floatingScreenshot")){auto* dock=window.findChild<QDockWidget*>(GetText(step,"captureDock"));Check(dock && dock->isFloating() && dock->grab().save(GetText(step,"floatingScreenshot")),"actual floating dock captured");}
+            continue;
+        }
+        if(step["control"]=="surfaceHistogramIso") {
+            auto* panel=window.GetModule("Surface");NavigateTool(window,"Surface","GlobalAutomatic");auto* toggle=window.findChild<QAction*>("showGrayHistogram");if(!toggle->isChecked())toggle->trigger();
+            const auto timeout=getWaitMilliseconds(step);Check(Wait([&]{panel->Observe();return !panel->GetGrayStatisticsWidget()->GetHistogram()["counts"].toArray().isEmpty();},timeout),"Surface exposes the current scope's real histogram");
+            auto* statistics=panel->GetGrayStatisticsWidget();auto* plot=statistics->findChild<QWidget*>("businessHistogramPlot");statistics->SelectInteractionMode("编辑表面初值");QCoreApplication::processEvents();GrabWindow(window);
+            const auto data=statistics->GetHistogram(),before=panel->GetActionParameters("GlobalAutomatic"),stateBefore=panel->GetObservedState();const auto edges=data["edges"].toArray();QJsonObject marker;
+            for(const auto item:data["markers"].toArray())if(item.toObject()["key"]=="initialIsoValue")marker=item.toObject();Check(marker["editable"].toBool(),"Surface has its separate editable initial threshold");
+            const auto low=edges.first().toDouble(),high=edges.last().toDouble(),fraction=.58;const QPointF start(62+(plot->width()-82)*(marker["value"].toDouble()-low)/(high-low),40),end(62+(plot->width()-82)*fraction,40);
+            const auto count=window.GetRecords().GetRecords()["records"].toArray().size();QMouseEvent press(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier),move(QEvent::MouseMove,end,Qt::NoButton,Qt::LeftButton,Qt::NoModifier),release(QEvent::MouseButtonRelease,end,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(plot,&press);QApplication::sendEvent(plot,&move);Check(panel->GetActionParameters("GlobalAutomatic")==before,"Surface marker movement changes no request parameters");
+            const auto cancel=step["cancelBy"].toString();if(cancel=="Escape"){QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(plot,&escape);}else if(cancel=="scope")panel->SetParameterPatch("GlobalAutomatic",{{"analysisRoi",""}});
+            QApplication::sendEvent(plot,&release);QCoreApplication::processEvents();Check(window.GetRecords().GetRecords()["records"].toArray().size()==count,"Surface marker release cannot invoke Preview or Determine");
+            const auto after=panel->GetActionParameters("GlobalAutomatic");if(cancel.isEmpty()){Check(after["initialIsoValue"].isDouble()&&std::abs(after["initialIsoValue"].toDouble()-(low+(high-low)*fraction))<=(high-low)/std::max(1,plot->width()-82),"Surface release writes the pointed initial threshold to the draft");Check(panel->findChild<QComboBox*>("surfaceParameterSource")->currentData().toBool(),"Surface marker explicitly selects manual initial parameters");Check(panel->GetObservedState()["isoEstimate"]==stateBefore["isoEstimate"],"editing Surface initial threshold cannot replace the measured BG/M estimate");}
+            else Check(after["initialIsoValue"]==before["initialIsoValue"],"cancelled or changed-scope Surface release preserves the old initial draft");
+            continue;
+        }
+        if(step["control"]=="histogramIso") {
+            auto* panel=window.GetModule("View");NavigateTool(window,"View","Set");panel->SetParameterPatch("Set",{{"viewId","primary-3d"},{"mode",QJsonValue()},{"iso",QJsonValue()}});
+            auto* histogram=window.findChild<QAction*>("showGrayHistogram");if(!histogram->isChecked())histogram->trigger();
+            Check(histogram->isChecked()&&window.findChild<QDockWidget*>("grayHistogramDock")->isVisible(),"the unique histogram toggle exposes its synchronized dock");
+            const int timeout=getWaitMilliseconds(step);Check(Wait([&]{panel->Observe();return panel->GetGrayStatisticsWidget()->GetHistogram()["status"]=="Ready";},timeout),"real input gray histogram becomes ready");
+            auto* statistics=panel->GetGrayStatisticsWidget();auto* plot=statistics->findChild<QWidget*>("businessHistogramPlot");statistics->SelectInteractionMode("设置等值阈值");QCoreApplication::processEvents();GrabWindow(window);
+            const auto data=statistics->GetHistogram();const auto edges=data["edges"].toArray();const auto low=edges.first().toDouble(),high=edges.last().toDouble();
+            window.GetRecords().AddTiming("UI.GrayHistogramMaximumBlock",static_cast<qint64>(data["maximumOwnerBlockMs"].toDouble()*1000000.));
+            QJsonObject marker;for(const auto value:data["markers"].toArray())if(value.toObject()["key"]=="iso")marker=value.toObject();Check(marker["editable"].toBool(),"View ISO exposes an editable display marker");
+            const auto before=window.GetSession()->GetRenderViewState({"primary-3d"});Check(before.has_value(),"display target exists");
+            Check(Wait([&]{return !window.GetWorkflow().getRenderPending("primary-3d");},timeout),"the displayed volume settles before marker manipulation");
+            const auto renderedBefore=window.GetRecords().GetTimings()["Render.primary-3d"].toObject()["count"].toDouble();
+            QMap<QString,QJsonObject> businessResults;
+            if(step["preserveResults"].toBool())for(const auto* name:{"Surface","Part","Wall"}){
+                auto* business=window.GetModule(name);business->Observe(false);const auto state=business->GetObservedState();QJsonObject frozen;
+                for(const auto* key:{"formalMesh","formalParameterFingerprint","formalParameters","generation","result","source","labels","mesh","labelMap","catalogRevision"})if(state.contains(key))frozen[key]=state[key];
+                Check(!frozen.isEmpty(),"display-only check starts with an existing formal business identity");businessResults[name]=frozen;
+            }
+            const auto beginCount=window.GetRecords().GetRecords()["records"].toArray().size();
+            const auto xFor=[&](double value){return 62+(plot->width()-82)*(value-low)/(high-low);};
+            const auto fraction=step.contains("toFraction")?GetNumber(step,"toFraction"):0.63;const QPointF start(xFor(marker["value"].toDouble()),40),end(62+(plot->width()-82)*fraction,40);
+            QMouseEvent press(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(plot,&press);QMouseEvent move(QEvent::MouseMove,end,Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QElapsedTimer previewClock;previewClock.start();QApplication::sendEvent(plot,&move);plot->repaint();const auto previewNs=previewClock.nsecsElapsed();window.GetRecords().AddTiming("UI.HistogramPreview",previewNs);Check(previewNs<=100000000,"Qt marker input and paint return within the 100 ms direct-feedback limit");
+            Check(window.GetRecords().GetRecords()["records"].toArray().size()==beginCount && window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold==before->isoThreshold,"marker movement changes only the local candidate");
+            const auto cancel=step["cancelBy"].toString();
+            if(cancel=="Escape"){QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(plot,&escape);}
+            else if(cancel=="target")panel->SetParameterPatch("Set",{{"viewId","slice-top-down"}});
+            else if(cancel=="mode")panel->SetParameterPatch("Set",{{"mode","CompositeVolume"}});
+            else if(cancel=="hide")window.findChild<QDockWidget*>("grayHistogramDock")->hide();
+            else if(cancel=="source"){const auto id=Click(window,"Data","Load",GetResolved(step["switchParameters"],results).toObject(),timeout);GetComplete(window,id,"Succeeded",timeout);Check(Wait([&]{const auto current=window.GetSession()->GetRenderViewState({"primary-3d"});panel->Observe();return current&&current->dataRevision!=before->dataRevision;},timeout),"actual input switch invalidates the old marker drag");}
+            const auto countBeforeRelease=window.GetRecords().GetRecords()["records"].toArray().size();
+            QMouseEvent release(QEvent::MouseButtonRelease,end,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(plot,&release);
+            if(!cancel.isEmpty()){QCoreApplication::processEvents();Check(window.GetRecords().GetRecords()["records"].toArray().size()==countBeforeRelease,"cancelled or stale marker release submits no View.Set");}
+            else {
+                Check(window.GetRecords().GetRecords()["records"].toArray().size()==beginCount+1,"one release creates exactly one existing View.Set request");
+                const auto record=GetComplete(window,static_cast<std::uint64_t>(beginCount+1),"Succeeded",timeout);Check(record["module"]=="View"&&record["action"]=="Set","drag uses the existing View.Set business action");
+                const auto requested=record["parameters"].toObject()["iso"].toDouble();const auto pixel=(high-low)/std::max(1,plot->width()-82);
+                Check(std::abs(requested-(low+(high-low)*fraction))<=pixel,"released display threshold matches the pointer within one logical plot pixel");
+                Check(Wait([&]{const auto applied=window.GetSession()->GetRenderViewState({"primary-3d"});return applied && applied->isoThreshold==requested;},timeout),"Host observes the threshold submitted through View.Set");
+                if(requested!=before->isoThreshold)Check(Wait([&]{return window.GetRecords().GetTimings()["Render.primary-3d"].toObject()["count"].toDouble()>renderedBefore&&!window.GetWorkflow().getRenderPending("primary-3d");},timeout),"the actual 3D view renders after its changed display threshold");
+                QApplication::sendEvent(plot,&release);Check(window.GetRecords().GetRecords()["records"].toArray().size()==beginCount+1,"repeated release cannot submit again");
+            }
+            for(auto it=businessResults.begin();it!=businessResults.end();++it){auto* business=window.GetModule(it.key());business->Observe(false);const auto state=business->GetObservedState();for(auto value=it->begin();value!=it->end();++value)Check(state[value.key()]==value.value(),"display ISO preserves the exact formal business identity and parameters");}
+            if(step.contains("screenshot"))Check(GrabWindow(window).save(GetText(step,"screenshot")),"display histogram captured after the actual interaction");
+            continue;
+        }
         if(step["control"]=="checkPage") {
             window.findChild<QToolButton*>("toggleObjectColumn")->setChecked(true);
             window.findChild<QToolButton*>("toggleParameterColumn")->setChecked(true);
             const auto module=GetText(step,"module");auto* tabs=window.findChild<QComboBox*>("featureTabs");int index=-1;
-            const int group=QStringList{"Data","View","Rotation"}.contains(module)?0:QStringList{"Roi","Crop","Artifact","Part","Surface"}.contains(module)?1:2;
+            const int group=QStringList{"Data","View","Rotation","Artifact"}.contains(module)?0:module=="Surface"?1:QStringList{"Roi","Crop"}.contains(module)?2:3;
             auto* workspaces=window.findChild<QComboBox*>("workspaceTabs");Check(GetComboEnabled(workspaces,group),"planned business group is compiled");
             SelectComboIndex(workspaces,group);QCoreApplication::processEvents();
             for(int i=0;i<tabs->count();++i)if(tabs->itemData(i)==module)index=i;
             Check(index>=0,"planned business module is present");
             SelectComboIndex(tabs,index);
             auto* page=window.GetModule(module);QCoreApplication::processEvents();page->Observe();
+            if(auto* filter=window.findChild<QComboBox*>("sceneView"))filter->setCurrentIndex(step["sceneView"].toInt(0));
             Check(page->isVisible() && page->findChild<QPushButton*>("businessPrimary")->isVisible(),"Qt navigation key events reveal the planned stage and primary");
             Check(window.size()==initialWindowSize,"tab clicks preserve the current outer window size");
             if(step.contains("parameterAction")){page->SelectAction(GetText(step,"parameterAction"));QCoreApplication::processEvents();}
@@ -2961,6 +3105,10 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 if(step["columns"].toObject().contains(entry.first))window.findChild<QToolButton*>(entry.second)->setChecked(step["columns"].toObject()[entry.first].toBool());
             }
             QCoreApplication::processEvents();
+            if(step["showHistogram"].toBool()){
+                window.GetWorkflow().onShowHistogram(module);
+                Check(Wait([&]{page->Observe();const auto data=page->GetGrayStatisticsWidget()->GetHistogram();return data["status"]=="Ready"||!data["counts"].toArray().isEmpty();},getWaitMilliseconds(step)),"the selected tool exposes its real grayscale distribution");
+            }
             if(step["checkViewTextFit"].toBool())CheckViewToolbarText(window);
             if(step.contains("expectedDpr"))Check(window.devicePixelRatioF()==GetNumber(step,"expectedDpr"),"the capture uses the requested application scale");
             QPixmap pageCapture;
@@ -2968,7 +3116,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 // grab 同步完成当前帧的布局与绘制；断言和保存使用同一帧，不要求内部滚动位置静止。
                 std::string layoutError;
                 const bool ready=Wait([&] {
-                    pageCapture=window.grab();
+                    pageCapture=GrabWindow(window);
                     try {CheckModulePanelText(*page);return true;}
                     catch(const std::runtime_error& error){layoutError=error.what();return false;}
                 },static_cast<int>(getWaitMilliseconds(step)));
@@ -2997,11 +3145,11 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             }
             checkObserved(step);if(step.contains("expectPrimaryAction"))Check(page->findChild<QPushButton*>("businessPrimary")->property("businessAction")==step["expectPrimaryAction"].toString(),"current page presents the expected phase without selecting a form");
             if(step.contains("screenshot")) {
-                if(pageCapture.isNull())pageCapture=window.grab();
+                if(pageCapture.isNull())pageCapture=GrabWindow(window);
                 Check(pageCapture.save(GetText(step,"screenshot")),"business page screenshot saved");
-                auto* split=window.findChild<QSplitter*>("workbenchSplit");const auto sizes=split->sizes();
+                auto* scene=window.findChild<QDockWidget*>("sceneDock");auto* properties=window.findChild<QDockWidget*>("parameterDock");const QList<int> sizes{scene->isVisible()?scene->width():0,window.findChild<QVTKOpenGLNativeWidget*>("primary3D")->width(),properties->isVisible()?properties->width():0};
                 auto* scroll=page->findChild<QScrollArea*>("operationScroll");auto* footer=page->findChild<QWidget*>("businessCommandFooter");
-                const bool shown=!window.findChild<QWidget*>("parameterPages")->isHidden();
+                const bool shown=properties->isVisible();
                 if(shown)Check(scroll->height()>=100 && page->rect().contains(QRect(footer->mapTo(page,QPoint()),footer->size()))
                     && page->findChildren<QScrollArea*>().size()==1,"the complete parameter area and current footer fit without nested scrollers");
                 QJsonArray propertyGeometry;
@@ -3010,7 +3158,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                     for(auto* child:field->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->property("parameterValue").toBool())body=child;
                     propertyGeometry.append(QJsonObject{{"key",field->objectName()},{"fieldWidth",field->width()},
                         {"label",label->text()},{"labelX",label->x()},{"labelY",label->y()},{"labelWidth",label->width()},
-                        {"labelHeight",label->height()},{"labelRequiredWidth",label->fontMetrics().horizontalAdvance(label->text())},
+                        {"labelHeight",label->height()},{"fontPixelSize",label->font().pixelSize()},{"labelRequiredWidth",label->fontMetrics().horizontalAdvance(label->text())},
                         {"vectorBelow",field->property("vectorBelow").toBool()},
                         {"valueX",body?body->x():-1},{"valueY",body?body->y():-1},{"valueWidth",body?body->width():-1}});
                 }
@@ -3028,7 +3176,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             const auto action=panel->GetParameterAction();if(step.contains("action"))Check(action==GetText(step,"action"),"editing preserves the currently selected form");
             panel->SetParameterPatch(action,params);QCoreApplication::processEvents();panel->Observe();
             if(step.contains("expectPrimaryAction"))Check(panel->findChild<QPushButton*>("businessPrimary")->property("businessAction")==step["expectPrimaryAction"].toString(),"edited current form changes its natural next action");
-            if(step.contains("screenshot"))Check(window.grab().save(GetText(step,"screenshot")),"edited business page screenshot saved");
+            if(step.contains("screenshot"))Check(GrabWindow(window).save(GetText(step,"screenshot")),"edited business page screenshot saved");
             checkObserved(step);
             continue;
         }
@@ -3067,17 +3215,17 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             << GetText(step,"action").toStdString() << " event=start utc=" << requestedUtc.toStdString() << std::endl;
         const auto control=step["control"].toString();
         std::uint64_t id=0;
-        if(control=="businessPrimary" || control=="nextButton" || control=="currentPrimary") {
+        if(control=="businessPrimary" || control=="nextButton" || control=="currentPrimary" || control=="previewButton") {
             const auto module=GetText(step,"module"),action=GetText(step,"action");auto* panel=window.GetModule(module);
             if(!panel)throw std::invalid_argument("脚本模块不存在");
             const auto parameterAction=step["parameterAction"].isString()?GetText(step,"parameterAction"):action;
             if(control=="currentPrimary") {Check(panel->isVisible(),"primary click targets the already visible page");Check(params.isEmpty(),"currentPrimary never injects parameters or navigation");}
-            else window.GetWorkflow().onNavigate(module,parameterAction,params);
+            else {NavigateTool(window,module,parameterAction);panel->SetParameterPatch(parameterAction,params);}
             QCoreApplication::processEvents();panel->Observe();
             QPointer<QPushButton> button;
             QPointer<QAction> nextCommand;
             const bool available=Wait([&]{
-                panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");
+                panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : control=="previewButton"?"previewSurface":"businessPrimary");
                 if(control=="nextButton") {
                     auto* tools=panel->findChild<QToolButton*>("moreOperations");nextCommand=tools->menu()->findChild<QAction*>("nextMenu_"+action);
                     return tools->isVisible() && tools->isEnabled() && nextCommand && nextCommand->isVisible() && nextCommand->isEnabled();
@@ -3102,7 +3250,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         } else if(control=="catalogAction") {
             const auto module=GetText(step,"module"),action=GetText(step,"action");
             auto* panel=window.GetModule(module);
-            window.GetWorkflow().onNavigate(module,action,{});QCoreApplication::processEvents();panel->Observe();
+            NavigateTool(window,module,action);panel->Observe();
             auto* tree=panel->GetCatalogTree();QTreeWidgetItem* target=nullptr;
             Check(Wait([&] {
                 panel->Observe();
@@ -3169,7 +3317,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         const auto metrics=GetResolved(step["expectMetrics"],results).toObject();
         for(auto field=metrics.begin();field!=metrics.end();++field) {
             QJsonValue actual=record["result"];
-            for(const auto& key:field.key().split('.'))actual=actual.toObject().value(key);
+            for(const auto& key:field.key().split('.')){if(actual.isArray()){bool validIndex=false;const auto index=key.toInt(&validIndex);Check(validIndex&&index>=0&&index<actual.toArray().size(),"metric array path names an existing result");actual=actual.toArray()[index];}else actual=actual.toObject().value(key);}
             bool valid=actual.isDouble();const auto number=actual.isString()?actual.toString().toDouble(&valid):actual.toDouble();
             Check(valid && std::isfinite(number),("business metric is finite: "+field.key()).toStdString().c_str());
             const auto bounds=field.value().toObject();
@@ -3195,28 +3343,31 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         }
         if(script["checkWindowStable"].toBool() || script["checkWindowLocked"].toBool())Check(window.size()==initialWindowSize,"business operations preserve the user-selected outer window size");
         if(step["showStatistics"].toBool()) {
-            auto* panel=window.GetModule(GetText(step,"module"));window.GetWorkflow().onShowStatistics(panel->GetName());panel->RefreshStatistics();
+            auto* panel=window.GetModule(GetText(step,"module"));
+            const bool gray=step["waitHistogram"].toBool() || QStringList{"Data","View","Roi","Crop","Surface","Rotation"}.contains(panel->GetName());
+            if(gray){window.GetWorkflow().onShowHistogram(panel->GetName());panel->RefreshGrayStatistics();}else{window.GetWorkflow().onShowStatistics(panel->GetName());panel->RefreshStatistics();}
+            auto* statistics=gray?panel->GetGrayStatisticsWidget():panel->GetStatisticsWidget();
             if(step["waitHistogram"].toBool() || step["waitStatistics"].toBool()) {
                 Check(Wait([&]{
-                    const auto data=panel->GetStatisticsWidget()->GetHistogram();
+                    const auto data=statistics->GetHistogram();
                     const bool directReady=step["waitHistogram"].toBool()
-                        && !data["cacheKey"].isString() && !data["counts"].toArray().isEmpty()
+                        && !data["counts"].toArray().isEmpty()
                         && (data["status"].isUndefined() || data["status"]=="Ready");
                     return directReady || (data["cacheKey"].isString()
                         && QStringList{"Ready","Empty","Failed"}.contains(data["status"].toString()));
                 },timeout),"real statistics reaches a terminal state within the bounded read");
-                const auto data=panel->GetStatisticsWidget()->GetHistogram();
+                const auto data=statistics->GetHistogram();
                 const bool directReady=step["waitHistogram"].toBool()
-                    && !data["cacheKey"].isString() && !data["counts"].toArray().isEmpty()
+                    && !data["counts"].toArray().isEmpty()
                     && (data["status"].isUndefined() || data["status"]=="Ready");
                 Check(directReady || data["status"]=="Ready" || data["status"]=="Empty",
                     "real statistics succeeds including a valid empty result");
                 if(step["waitHistogram"].toBool() && data["status"]=="Ready")
                     Check(!data["counts"].toArray().isEmpty(),"ready histogram contains its declared bins");
             }
-            if(step.contains("statisticsAudit"))ExportJson(GetText(step,"statisticsAudit"),panel->GetStatisticsWidget()->GetHistogram());
-            if(step.contains("statisticsScreenshot"))Check(panel->GetStatisticsWidget()->grab().save(GetText(step,"statisticsScreenshot")),"actual embedded statistics controls are captured");
-            // 统计在主窗口内部，不再有遮挡裁切视窗的浮动统计窗口。
+            if(step.contains("statisticsAudit"))ExportJson(GetText(step,"statisticsAudit"),statistics->GetHistogram());
+            if(step.contains("statisticsScreenshot"))Check(statistics->grab().save(GetText(step,"statisticsScreenshot")),"actual embedded statistics controls are captured");
+            // 灰度与分析统计分别属于可恢复的原生停靠窗。
             QCoreApplication::processEvents();
         }
         switching.stop(); cancellation.stop();
@@ -3481,7 +3632,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 }
             }
             std::cout<<"CAPTURE: saving window"<<std::endl;
-            Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");
+            Check(GrabWindow(window).save(GetText(step, "screenshot")), "case screenshot saved");
         }
         if (step["checkViewLayout"].toBool()) CheckFourViewGeometry(window);
         if (step["checkSceneConsistency"].toBool()) {
@@ -3575,7 +3726,7 @@ int StartTestCase(TestWindow& window, const QString& path, const QString& record
         Check(window.findChild<QLabel*>("businessMeasurements") != nullptr, "manual business measurements panel exists");
         Check(window.GetRecords().GetMeasurements()["memory"].toObject()["available"].toBool(), "OS process resource measurement is available");
         if (selfTest) StartSelfTest(window); else StartSequence(window, path,shutdownTimeoutMs);
-    } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; window.grab().save("scene-ui-failure.png"); result = 1; }
+    } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; GrabWindow(window).save("scene-ui-failure.png"); result = 1; }
     const auto businessDiagnostics = window.GetDiagnostics();
     QElapsedTimer stopClock; stopClock.start(); int stopAttempts = 0;
     const bool stopped = Wait([&] { ++stopAttempts; return window.StopSession(); },shutdownTimeoutMs);

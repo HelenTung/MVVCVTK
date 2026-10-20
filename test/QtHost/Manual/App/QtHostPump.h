@@ -29,6 +29,9 @@ public:
     std::function<void(const HostViewRenderResult&)> onViewRendered;
     std::function<void(const QString&)> onError;
     std::function<void(const QString&, qint64)> onTiming;
+    // 无接纳或完成语义；存在 Session 时，在实际 Host 调用前由所属线程同步通知。
+    // Host 后续拒绝/失败也已通知；仅允许轻量呈现，不查询/请求/取消/Detach/Stop，不驱动事件循环。
+    std::function<void(const QString&)> onPhaseStarting;
     std::uint64_t GetUpdateCount() const { return m_updateCount; }
     std::uint64_t GetRenderCount() const { return m_renderCount; }
     QJsonObject GetDiagnostics() const;
