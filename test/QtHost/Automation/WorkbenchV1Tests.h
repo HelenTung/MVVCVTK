@@ -1,2 +1,2 @@
 #pragma once
-namespace Manual { class TestWindow; void CheckWorkbenchV1(TestWindow& window); void CheckWorkbenchText(TestWindow& window); }
+namespace Manual { class TestWindow; void CheckWorkbenchV1(TestWindow& window); void CheckViewToolbarText(TestWindow& window); }

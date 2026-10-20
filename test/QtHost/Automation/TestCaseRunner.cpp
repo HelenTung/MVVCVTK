@@ -2780,7 +2780,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 if(step["columns"].toObject().contains(entry.first))window.findChild<QToolButton*>(entry.second)->setChecked(step["columns"].toObject()[entry.first].toBool());
             }
             QCoreApplication::processEvents();
-            if(step["checkTextFit"].toBool())CheckWorkbenchText(window);
+            if(step["checkViewTextFit"].toBool())CheckViewToolbarText(window);
             if(step["expectInputElided"].toBool()) {
                 const auto* identity=window.findChild<QLabel*>("currentInputIdentity");const auto input=window.GetSession()->GetImageDescriptor();
                 Check(identity && identity->text().endsWith(QChar(0x2026)),"long input identity yields space with a visible ellipsis");

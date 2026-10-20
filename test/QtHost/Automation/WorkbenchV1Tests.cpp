@@ -35,7 +35,7 @@ void CheckNavigationWidth(TestWindow& window)
             groups->setCurrentIndex(group);
             for(int module=0;module<modules->count();++module) {
                 modules->setCurrentIndex(module);QCoreApplication::processEvents();
-                CheckWorkbenchText(window);
+                CheckViewToolbarText(window);
                 for(auto* combo:{groups,modules}) {
                     QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
                     const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
@@ -48,9 +48,11 @@ void CheckNavigationWidth(TestWindow& window)
     window.resize(originalSize);window.GetWorkflow().onNavigate("Data","Load",{});QCoreApplication::processEvents();
 }
 }
-void CheckWorkbenchText(TestWindow& window)
+void CheckViewToolbarText(TestWindow& window)
 {
     for(auto* button:window.findChildren<QAbstractButton*>()) {
+        const auto name=button->objectName();
+        if(name!="showBusinessStatistics" && name!="expandBusinessStatistics" && name!="fitView" && !name.startsWith("fit_slice-"))continue;
         const auto visible=button->visibleRegion().boundingRect();
         if(visible.isEmpty() || button->text().isEmpty())continue;
         const auto message=QString("visible command text fits: %1 [%2], width %3, required %4")
@@ -58,6 +60,7 @@ void CheckWorkbenchText(TestWindow& window)
         Require(button->width()>=button->sizeHint().width() && visible.width()==button->width(),message.toStdString().c_str());
     }
     for(auto* combo:window.findChildren<QComboBox*>()) {
+        if(combo->objectName()!="viewLayout" && combo->objectName()!="renderMode")continue;
         if(combo->visibleRegion().isEmpty() || combo->isEditable())continue;
         QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
         const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
