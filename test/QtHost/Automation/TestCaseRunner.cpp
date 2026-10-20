@@ -1848,7 +1848,8 @@ void CheckReadTaskStop()
         && expiredRecord["result"].toObject()["failureReason"]=="DeadlineExceeded",
         "the frozen task deadline completes once with an explicit failure reason");
     Check(file.open(QIODevice::ReadOnly) && file.readAll()==original,"deadline expiry preserves the previous output");file.close();
-    Check(QDir(directory.path()).entryList(QDir::Files|QDir::Hidden|QDir::System)==entries,
+    const auto deadlineFiles=QDir(directory.path()).entryList(QDir::Files|QDir::Hidden|QDir::System);
+    Check(deadlineFiles.size()==entries.size() && std::equal(deadlineFiles.cbegin(),deadlineFiles.cend(),entries.cbegin()),
         "deadline Stop cleans its unpublished temporary output");
 }
 #if defined(MANUAL_ROI)
@@ -1946,7 +1947,8 @@ void CheckRoiReadTasks(TestWindow& window,DataRevisionRef roi,DataRevisionRef so
         && replacement["result"].toObject()["message"].toString().contains("提交失败"),
         "Windows denies final ROI replacement only after the complete temporary mask reaches commit");
     Check(file.open(QIODevice::ReadOnly) && file.readAll()==allSelected,"failed final ROI replacement preserves exact old bytes");file.close();
-    Check(QDir(directory.path()).entryList(QDir::Files|QDir::Hidden|QDir::System)==existingFiles,
+    const auto remainingFiles=QDir(directory.path()).entryList(QDir::Files|QDir::Hidden|QDir::System);
+    Check(remainingFiles.size()==existingFiles.size() && std::equal(remainingFiles.cbegin(),remainingFiles.cend(),existingFiles.cbegin()),
         "failed final ROI replacement removes its temporary file");
 #endif
 }
