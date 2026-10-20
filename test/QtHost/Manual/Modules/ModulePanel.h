@@ -13,6 +13,8 @@
 #include <QSet>
 #include <QPointer>
 #include <functional>
+#include <chrono>
+#include <optional>
 #include <map>
 #include <set>
 class QPushButton;
@@ -34,9 +36,19 @@ namespace Manual {
 class ParameterEditor;
 class ColorLegendEditor;
 struct TestContext { TestSession& runtime; TestWorkflow& workflow; TestRecordWriter& records; };
+struct ReadTaskConfig final {
+    // 工作台私有默认值沿用 business-measurement 场景的一小时长测期限，可按任务覆盖。
+    std::chrono::milliseconds timeout{std::chrono::hours(1)};
+    std::optional<std::chrono::nanoseconds> preparationTime;
+    // 只供私有确定性回归替换时钟，须线程安全；正式任务使用 steady_clock。
+    std::function<std::chrono::steady_clock::time_point()> getNow;
+};
 struct ReadTaskContext final {
     ReportCheckpoint checkpoint;
-    // 提交与取消争用同一状态：开始提交后，取消明确不再被接纳。
+    // 线程安全；取消与期限共享任务仲裁状态，提交开始后均不再接纳。
+    std::function<bool()> getCancelled;
+    // 工作线程内同步调用 publish；取消/期限先胜出时不调用它，提交先开始时不再撤回。
+    // publish 仅提交线程私有文件，不访问 Host 或界面；接纳提交不保证替换一定成功。
     std::function<void(const std::function<void()>&)> commit;
 };
 class ModulePanel : public QWidget {
@@ -54,10 +66,12 @@ public:
     std::uint64_t SendAction(const QString& name, const QJsonObject& params, Completion onComplete = {});
     void SetComplete(std::uint64_t id, const QString& status, QJsonObject result = {});
     void SetAdmission(std::uint64_t id, bool accepted, QJsonObject raw = {});
-    // 只读长任务持有固定输入，在后台工作；完成回调和记录仍在界面线程执行。
+    // 同步启动；忙或配置非法时抛异常，不调用 onSucceeded。任务期限在此冻结。
+    // onSucceeded 仅成功时由所属线程定时器调用，不会在本函数返回前执行，随后发布终态记录。
+    // 回调内可查询/请求 Stop；当前任务仍占用读槽，新读会拒绝，Stop 可返回待重试。
     void StartReadTask(std::uint64_t id, QString status,
         std::function<QJsonObject(const ReadTaskContext&)> work,
-        std::function<void()> onSucceeded = {});
+        std::function<void()> onSucceeded = {}, ReadTaskConfig config = {});
     std::size_t CancelReadTasks();
     void SetState(const QJsonObject& value);
     void SetNotice(const QString& text);

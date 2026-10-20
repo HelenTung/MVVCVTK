@@ -3,6 +3,10 @@
 #include "Support/ReferenceDataSource.h"
 #include "Support/ParameterEditor.h"
 #include <QFileInfo>
+#include <QElapsedTimer>
+#include <chrono>
+#include <cmath>
+#include <limits>
 #if defined(MANUAL_ROI)
 #include "Host/RoiEditingHostFeature.h"
 #endif
@@ -181,12 +185,21 @@ ModulePanel* CreateDataTest(TestContext context, std::shared_ptr<ReferenceDataSo
         panel->SetComplete(id,"Observed",reference->ReadTransform());
     },TestPolicy::Read);
     panel->AttachAction("ReadRoi", {{"roi","latest"},{"maskPath",""}}, [panel, reference](auto id,const auto& p) {
+        QElapsedTimer preparation;preparation.start();
         const auto input=panel->GetSession()->GetImageDescriptor();
         if(!input)throw std::runtime_error("source unavailable");
         const auto catalog=panel->GetSession()->GetRoiDescriptors();
         if(catalog.empty())throw std::runtime_error("ROI unavailable");
         const auto ref=GetText(p,"roi")=="latest"?catalog.back().revision:GetRef(p["roi"]);
-        panel->StartReadTask(id,"Observed",reference->CreateRoiReadTask(ref,input->dataRevision,GetText(p,"maskPath")));
+        const auto work=reference->CreateRoiReadTask(ref,input->dataRevision,GetText(p,"maskPath"));
+        ReadTaskConfig config;config.preparationTime=std::chrono::nanoseconds(preparation.nsecsElapsed());
+        if(p.contains("readTimeoutMs")) {
+            const auto timeout=GetNumber(p,"readTimeoutMs");
+            if(timeout<1 || timeout>std::numeric_limits<int>::max() || timeout!=std::trunc(timeout))
+                throw std::invalid_argument("读取任务 readTimeoutMs 必须为正的毫秒整数");
+            config.timeout=std::chrono::milliseconds(static_cast<int>(timeout));
+        }
+        panel->StartReadTask(id,"Observed",work,{},config);
     },TestPolicy::Read);
     return panel;
 }

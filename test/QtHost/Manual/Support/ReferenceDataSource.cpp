@@ -201,8 +201,8 @@ std::function<QJsonObject(const ReadTaskContext&)> ReferenceDataSource::CreateRo
         RoiMaskRequest request; request.region.offset = {0,0,0};
         for (int a=0;a<3;++a) request.region.size[a]=grid.dimensions[a];
         request.chunkBytes=roiChunkBytes;
-        // 底层按行检查；其异常转为 Cancelled 后，再由 checkpoint 恢复协调器的取消终态。
-        request.getCancelled=[&context] { context.checkpoint(); return false; };
+        // 底层按行检查取消/期限，外层检查点将停止原因恢复为对应终态。
+        request.getCancelled=context.getCancelled;
         QSaveFile output(maskPath);
         if (!maskPath.isEmpty() && (!QDir().mkpath(QFileInfo(maskPath).absolutePath()) || !output.open(QIODevice::WriteOnly)))
             throw std::runtime_error("无法保存 ROI 掩码");
