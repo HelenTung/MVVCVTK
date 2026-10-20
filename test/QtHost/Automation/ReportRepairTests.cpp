@@ -1,4 +1,5 @@
 #include "ReportWorkflowTests.h"
+#include "TestCaseRunner.h"
 #include "Support/ResultReport.h"
 #include "Support/ReportComparison.h"
 #include "Support/ReportStorage.h"
@@ -189,8 +190,11 @@ void CheckAssociationsAndClearing() {
     view.ShowReports({},b.result,"Wall");Require(Visible(view,crossModule.id),"comparison missing from the other business module entry");
     auto imported=Read("item_id,volume_mm3\nexternal,7\n");view.AddReport(imported);view.SelectReport(imported.id);
     view.getSources=[]{return QMap<QString,QString>{{"data-b","测试体数据"}};};
-    QTimer::singleShot(0,[]{auto* dialog=qobject_cast<QInputDialog*>(QApplication::activeModalWidget());Require(dialog,"source association chooser missing");dialog->findChild<QComboBox*>()->setCurrentIndex(1);dialog->accept();});
-    view.findChild<QPushButton*>("associateReportSource")->click();
+    DrivePopupInteraction([&]{view.findChild<QPushButton*>("associateReportSource")->click();},[&]{
+        auto* dialog=qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+        if(!dialog || dialog->parentWidget()!=&view)return false;
+        dialog->findChild<QComboBox*>()->setCurrentIndex(1);dialog->accept();return true;
+    },"source association chooser missing");
     view.ShowReports("data-b");Require(Visible(view,imported.id),"explicit imported report association was not used by filtering");
     view.SetReportSource(imported.id,{});view.ShowReports("data-b");Require(!Visible(view,imported.id),"removing association left stale source membership");
     auto removable=Document("remove");std::weak_ptr<ReportTable> storage=removable.table;view.AddReport(removable);view.SelectReport(removable.id);
@@ -265,16 +269,18 @@ void CheckComparisonGenerationAdmission() {
         };
         if(outcome==2)ReportTaskTestAccess::BeforeStart(view,[&]{if(++launches==1)throw std::runtime_error("injected comparison startup failure");});
         const auto before=view.GetReportIds();bool mappingShown=false,generatedDuringMapping=false;
-        QTimer::singleShot(0,&view,[&]{
+        const auto mapping=[&]{
             auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
-            mappingShown=dialog&&dialog->windowTitle()=="核对比较指标、单位与匹配依据";
-            if(!mappingShown){if(dialog)dialog->reject();return;}
+            if(!dialog || dialog->parentWidget()!=&view || dialog->windowTitle()!="核对比较指标、单位与匹配依据")return false;
+            mappingShown=true;
             view.QueueReport({{"operationId","mapping-native"},{"module","Surface"},{"result",QJsonObject{{"generation",native.result}}}});
             // 在映射窗口的嵌套事件循环内主动触发生成，避免依赖计时器和线程调度顺序。
             ReportTaskTestAccess::Generate(view);generatedDuringMapping=preparations!=0;
             if(outcome==1)dialog->reject();else dialog->accept();
-        });
-        QString failure;try{ReportTaskTestAccess::Compare(view);}catch(const std::exception& error){failure=QString::fromUtf8(error.what());}
+            return true;
+        };
+        QString failure;try{DrivePopupInteraction([&]{ReportTaskTestAccess::Compare(view);},mapping,"comparison mapping dialog was not opened");}
+        catch(const std::exception& error){failure=QString::fromUtf8(error.what());}
         Require(mappingShown,"comparison mapping dialog was not opened");
         Require(!generatedDuringMapping,"native report generation stole comparison admission during mapping dialog");
         if(outcome==0) {
@@ -368,8 +374,12 @@ void CheckGenerationAndTasks() {
     view.ShowReports();
     view.SelectReport("lazy");view.findChild<QPushButton*>("setReportBaseline")->click();
     auto current=Document("current","聚合节点厚度场值",50000);view.AddReport(current);view.SelectReport(current.id);
-    QTimer::singleShot(0,[]{auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());Require(dialog,"comparison mapping dialog missing");dialog->accept();});
-    view.findChild<QPushButton*>("compareReports")->click();Require(view.property("reportTaskBusy").toBool(),"comparison blocked its UI admission");
+    DrivePopupInteraction([&]{view.findChild<QPushButton*>("compareReports")->click();},[&]{
+        auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if(!dialog || dialog->parentWidget()!=&view || !dialog->findChild<QComboBox*>("reportMatchMode"))return false;
+        dialog->accept();return true;
+    },"comparison mapping dialog missing");
+    Require(view.property("reportTaskBusy").toBool(),"comparison blocked its UI admission");
     const auto comparisonIds=view.GetReportIds();QTimer::singleShot(0,&view,[&]{view.findChild<QPushButton*>("cancelReportTask")->click();});
     Wait([&]{return view.property("reportTaskBusy").toBool();});
     Require(view.GetReportIds()==comparisonIds && view.GetSelectedReport().id==current.id,"cancelled comparison published a partial result or changed selection");

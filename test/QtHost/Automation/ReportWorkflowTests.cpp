@@ -1,4 +1,5 @@
 #include "ReportWorkflowTests.h"
+#include "TestCaseRunner.h"
 #include "ReportLargeTests.h"
 #include "App/TestWindow.h"
 #include "Modules/ModulePanel.h"
@@ -220,10 +221,13 @@ void CheckVolumeColumns(ResultReport& view,const ReportDocument& native,const Re
     Require(native.validityColumn==-1 && copy.validityColumn==-1,"volume completeness became a whole-row validity filter");
     for(int column=0;column<native.columns.size();++column)if(native.columns[column].numeric) {
         view.SelectReport(native.id);view.findChild<QPushButton*>("setReportBaseline")->click();view.SelectReport(copy.id);
-        QTimer::singleShot(0,&view,[column]{auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());Require(dialog,"volume column mapping dialog missing");
+        DrivePopupInteraction([&]{view.findChild<QPushButton*>("compareReports")->click();},[column,&view]{
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if(!dialog || dialog->parentWidget()!=&view || !dialog->findChild<QComboBox*>("reportMatchMode"))return false;
             dialog->findChild<QComboBox*>("reportBaselineValueColumn")->setCurrentIndex(column+1);
-            dialog->findChild<QComboBox*>("reportCurrentValueColumn")->setCurrentIndex(column+1);dialog->accept();});
-        view.findChild<QPushButton*>("compareReports")->click();WaitTasks(view,timeoutMs);
+            dialog->findChild<QComboBox*>("reportCurrentValueColumn")->setCurrentIndex(column+1);dialog->accept();return true;
+        },"volume column mapping dialog missing");
+        WaitTasks(view,timeoutMs);
         auto compared=view.GetSelectedReport();const auto a=compared.table->Read(0),b=compared.table->Read(1);
         int valid=0;for(ReportRowId row=0;row<native.table->GetCount();++row){double value;if(GetReportNumber(GetReportCell(native.table->Read(row),column),value))++valid;}
         Require(a[2]==QString::number(valid) && b[2]==a[2] && b[3]==a[3] && b[4]==a[4] && b[5]==a[5],"real volume per-column count or statistics changed on automatic CSV mapping");
@@ -541,11 +545,11 @@ void CheckReportWorkflow()
     ResultReport compareView;
     auto nativeA=Read("sample_id,thickness_mm,validity\nA,1,0\nB,2,0\n"),nativeB=Read("sample_id,thickness_mm,validity\nB,3,0\nA,4,0\n");
     compareView.AddReport(nativeA);compareView.findChild<QPushButton*>("setReportBaseline")->click();compareView.AddReport(nativeB);compareView.SelectReport(nativeB.id);
-    QTimer::singleShot(0,[]{
-        auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());Require(dialog!=nullptr,"comparison dialog opens");
-        dialog->findChild<QComboBox*>("reportMatchMode")->setCurrentIndex(1);dialog->findChild<QCheckBox*>("reportMatchConfirmed")->setChecked(true);dialog->accept();
-    });
-    compareView.findChild<QPushButton*>("compareReports")->click();
+    DrivePopupInteraction([&]{compareView.findChild<QPushButton*>("compareReports")->click();},[&]{
+        auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if(!dialog || dialog->parentWidget()!=&compareView || !dialog->findChild<QComboBox*>("reportMatchMode"))return false;
+        dialog->findChild<QComboBox*>("reportMatchMode")->setCurrentIndex(1);dialog->findChild<QCheckBox*>("reportMatchConfirmed")->setChecked(true);dialog->accept();return true;
+    },"comparison dialog opens");
     WaitTasks(compareView);
     Require(compareView.GetSelectedReport().category=="对比结果" && compareView.GetSelectedReport().table->Read(0)[4]=="3","actual report UI creates and selects comparison without input data");
     compareView.resize(1180,720);compareView.show();QCoreApplication::processEvents();compareView.grab().save(QDir::current().filePath("report-workflow.png"));compareView.hide();
@@ -835,7 +839,11 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         if(value<0)for(int c=0;c<doc.columns.size();++c)if(doc.columns[c].numeric){value=c;break;}
         if(value>=0 && !doc.columns[value].quantity.isEmpty() && !doc.columns[value].unit.startsWith("model")) {
             view->SelectReport(doc.id);view->findChild<QPushButton*>("setReportBaseline")->click();view->SelectReport(copy.id);
-            const auto compare=[&]{QTimer::singleShot(0,view,[]{auto* mapping=qobject_cast<QDialog*>(QApplication::activeModalWidget());Require(mapping,"real report comparison mapping is not visible");mapping->accept();});view->findChild<QPushButton*>("compareReports")->click();};
+            const auto compare=[&]{DrivePopupInteraction([&]{view->findChild<QPushButton*>("compareReports")->click();},[view]{
+                auto* mapping=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                if(!mapping || mapping->parentWidget()!=view || !mapping->findChild<QComboBox*>("reportMatchMode"))return false;
+                mapping->accept();return true;
+            },"real report comparison mapping is not visible");};
             if(doc.table->GetCount()>200) {
                 const auto ids=view->GetReportIds();compare();QTimer::singleShot(0,view,[&]{view->CancelTasks();});WaitTasks(*view,timeoutMs,false);
                 Require(view->GetReportIds()==ids,"cancelled real report comparison published a partial result");

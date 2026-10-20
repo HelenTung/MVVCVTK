@@ -1,4 +1,5 @@
 #include "ReportLargeTests.h"
+#include "TestCaseRunner.h"
 #include "Support/ResultReport.h"
 #include "Support/ReportStorage.h"
 #include "Support/JsonInput.h"
@@ -56,15 +57,15 @@ void CheckMidTaskCancel(ResultReport& view,const std::function<void()>& start,in
 }
 void StartComparison(ResultReport& view,const ReportDocument& native,const ReportDocument& imported,int mode) {
     view.SelectReport(native.id);view.findChild<QPushButton*>("setReportBaseline")->click();view.SelectReport(imported.id);
-    QTimer::singleShot(0,&view,[mode]{
-        auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());Require(dialog,"large real comparison mapping dialog missing");
+    DrivePopupInteraction([&]{view.findChild<QPushButton*>("compareReports")->click();},[mode,&view]{
+        auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if(!dialog || dialog->parentWidget()!=&view || !dialog->findChild<QComboBox*>("reportMatchMode"))return false;
         dialog->findChild<QComboBox*>("reportMatchMode")->setCurrentIndex(mode);
         // 同一原生报告的原样 CSV 回读：编号与坐标来自同一份冻结结果，不推断跨计算稳定性。
         dialog->findChild<QCheckBox*>("reportMatchConfirmed")->setChecked(true);
         if(mode==2)dialog->findChild<QDoubleSpinBox*>("reportDistanceTolerance")->setValue(1e-9);
-        dialog->accept();
-    });
-    view.findChild<QPushButton*>("compareReports")->click();
+        dialog->accept();return true;
+    },"large real comparison mapping dialog missing");
 }
 bool Valid(const ReportDocument& doc,const QStringList& row) {
     if(doc.validityColumn<0)return true;

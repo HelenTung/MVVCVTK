@@ -69,6 +69,10 @@
 #include <QLabel>
 #include <QMenu>
 #include <QContextMenuEvent>
+#include <QPointer>
+#include <QElapsedTimer>
+#include <QList>
+#include <exception>
 #include <QAbstractItemModel>
 #include <QKeyEvent>
 #include <QSettings>
@@ -113,6 +117,45 @@
 #include <QToolBar>
 #include <QTabBar>
 namespace Manual {
+void DrivePopupInteraction(const std::function<void()>& open,const std::function<bool()>& complete,
+    const char* failureMessage,int timeoutMs)
+{
+    constexpr int pollMs=20;
+    if(timeoutMs<pollMs)throw std::invalid_argument("弹窗夹具期限不能短于原生轮询周期");
+    const auto closePopups=[] {
+        QList<QPointer<QWidget>> widgets;
+        for(auto* widget:QApplication::topLevelWidgets())widgets.append(widget);
+        for(const auto& widget:widgets)if(widget && widget->isVisible()
+            && (widget->windowType()==Qt::Popup || widget->isModal())) {
+            if(auto* dialog=qobject_cast<QDialog*>(widget.data()))dialog->reject();
+            else widget->close();
+        }
+    };
+    bool completed=false,expired=false;std::exception_ptr failure;
+    QElapsedTimer elapsed;elapsed.start();
+    QTimer retry,deadline;
+    // Qt5 Win32 中单次 queued 回调可在同步弹窗入口重入时先于 QMenu 出现而被消费。
+    // 原生 Coarse/20ms 持续等目标；独立期限还能结束交互回调进入的嵌套弹窗。
+    // 5s 默认值沿用本文件既有文件选择器夹具期限，不改变业务或渲染的期限。
+    retry.setTimerType(Qt::CoarseTimer);retry.setInterval(pollMs);
+    deadline.setTimerType(Qt::CoarseTimer);deadline.setSingleShot(true);
+    const auto stop=[&]{retry.stop();deadline.stop();};
+    QObject::connect(&deadline,&QTimer::timeout,&deadline,[&] {
+        const auto remaining=timeoutMs-elapsed.elapsed();
+        if(remaining>0){deadline.start(static_cast<int>(std::max<qint64>(pollMs,remaining)));return;}
+        expired=true;stop();closePopups();
+    });
+    QObject::connect(&retry,&QTimer::timeout,&retry,[&] {
+        try {if(complete()){completed=true;stop();}}
+        catch(...){failure=std::current_exception();stop();closePopups();}
+    });
+    retry.start();deadline.start(timeoutMs);
+    try {open();}
+    catch(...){stop();closePopups();throw;}
+    stop();
+    if(failure)std::rethrow_exception(failure);
+    if(expired || !completed){closePopups();throw std::runtime_error(failureMessage);}
+}
 namespace {
 QPixmap GrabWindow(TestWindow& window)
 {
@@ -163,6 +206,42 @@ void Check(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
     std::cout << "PASS: " << message << std::endl;
+}
+void CheckPopupInteraction()
+{
+    constexpr int intervalMs=20;
+    QMenu delayed;auto* action=delayed.addAction("目标动作");int triggers=0,earlyChecks=0;
+    QObject::connect(action,&QAction::triggered,&delayed,[&]{++triggers;});
+    DrivePopupInteraction([&] {
+        QEventLoop beforePopup;QTimer pause;pause.setTimerType(Qt::CoarseTimer);pause.setSingleShot(true);
+        QObject::connect(&pause,&QTimer::timeout,&beforePopup,&QEventLoop::quit);
+        pause.start(intervalMs*3);beforePopup.exec();delayed.exec(QPoint(30,30));
+    },[&] {
+        if(QApplication::activePopupWidget()!=&delayed){++earlyChecks;return false;}
+        action->trigger();delayed.close();return true;
+    },"delayed popup fixture did not complete");
+    Check(earlyChecks>0 && triggers==1 && !delayed.isVisible(),
+        "popup interaction retries readiness before dispatching the real action exactly once");
+
+    QMenu outer;QMenu unavailable(&outer);outer.addAction("外层菜单");unavailable.addAction("等待目标");
+    bool expired=false,sawExpectedPopup=false;QElapsedTimer waited;waited.start();
+    try {
+        DrivePopupInteraction([&]{outer.popup(QPoint(30,30));unavailable.exec(QPoint(60,60));},
+            [&]{sawExpectedPopup|=QApplication::activePopupWidget()==&unavailable;return false;},
+            "intentional popup fixture timeout",intervalMs*5);
+    }catch(const std::runtime_error& error){expired=std::string(error.what())=="intentional popup fixture timeout";}
+    Check(expired && sawExpectedPopup && waited.elapsed()>=intervalMs*5 && !outer.isVisible() && !unavailable.isVisible(),
+        "popup fixture timeout closes nested popups and reports an explicit failure");
+
+    QMenu failing;failing.addAction("断言失败");bool preserved=false,attempted=false;
+    try {
+        DrivePopupInteraction([&]{failing.exec(QPoint(30,30));},[&]()->bool {
+            if(QApplication::activePopupWidget()!=&failing)return false;
+            attempted=true;
+            throw std::runtime_error("intentional popup assertion");
+        },"popup assertion fixture did not complete");
+    }catch(const std::runtime_error& error){preserved=std::string(error.what())=="intentional popup assertion";}
+    Check(preserved && attempted && !failing.isVisible(),"popup assertion is rethrown after closing the native nested loop");
 }
 QJsonObject GetCaptureScene(const HostSceneViewState& scene)
 {
@@ -988,14 +1067,14 @@ std::uint64_t ClickNodeAction(TestWindow& window, QTreeWidget* tree, QTreeWidget
     Check(tree->itemAt(point)==item,"scene context menu targets the exact requested object-name cell");
     const auto clicked = std::make_shared<bool>(false);
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
-    QMetaObject::invokeMethod(&window, [clicked, action] {
+    QContextMenuEvent event(QContextMenuEvent::Mouse, point, tree->viewport()->mapToGlobal(point));
+    DrivePopupInteraction([&]{QApplication::sendEvent(tree->viewport(), &event);},[clicked, action,owner] {
         auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
-        if (!menu) return;
+        if (!menu || menu->objectName()!="sceneNodeMenu" || menu->parentWidget()!=owner) return false;
         for (auto* entry : menu->actions()) if (entry->objectName() == "node_" + action) { *clicked = true; entry->trigger(); break; }
         menu->close();
-    }, Qt::QueuedConnection);
-    QContextMenuEvent event(QContextMenuEvent::Mouse, point, tree->viewport()->mapToGlobal(point));
-    QApplication::sendEvent(tree->viewport(), &event);
+        return true;
+    },"scene context menu did not become ready within the fixture deadline");
     if(!*clicked) {
         const auto* hit=tree->itemAt(point);
         std::cerr<<"Scene menu diagnostic: visible="<<tree->isVisible()<<" viewport="<<tree->viewport()->width()<<'x'<<tree->viewport()->height()
@@ -2256,6 +2335,7 @@ void CheckSharedRoi(TestWindow& window)
 void StartSelfTest(TestWindow& window)
 {
     QCoreApplication::processEvents();
+    CheckPopupInteraction();
     // 重现就绪观察在退出内层事件循环时回退；不能把暂态回退当成已经超时。
     int phase=0;QTimer first,settled;first.setSingleShot(true);settled.setSingleShot(true);
     QObject::connect(&first,&QTimer::timeout,&first,[&]{phase=1;});
@@ -2317,26 +2397,21 @@ void StartSelfTest(TestWindow& window)
     const auto recordCount = window.GetRecords().GetRecords()["records"].toArray().size();
     window.GetWorkflow().onNavigate("View", "Set", {});
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
-    QTimer dialogDeadline; dialogDeadline.setSingleShot(true);
-    QObject::connect(&dialogDeadline, &QTimer::timeout, &window, [] {
-        if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();
-    });
     bool opened = false;
-    QTimer::singleShot(0, &window, [&] {
+    DrivePopupInteraction([&]{window.findChild<QPushButton*>("openVolume")->click();},[&] {
         auto* dialog = window.findChild<QFileDialog*>("inputFileDialog");
-        if (!dialog) return;
-        opened = true; dialog->reject();
-    });
-    dialogDeadline.start(5000); window.findChild<QPushButton*>("openVolume")->click(); dialogDeadline.stop();
+        if (!dialog || QApplication::activeModalWidget()!=dialog) return false;
+        opened = true; dialog->reject();return true;
+    },"cancelling file picker did not become ready within the fixture deadline");
     Check(opened && dataPanel->GetParameterEditor("Load")->GetValue() == loadDraft,
         "cancelling the top-level file picker preserves the loading parameters");
     opened = false;
-    QTimer::singleShot(0, &window, [&] {
+    DrivePopupInteraction([&]{window.findChild<QPushButton*>("openVolume")->click();},[&] {
         auto* dialog = window.findChild<QFileDialog*>("inputFileDialog");
-        if (!dialog) return;
+        if (!dialog || QApplication::activeModalWidget()!=dialog) return false;
         opened = true; dialog->selectFile(path); QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection);
-    });
-    dialogDeadline.start(5000); window.findChild<QPushButton*>("openVolume")->click(); dialogDeadline.stop();
+        return true;
+    },"opening file picker did not become ready within the fixture deadline");
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, false);
     Check(opened && dataPanel->isVisible() && dataPanel->GetCurrentAction() == "Load"
         && dataPanel->GetParameterEditor("Load")->GetValue() == loadDraft
