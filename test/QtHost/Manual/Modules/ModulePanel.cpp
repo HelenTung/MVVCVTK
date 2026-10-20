@@ -343,7 +343,10 @@ void ModulePanel::StartReadTask(std::uint64_t id, QString status,
         }
         return result;
     });
-    task->timer=new QTimer(this);task->timer->setInterval(10);
+    // Qt 5.14.2 Win32 的短定时器通过投递事件递送，嵌套事件循环可能延后唤醒。
+    // Coarse/20 ms 使用原生 WM_TIMER，空闲时也能收口；业务期限与提交仲裁不变。
+    // 证据：out/final-confluence-post-stall/diagnosis/merged/native-wakeup/。
+    task->timer=new QTimer(this);task->timer->setTimerType(Qt::CoarseTimer);task->timer->setInterval(20);
     connect(task->timer,&QTimer::timeout,this,[this,id,status=std::move(status),onSucceeded=std::move(onSucceeded),config] {
         auto found=m_readTasks.find(id);if(found==m_readTasks.end())return;
         auto& task=*found->second;

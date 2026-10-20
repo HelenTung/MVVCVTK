@@ -239,7 +239,9 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     RefreshFailures();
     m_buildTimer=new QTimer(this);m_buildTimer->setSingleShot(true);
     connect(m_buildTimer,&QTimer::timeout,this,[this]{ContinueGeneration();});
-    m_taskTimer=new QTimer(this);m_taskTimer->setInterval(10);
+    // Qt 5.14.2 Win32 的短定时器依赖投递事件唤醒；完成/取消收口使用原生 WM_TIMER。
+    // 证据：out/final-confluence-post-stall/diagnosis/merged/native-wakeup/；输入分块额度与取消门槛不变。
+    m_taskTimer=new QTimer(this);m_taskTimer->setTimerType(Qt::CoarseTimer);m_taskTimer->setInterval(20);
     connect(m_taskTimer,&QTimer::timeout,this,[this]{ContinueTask();});
     connect(m_cancelTask,&QPushButton::clicked,this,[this]{CancelTasks();m_taskStatus->setText("已请求取消，正在回收后台任务；不会加入部分结果。");});
     m_cancelTask->setEnabled(false);
@@ -270,7 +272,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     m_minimum = new QLineEdit(content); m_minimum->setPlaceholderText("数值下限"); m_minimum->setMaximumWidth(95); filters->addWidget(m_minimum);
     m_maximum = new QLineEdit(content); m_maximum->setPlaceholderText("数值上限"); m_maximum->setMaximumWidth(95); filters->addWidget(m_maximum); body->addLayout(filters);
     m_cancelScan=new QPushButton("停止筛选 / 排序",content);m_cancelScan->setObjectName("cancelReportRows");filters->addWidget(m_cancelScan);
-    m_scanTimer=new QTimer(this);m_scanTimer->setSingleShot(true);
+    m_scanTimer=new QTimer(this);m_scanTimer->setSingleShot(true);m_scanTimer->setTimerType(Qt::CoarseTimer);
     connect(m_scanTimer,&QTimer::timeout,this,[this]{ContinueRows();});
     connect(m_cancelScan,&QPushButton::clicked,this,[this]{CancelRows();m_range->setText("筛选 / 排序已停止");});
     auto* tabs = new QTabWidget(content); body->addWidget(tabs,1);
@@ -669,7 +671,7 @@ void ResultReport::ContinueTask()
 void ResultReport::CancelRows()
 {
     ++m_rowsRequest;if(m_rowScan)m_rowScan->cancelled->store(true);m_pendingRowScan.reset();
-    if(m_rowScan)m_scanTimer->start(10);else m_scanTimer->stop();
+    if(m_rowScan)m_scanTimer->start(20);else m_scanTimer->stop();
     setProperty("reportRowsBusy",false);m_rows={};m_allRows=false;m_rowsReady=false;RefreshPage();
 }
 void ResultReport::CancelTasks(bool waitForExit)
@@ -738,7 +740,7 @@ void ResultReport::ContinueRows()
     if(m_rowScan) {
         const bool current=m_rowScan->request==m_rowsRequest&&!m_rowScan->cancelled->load()&&m_acceptingRequests;
         if(current){setProperty("reportRowsProgress",m_rowScan->next->load());setProperty("reportRowsPhase",m_rowScan->ordering->load()?"order":"read");}
-        if(m_rowScan->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready){m_scanTimer->start(10);return;}
+        if(m_rowScan->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready){m_scanTimer->start(20);return;}
         try {
             auto rows=m_rowScan->future.get();m_rowScan.reset();
             if(current){m_rows=std::move(rows);m_rowsReady=true;setProperty("reportRowsBusy",false);
@@ -753,7 +755,7 @@ void ResultReport::ContinueRows()
         if(!table->GetIsComplete()){m_pendingRowScan=std::move(candidate);m_scanTimer->start(0);return;}
         table->PrepareRead();if(m_beforeWorkerStart)m_beforeWorkerStart();
         candidate->future=std::async(std::launch::async,std::move(candidate->work));
-        m_rowScan=std::move(candidate);m_scanTimer->start(10);
+        m_rowScan=std::move(candidate);m_scanTimer->start(20);
     }catch(const std::exception& error){setProperty("reportRowsBusy",false);m_rows={};m_rowsReady=false;RefreshPage();setProperty("reportRowsError",QString::fromUtf8(error.what()));m_range->setText("报告筛选 / 排序启动失败："+QString::fromUtf8(error.what()));if(isVisible()&&!m_pendingReports.isEmpty())m_buildTimer->start(0);}
 }
 void ResultReport::SetReadFailure(const QString& error)
