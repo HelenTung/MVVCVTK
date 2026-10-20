@@ -585,8 +585,12 @@ void TestWindow::AppendLog(const QString& message,const QString& module)
         for(int i=7;i<previous.size();++i)QFile::remove(previous[i].absoluteFilePath());
         m_log.setFileName(directory.filePath("QtFeatureWorkbench-"+QLocale::c().toString(QDateTime::currentDateTime(),"yyyyMMdd-HHmmss-zzz")+"-"+QString::number(QCoreApplication::applicationPid())+".txt"));
     }
-    if(m_log.isOpen() && m_log.size()>=4*1024*1024) {
-        m_log.close();const auto previous=m_log.fileName()+".previous.txt";QFile::remove(previous);QFile::rename(m_log.fileName(),previous);
+    const auto logBytes=m_log.isOpen()?m_log.size():QFileInfo(m_log.fileName()).size();
+    if(logBytes>=4*1024*1024) {
+        m_log.close();const auto previous=m_log.fileName()+".previous.txt";
+        if((QFile::exists(previous) && !QFile::remove(previous)) || !QFile::rename(m_log.fileName(),previous)) {
+            ShowMessage("日志轮转失败，当前日志已保留；请检查程序目录权限或文件占用。","error");return;
+        }
     }
     if(!m_log.isOpen() && !m_log.open(QIODevice::WriteOnly|QIODevice::Append)) {
         m_logFailure="无法写入会话日志："+m_log.errorString();ShowMessage(m_logFailure,"error");return;
