@@ -905,7 +905,12 @@ void TestWindow::resizeEvent(QResizeEvent* event)
 }
 bool TestWindow::eventFilter(QObject* watched, QEvent* event)
 {
-    if(watched->objectName()=="viewHeader"&&(event->type()==QEvent::Resize||event->type()==QEvent::PaletteChange)){auto* header=static_cast<QWidget*>(watched);for(auto* button:header->findChildren<QPushButton*>()){const bool compact=header->width()<260*std::max(1.,header->font().pixelSize()/16.);button->setText(compact?QString():QString("适配"));button->setIcon(compact?GetFitViewIcon():QIcon());button->setMinimumWidth(button->sizeHint().width());}}
+    if(watched->objectName()=="viewHeader"&&(event->type()==QEvent::Resize||event->type()==QEvent::PaletteChange)){
+        auto* header=static_cast<QWidget*>(watched);const auto scale=std::max(1.,header->font().pixelSize()/16.);
+        // 窄停靠窗保留角色标题与鼠标拖动区；呈现方式仍可从“显示与导航”的同一属性修改。
+        if(m_renderMode&&m_renderMode->parentWidget()==header)m_renderMode->setVisible(header->width()>=220*scale);
+        for(auto* button:header->findChildren<QPushButton*>()){const bool compact=header->width()<260*scale;button->setText(compact?QString():QString("适配"));button->setIcon(compact?GetFitViewIcon():QIcon());button->setMinimumWidth(button->sizeHint().width());}
+    }
     if(m_layoutReady&&!m_restoringLayout&&!m_isClosing&&(event->type()==QEvent::Move||event->type()==QEvent::Resize))m_layoutTimer.start();
     // 原生鼠标/键盘仍仅走 QVTK；失焦只发送 SDK 生命周期取消。
     if (m_isReady && !m_isClosing && (event->type() == QEvent::FocusOut || event->type() == QEvent::Hide)) {

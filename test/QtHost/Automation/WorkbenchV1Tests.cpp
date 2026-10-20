@@ -66,6 +66,11 @@ void CheckNavigationWidth(TestWindow& window)
 }
 void CheckViewToolbarText(TestWindow& window)
 {
+    for(auto* title:window.findChildren<QLabel*>("viewTitle")){
+        if(title->visibleRegion().isEmpty())continue;
+        const auto required=title->fontMetrics().horizontalAdvance(title->accessibleName());
+        Require(title->width()>=required && title->text()==title->accessibleName(),"each visible viewport keeps its complete role title and a readable drag handle");
+    }
     for(auto* button:window.findChildren<QAbstractButton*>()) {
         const auto name=button->objectName();
         if(name!="showBusinessStatistics" && name!="expandBusinessStatistics" && name!="fitView" && !name.startsWith("fit_slice-"))continue;
