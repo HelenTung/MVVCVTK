@@ -74,6 +74,7 @@
 #include <QSettings>
 #include <iostream>
 #include <functional>
+#include <optional>
 #include <chrono>
 #include <future>
 #include <atomic>
@@ -3061,6 +3062,8 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         const auto checkpointPath = step["performanceCheckpoint"].toString();
         const auto timingsBefore = checkpointPath.isEmpty() ? QJsonObject{} : window.GetRecords().GetTimings();
         const auto measurementsBefore = checkpointPath.isEmpty() ? QJsonObject{} : window.GetRecords().GetMeasurements();
+        const auto sceneBefore = checkpointPath.isEmpty() ? std::optional<HostSceneViewState>{}
+            : window.GetSession()->GetSceneViewState({"primary-3d"});
         const auto requestedUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
         QElapsedTimer checkpointClock; checkpointClock.start();
         if (!checkpointPath.isEmpty()) std::cout << "phase=" << GetText(step,"module").toStdString() << "."
@@ -3530,6 +3533,18 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         }
         if (step.contains("businessCapture")) SaveBusinessCapture(window,GetText(step,"businessCapture"),step,id);
         if (!checkpointPath.isEmpty()) {
+            const auto timingsAfter = window.GetRecords().GetTimings();
+            const auto sceneAfter = window.GetSession()->GetSceneViewState({"primary-3d"});
+            const auto callCount = [&](const char* key) {
+                return timingsAfter[key].toObject()["count"].toInt()
+                    - timingsBefore[key].toObject()["count"].toInt();
+            };
+            // 区分owner推进、渲染请求、真实绘制与场景提交；均不是屏幕刷新率。
+            const QJsonObject convergence{{"ownerUpdateCalls", callCount("Host.Update")},
+                {"renderBatchCalls", callCount("Host.Render")}, {"primaryRenderCalls", callCount("Render.primary-3d")},
+                {"sceneEpochBefore", sceneBefore ? QJsonValue(QString::number(sceneBefore->sceneEpoch)) : QJsonValue()},
+                {"sceneEpochAfter", sceneAfter ? QJsonValue(QString::number(sceneAfter->sceneEpoch)) : QJsonValue()},
+                {"elapsedToStableCheckMs", QString::number(checkpointClock.elapsed())}};
             QJsonArray viewports;
             for (const auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) viewports.append(QJsonObject{
                 {"id",widget->objectName()},{"width",widget->width()},{"height",widget->height()},
@@ -3540,7 +3555,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 {"module",GetText(step,"module")},{"action",GetText(step,"action")},{"status",record["status"]},
                 {"requestedUtc",requestedUtc},{"checkpointUtc",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
                 {"elapsedToCheckpointMs",QString::number(checkpointClock.elapsed())},{"businessElapsedMs",record["elapsedMs"]},
-                {"timingsBefore",timingsBefore},{"timingsAfter",window.GetRecords().GetTimings()},
+                {"timingsBefore",timingsBefore},{"timingsAfter",timingsAfter},{"convergence",convergence},
                 {"measurementsBefore",measurementsBefore},{"measurementsAfter",window.GetRecords().GetMeasurements()},
                 {"viewports",viewports},{"isoThreshold",state ? QJsonValue(state->isoThreshold) : QJsonValue()},
                 {"frameGuardChecked",step["checkSceneConsistency"].toBool()}});
