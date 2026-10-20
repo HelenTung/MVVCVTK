@@ -35,6 +35,8 @@ public:
     bool GetIsStateBound() const { return m_stateBound; }
     QJsonValue GetAppliedBoolean() const { return m_appliedBoolean; }
     std::function<void()> onEdited;
+protected:
+    void resizeEvent(QResizeEvent* event) override;
 private:
     void BuildValue(const QJsonValue& value);
     void AddRow(const QJsonValue& value);
@@ -43,6 +45,7 @@ private:
     void CreateBooleanStateControls();
     bool GetFieldApplicable(const QString& key) const;
     void SetFieldVisibility();
+    void SetPropertyLayout();
     QString m_module, m_action, m_key, m_title;
     QJsonValue m_schema, m_itemTemplate;
     QJsonObject m_applicableFields;
@@ -53,7 +56,11 @@ private:
     QString m_stateContext, m_booleanUnavailable;
     QGridLayout* m_layout = nullptr;
     bool m_isPropertyRow = false;
+    bool m_isVector = false, m_vectorBelow = false;
+    int m_nameColumnWidth = 0, m_appliedNameWidth = -1;
     int m_bodyRow = 0;
+    QLabel* m_titleLabel = nullptr;
+    QLabel* m_unitLabel = nullptr;
     QCheckBox* m_specified = nullptr;
     QLabel* m_booleanState = nullptr;
     QPushButton* m_unsetBoolean = nullptr;

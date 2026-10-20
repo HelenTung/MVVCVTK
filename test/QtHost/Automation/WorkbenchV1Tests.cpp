@@ -20,6 +20,9 @@
 #include <QAbstractItemModel>
 #include <QAbstractButton>
 #include <QLabel>
+#include <QLineEdit>
+#include <QFocusEvent>
+#include <QLocale>
 #include <QMenu>
 #include <QLayout>
 #include <stdexcept>
@@ -92,10 +95,15 @@ void CheckModulePanelText(ModulePanel& panel)
     for(auto* label:panel.findChildren<QLabel*>("parameterTitle")) {
         auto* field=label->parentWidget();
         if(label->visibleRegion().isEmpty() || !field->property("propertyRow").toBool())continue;
-        auto* row=field->layout();auto* body=row->itemAt(row->count()-1)->widget();
-        Require(body && body->x()>=label->geometry().right()+1,"property names and values occupy separate columns without overlap");
+        QWidget* body=nullptr;
+        for(auto* child:field->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->property("parameterValue").toBool())body=child;
+        const auto below=field->property("vectorBelow").toBool();
+        Require(body && (below ? body->y()>=label->geometry().bottom()+1 : body->x()>=label->geometry().right()+1),"property names and values occupy separate columns or complete vector rows without overlap");
         Require(field->rect().contains(body->geometry()),"property values remain inside their row");
-        Require(label->heightForWidth(label->width())<=label->height(),"wrapped property names remain fully visible");
+        const auto message=QString("property name fits one line: %1 [%2], width %3, required %4")
+            .arg(field->objectName(),label->text()).arg(label->width()).arg(label->fontMetrics().horizontalAdvance(label->text()));
+        Require(!label->wordWrap() && label->fontMetrics().horizontalAdvance(label->text())<=label->width(),message.toStdString().c_str());
+        Require(label->accessibleName()==label->text() && !label->accessibleDescription().isEmpty(),"visible property name is the accessible name and full explanation remains available");
     }
     auto* scroll=panel.findChild<QScrollArea*>("operationScroll");
     Require(scroll && scroll->horizontalScrollBarPolicy()==Qt::ScrollBarAlwaysOff,"properties use one vertical scroller");
@@ -135,11 +143,44 @@ void CheckWorkbenchV1(TestWindow& window)
     optional.findChild<QCheckBox*>("specified")->click();
     Require(optionalEdits==1,"explicit optional-parameter toggle still publishes one edit");
     Require(optional.GetValue()==identity,"optional matrix toggle restores its actual default matrix");
+    const double originalNumber=8.5189186919467659;
+    ParameterEditor number("Wall","Start","maxDistance",originalNumber,originalNumber);
+    auto* numberInput=number.findChild<QLineEdit*>("value");int numberEdits=0;double editedNumber=0;
+    number.onEdited=[&]{++numberEdits;editedNumber=number.GetValue().toDouble();};
+    auto numberLocale=QLocale();if(!numberLocale.zeroDigit().isDigit())numberLocale=QLocale::c();
+    bool displayValid=false;const auto displayNumber=numberLocale.toDouble(numberInput->text(),&displayValid);
+    Require(displayValid && displayNumber==8.51892,"idle numeric display uses a readable precision");
+    Require(number.GetValue().toDouble()==originalNumber,"rounded numeric display preserves the exact parameter value");
+    QFocusEvent focusIn(QEvent::FocusIn,Qt::TabFocusReason),focusOut(QEvent::FocusOut,Qt::TabFocusReason);
+    QApplication::sendEvent(numberInput,&focusIn);
+    Require(numberInput->text()==QString::number(originalNumber,'g',17),"numeric focus restores the full precision for editing");
+    QApplication::sendEvent(numberInput,&focusOut);
+    Require(number.GetValue().toDouble()==originalNumber && numberEdits==0,"focus alone cannot round the parameter or publish an edit");
+    QApplication::sendEvent(numberInput,&focusIn);numberInput->selectAll();
+    QKeyEvent numericEdit(QEvent::KeyPress,Qt::Key_2,Qt::NoModifier,"2.75");QApplication::sendEvent(numberInput,&numericEdit);
+    Require(number.GetValue().toDouble()==2.75 && numberEdits==1 && editedNumber==2.75,"keyboard input and its edit callback see the new parameter exactly once");
+    number.SetValue(originalNumber);Require(number.GetValue().toDouble()==originalNumber && numberEdits==1,"programmatic numeric replacement preserves precision without an edit");
+    ParameterEditor defaultNumber("Wall","Start","maxDistance",QJsonValue(),QJsonValue());
+    defaultNumber.SetDefaultValue(originalNumber);Require(defaultNumber.GetValue().isNull(),"a numeric default does not specify an optional parameter");
+    defaultNumber.findChild<QCheckBox*>("specified")->click();Require(defaultNumber.GetValue().toDouble()==originalNumber,"specifying a numeric default retains its original precision");
+    ParameterEditor defaultVector("Roi","Begin","centerMM",QJsonValue(),QJsonValue());
+    const QJsonArray preciseVector{originalNumber,-originalNumber,std::nextafter(1.0,2.0)};
+    defaultVector.SetDefaultValue(preciseVector);defaultVector.findChild<QCheckBox*>("specified")->click();
+    Require(defaultVector.GetValue()==preciseVector,"vector defaults retain every component beyond display precision");
     const auto count=window.GetRecords().GetRecords()["records"].toArray().size();
     if(auto* roi=window.GetModule("Roi"))if(!roi->GetActions().isEmpty()) {
         auto* tabs=roi->findChild<QComboBox*>("businessTaskTabs");Require(tabs && tabs->count()==4,"ROI has creation, edit, operation and management tasks");
         window.GetWorkflow().onNavigate("Roi","Begin",{});
         for(int i=0;i<4;++i){tabs->setCurrentIndex(i);QCoreApplication::processEvents();Require(tabs->currentIndex()==i,"ROI task selection is stable after workflow refresh");}
+        roi->SelectAction("Begin");auto* begin=roi->GetParameterEditor("Begin");const auto saved=begin->GetValue();
+        begin->SetPatch({{"shape","Sphere"}});QCoreApplication::processEvents();QWidget* advancedRegion=nullptr;QWidget* regionDetails=nullptr;
+        for(auto* section:begin->findChildren<QWidget*>("parameterSection")) {
+            if(section->property("sectionName")=="精确参数")advancedRegion=section;
+            if(section->property("sectionName")=="更多信息")regionDetails=section;
+        }
+        Require(advancedRegion && regionDetails && !advancedRegion->isHidden() && advancedRegion->isAncestorOf(regionDetails),"sphere ROI retains its metadata in the advanced group when matrix fields are inapplicable");
+        advancedRegion->findChild<QToolButton*>("sectionToggle")->click();regionDetails->findChild<QToolButton*>("sectionToggle")->click();QCoreApplication::processEvents();
+        Require(begin->GetField("group")->isVisible() && begin->GetField("description")->isVisible(),"sphere ROI metadata can still be expanded and edited");begin->SetValue(saved);
         roi->SelectAction("Difference");auto* form=roi->GetParameterEditor("Difference");
         Require(!form->GetField("operands")->isHidden() && form->GetField("radius")->isHidden(),"difference offers operands without unrelated morphology parameters");
         auto* primary=roi->findChild<QPushButton*>("businessPrimary");auto* scroll=roi->findChild<QScrollArea*>("operationScroll");
@@ -167,6 +208,18 @@ void CheckWorkbenchV1(TestWindow& window)
         }
         Require(advanced && expert && advanced->isAncestorOf(expert),"surface expert parameters are nested inside advanced settings");
         form->SetPatch({{"initialIsoValue",QJsonValue()},{"materialRange",QJsonValue()}});
+    }
+    if(auto* wall=window.GetModule("Wall"))if(!wall->GetActions().isEmpty()) {
+        window.GetWorkflow().onNavigate("Wall","Start",{});QCoreApplication::processEvents();
+        auto* toggle=wall->findChild<QToolButton*>("showOperationPrerequisites");auto* area=wall->findChild<QWidget*>("operationPrerequisites");
+        Require(toggle && area->isVisible() && !toggle->isChecked(),"missing wall inputs have a compact collapsed prerequisite strip");
+        const auto before=wall->GetParameterEditor("Start")->GetValue();
+        QKeyEvent press(QEvent::KeyPress,Qt::Key_Space,Qt::NoModifier),release(QEvent::KeyRelease,Qt::Key_Space,Qt::NoModifier);
+        QApplication::sendEvent(toggle,&press);QApplication::sendEvent(toggle,&release);QCoreApplication::processEvents();
+        auto* detail=area->findChild<QLabel*>("commandRequirement");
+        Require(toggle->isChecked() && detail && detail->isVisible() && detail->text()==toggle->accessibleDescription(),"keyboard expands the complete prerequisite reason");
+        QApplication::sendEvent(toggle,&press);QApplication::sendEvent(toggle,&release);
+        Require(!detail->isVisible() && wall->GetParameterEditor("Start")->GetValue()==before,"collapsing prerequisites preserves all parameter values");
     }
     Require(window.GetRecords().GetRecords()["records"].toArray().size()==count,"navigation and parameter-source switching never submit requests");
     ObjectBrowser browser;browser.resize(400,450);browser.show();

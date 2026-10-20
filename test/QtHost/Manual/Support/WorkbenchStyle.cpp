@@ -36,6 +36,10 @@ QLabel#businessRecovery, QLabel#commandRequirement { color: @warning; background
 QLabel#moduleTitle, QLabel#workbenchTitle { font-size: @headingPointspt; font-weight: 600; }
 QLabel#operationTitle { font-weight: 600; }
 QLabel#parameterTitle { color: @muted; font-weight: 400; }
+QLabel#parameterUnit { color: @muted; }
+QWidget#operationPrerequisites { background: @warningSurface; border-radius: 4px; }
+QToolButton#showOperationPrerequisites { text-align: left; color: @warning; background: @warningSurface; border: 0; padding: 2px 4px; }
+QToolButton#showOperationPrerequisites:focus { border: 1px dashed @accent; padding: 1px 3px; }
 QWidget[propertyRow="true"] { border-bottom: 1px solid @subtle; }
 QWidget#viewHeader { background: @surface; }
 QWidget#operationFields, QWidget#sectionFields { background: @surface; }
@@ -78,8 +82,8 @@ QTabBar::tab:hover { color: @accent; }
 QTabBar#workspaceTabs::tab { background: @surface; padding: 10px 16px; }
 QTabBar#workspaceTabs::tab:selected { background: @selection; }
 QTabWidget::pane { border: 1px solid @outline; background: @surface; }
-QToolButton[parameterSection="true"] { text-align: left; background: @subtle; border: 0; border-radius: 2px; color: @text; font-weight: 600; padding: 4px 6px; }
-QToolButton[parameterSection="true"]:focus { border: 1px dashed @accent; padding: 3px 5px; }
+QToolButton[parameterSection="true"] { text-align: left; background: @subtle; border: 0; border-radius: 2px; color: @text; font-weight: 600; padding: 2px 6px; }
+QToolButton[parameterSection="true"]:focus { border: 1px dashed @accent; padding: 1px 5px; }
 QPlainTextEdit { border: 1px solid @outline; background: @surface; color: @text; }
 QMenu, QToolTip { background: @surface; color: @text; border: 1px solid @outline; }
 QMenu::item { padding: 8px 24px; }

@@ -108,10 +108,22 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_taskTabs=new QComboBox(this);m_taskTabs->setObjectName("businessTaskTabs");m_taskTabs->setAccessibleName("操作分组");
     const QStringList taskGroups=m_name=="Roi"?QStringList{"创建","编辑","运算","管理"}:m_name=="Alignment"?QStringList{"对齐","几何拟合","表面偏差","尺寸/形位","报告"}:QStringList{};
     for(const auto& group:taskGroups){m_taskTabs->addItem(group);if(m_taskGroup.isEmpty())m_taskGroup=group;}
-    m_taskTabs->setVisible(!taskGroups.isEmpty());navigation->addWidget(m_taskTabs);
+    m_taskTabs->setVisible(!taskGroups.isEmpty());m_taskTabs->setMinimumContentsLength(2);
+    m_taskTabs->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     auto* operationRow=new QHBoxLayout;operationRow->setSpacing(8);
+    operationRow->addWidget(m_taskTabs);
     auto* operationLabel=new QLabel("操作",this);operationLabel->setBuddy(m_parameterTabs);operationRow->addWidget(operationLabel);operationRow->addWidget(m_parameterTabs,1);
     navigation->addLayout(operationRow);layout->addLayout(navigation);
+    m_requirementArea=new QWidget(this);m_requirementArea->setObjectName("operationPrerequisites");
+    auto* requirementLayout=new QVBoxLayout(m_requirementArea);requirementLayout->setContentsMargins(6,2,6,2);requirementLayout->setSpacing(4);
+    m_requirementToggle=new QToolButton(m_requirementArea);m_requirementToggle->setObjectName("showOperationPrerequisites");
+    m_requirementToggle->setText("前置条件未满足");m_requirementToggle->setCheckable(true);m_requirementToggle->setArrowType(Qt::RightArrow);
+    m_requirementToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);m_requirementToggle->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+    requirementLayout->addWidget(m_requirementToggle);layout->addWidget(m_requirementArea);m_requirementArea->hide();
+    connect(m_requirementToggle,&QToolButton::toggled,this,[this](bool expanded){
+        m_requirementToggle->setArrowType(expanded?Qt::DownArrow:Qt::RightArrow);
+        if(m_currentRequirement)m_currentRequirement->setVisible(expanded);
+    });
     connect(m_taskTabs,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index) {
         if(index<0)return;m_taskGroup=m_taskTabs->itemText(index);
         auto action=m_taskSelections.value(m_taskGroup);
@@ -348,11 +360,11 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         };
         layout->addWidget(form);
         auto* commands = new QWidget(m_commandArea); commands->setObjectName("commands_" + name);
-        auto* commandLayout = new QVBoxLayout(commands); commandLayout->setContentsMargins(0,8,0,0); commandLayout->setSpacing(6);
-        auto* requirement = new QLabel(commands); requirement->setObjectName("commandRequirement"); requirement->setWordWrap(true);
+        auto* commandLayout = new QVBoxLayout(commands); commandLayout->setContentsMargins(0,0,0,0); commandLayout->setSpacing(6);
+        auto* requirement = new QLabel(m_requirementArea); requirement->setObjectName("commandRequirement"); requirement->setWordWrap(true);
         requirement->setMinimumWidth(0); requirement->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
         auto requirementPolicy=requirement->sizePolicy();requirementPolicy.setHeightForWidth(true);requirement->setSizePolicy(requirementPolicy);
-        commandLayout->addWidget(requirement); m_requirements[name] = requirement;
+        requirement->hide(); m_requirements[name] = requirement;
         auto* footer = new QHBoxLayout; footer->setContentsMargins(0,0,0,0); commandLayout->addLayout(footer);
         button->setProperty("primaryCommand",false);
         footer->addWidget(button);commands->hide();m_commandRows[name] = commands;
@@ -722,7 +734,7 @@ void ModulePanel::RefreshWorkflow()
             else if(name=="Redo" && state["redoCount"].toInt()==0) reason="当前没有可重做的历史；先撤销一次已应用的选择或运算。";
         }
         if (m_requirements.count(name)) {
-            m_requirements.at(name)->setText(reason); m_requirements.at(name)->setVisible(!reason.isEmpty());
+            m_requirements.at(name)->setText(reason);
         }
         // 按业务能力禁用命令并说明原因；参数页仍可浏览，后台完成后自动恢复。
         button->setEnabled(!m_context.workflow.GetIsClosing() && reason.isEmpty());
@@ -741,6 +753,16 @@ void ModulePanel::RefreshWorkflow()
         if(commands){m_commandLayout->addWidget(commands);commands->show();}
     }
     m_commandArea->setVisible(commands!=nullptr);m_commandArea->updateGeometry();
+    auto* requirement=m_requirements.count(m_parameterAction)?m_requirements.at(m_parameterAction):nullptr;
+    if(requirement!=m_currentRequirement) {
+        if(m_currentRequirement){m_requirementArea->layout()->removeWidget(m_currentRequirement);m_currentRequirement->hide();}
+        m_currentRequirement=requirement;
+        if(requirement)m_requirementArea->layout()->addWidget(requirement);
+    }
+    const auto reason=requirement?requirement->text():QString();
+    m_requirementToggle->setToolTip(reason);m_requirementToggle->setAccessibleName(m_requirementToggle->text());m_requirementToggle->setAccessibleDescription(reason);
+    m_requirementArea->setVisible(!reason.isEmpty());
+    if(requirement)requirement->setVisible(!reason.isEmpty() && m_requirementToggle->isChecked());
     m_quickActions->setVisible(!visible.isEmpty());
     m_moreOperations->setVisible(!m_entries.empty());
     m_noticeLabel->setVisible((m_help->isChecked() || m_entries.empty()) && !m_notice.isEmpty());

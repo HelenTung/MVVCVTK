@@ -155,6 +155,9 @@ private:
     QLabel* m_feedback = nullptr;
     std::map<QString, QWidget*> m_commandRows;
     std::map<QString, QLabel*> m_requirements;
+    QWidget* m_requirementArea = nullptr;
+    QToolButton* m_requirementToggle = nullptr;
+    QLabel* m_currentRequirement = nullptr;
     QLineEdit* m_nodeSearch = nullptr;
     QSet<QString> m_searchExpanded;
     bool m_isSearching = false;

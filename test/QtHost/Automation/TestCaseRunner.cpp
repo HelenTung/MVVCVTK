@@ -2828,9 +2828,13 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                     && page->findChildren<QScrollArea*>().size()==1,"the complete parameter area and current footer fit without nested scrollers");
                 QJsonArray propertyGeometry;
                 for(auto* label:page->findChildren<QLabel*>("parameterTitle"))if(label->isVisible()) {
-                    auto* field=label->parentWidget();auto* row=field->layout();auto* body=row->itemAt(row->count()-1)->widget();
+                    auto* field=label->parentWidget();QWidget* body=nullptr;
+                    for(auto* child:field->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->property("parameterValue").toBool())body=child;
                     propertyGeometry.append(QJsonObject{{"key",field->objectName()},{"fieldWidth",field->width()},
-                        {"labelX",label->x()},{"labelWidth",label->width()},{"valueX",body?body->x():-1},{"valueWidth",body?body->width():-1}});
+                        {"label",label->text()},{"labelX",label->x()},{"labelY",label->y()},{"labelWidth",label->width()},
+                        {"labelHeight",label->height()},{"labelRequiredWidth",label->fontMetrics().horizontalAdvance(label->text())},
+                        {"vectorBelow",field->property("vectorBelow").toBool()},
+                        {"valueX",body?body->x():-1},{"valueY",body?body->y():-1},{"valueWidth",body?body->width():-1}});
                 }
                 QJsonArray commandGeometry;
                 for(auto* child:footer->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->isVisible())

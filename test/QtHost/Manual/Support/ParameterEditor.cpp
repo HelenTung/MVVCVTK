@@ -11,9 +11,13 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QFocusEvent>
+#include <QLocale>
+#include <QResizeEvent>
 #include <QPushButton>
 #include <QPlainTextEdit>
 #include <QJsonDocument>
@@ -28,6 +32,102 @@
 
 namespace Manual {
 namespace {
+class NumberInput final : public QLineEdit {
+public:
+    NumberInput(double value, QWidget* parent) : QLineEdit(parent)
+    {
+        SetNumber(value);
+        const auto remember = [this](const QString& text) {
+            if (!m_formatting) m_exactText = text;
+        };
+        // textEdited 可早于 textChanged；先保存新文本，再由表单回调读取实际值。
+        connect(this, &QLineEdit::textEdited, this, remember);
+        connect(this, &QLineEdit::textChanged, this, remember);
+    }
+    void SetNumber(double value)
+    {
+        m_exactText = QString::number(value, 'g', 17);
+        SetPresentation();
+    }
+    double GetNumber(bool* valid) const { return m_exactText.toDouble(valid); }
+protected:
+    void focusInEvent(QFocusEvent* event) override
+    {
+        QLineEdit::focusInEvent(event);
+        m_formatting = true; setText(m_exactText); m_formatting = false;
+        if (event->reason() == Qt::TabFocusReason || event->reason() == Qt::BacktabFocusReason) selectAll();
+    }
+    void focusOutEvent(QFocusEvent* event) override
+    {
+        QLineEdit::focusOutEvent(event); SetPresentation();
+    }
+private:
+    void SetPresentation()
+    {
+        bool valid = false; const auto number = GetNumber(&valid);
+        auto display = m_exactText;
+        if (!hasFocus() && valid && std::isfinite(number)) {
+            auto locale = QLocale();
+            // 与统计刻度一致：Qt 5 会把不连续的本地数字（例如〇）错误地映射成括号。
+            if(!locale.zeroDigit().isDigit())locale=QLocale::c();
+            locale.setNumberOptions(QLocale::OmitGroupSeparator);
+            display = locale.toString(number, 'g', 6);
+        }
+        // 显示舍入与实际参数分开；聚焦、失焦和程序回填均不发布 textEdited。
+        m_formatting = true; setText(display); m_formatting = false; setToolTip(m_exactText);
+    }
+    QString m_exactText;
+    bool m_formatting = false;
+};
+QString ShortTitle(const QString& key, const QString& title)
+{
+    if(title.startsWith("第 "))return title;
+    static const QHash<QString, QString> names{
+        {"labels","材料标签"}, {"materialLabels","材料标签集"}, {"maxDistance","搜索上限"},
+        {"sampleSpacing","采样间距"}, {"materialThreshold","材料阈值"}, {"materialRange","背景/材料"},
+        {"coneAngleDegrees","搜索半角"}, {"minRegionArea","最小区域面积"}, {"filePath","输入文件"},
+        {"outputPath","输出文件"}, {"archivePath","归档文件"}, {"maskPath","掩码输出"},
+        {"parentNodeId","父裁剪节点"}, {"matrix","坐标矩阵"}, {"center","中心"},
+        {"centerMM","中心"}, {"sizeMM","完整尺寸"}, {"direction3D","区域方向"},
+        {"dimensions","体素数量"}, {"spacingLPS","体素间距"}, {"originLPS","原点坐标"},
+        {"directionLPS","方向矩阵"}, {"expectedBindingRevision","输入绑定版本"},
+        {"angleDeg","旋转角度"}, {"offset","起始偏移"}, {"legendPosition","色标位置"},
+        {"segmentFrom","从值"}, {"segmentTo","至值"}, {"lowColor","低端颜色"}, {"highColor","高端颜色"},
+        {"toleranceBelowColor","公差下侧颜色"}, {"toleranceAboveColor","公差上侧颜色"},
+        {"belowColor","下侧颜色"}, {"aboveColor","上侧颜色"}, {"transfer","传递函数"},
+        {"inputRoi","输入区域"}, {"minPartVoxels","最小体素数"}, {"boxToSource","区域变换"},
+        {"expectedCatalogRevision","零件目录版本"}, {"expectedLabelMap","预期标签图"},
+        {"sourcePointsMM","笔刷点"}, {"overwriteParts","可覆盖零件"}, {"seedModelPoint","种子点"},
+        {"profileHalfLengthModel","剖面半长"}, {"profileSampleStepModel","剖面采样间距"},
+        {"maximumOffsetModel","最大定位偏移"}, {"profileSmoothingSigmaModel","剖面平滑尺度"},
+        {"maximumPlateauNoiseRatio","平台噪声比"}, {"maximumNormalizedResidual","拟合残差上限"},
+        {"minimumEdgeWidthModel","最小边缘宽度"}, {"maximumEdgeWidthModel","最大边缘宽度"},
+        {"minimumEdgeSeparationModel","最小边缘间距"}, {"targetRequestId","目标请求编号"},
+        {"worldAxis","世界旋转轴"}, {"worldCenter","世界旋转中心"}, {"reference","名义参考"},
+        {"mesh","测量网格"}, {"selectionMode","作用方式"}, {"outputMode","输出方式"},
+        {"planeToSource","轮廓平面变换"}, {"sourceToView","源到视图变换"}, {"viewToClip","投影变换"},
+        {"rasterize","目标网格重采样"}, {"sourceToTarget","源到目标变换"}, {"meshToSource","网格到源变换"},
+        {"meshToRoi","网格到区域变换"}, {"hasOrientation","区分内外侧"},
+        {"maxParallelAngleDegrees","平行角偏差"}, {"captureCurrentDisplay","捕获显示配置"},
+        {"includeDeviationSamples","包含逐点偏差"}, {"deviationLimits","偏差允许区间"},
+        {"useSectionPlane","使用截面平面"}, {"fileUnit","STL 单位"},
+        {"requiresMeasurementQuality","要求测量质量"}, {"minPairNormalCosine","法向余弦下限"},
+        {"maxPairDistance","点对距离上限"}, {"minPairCoverage","点对覆盖下限"}};
+    return names.value(key, title.section(QChar(0xff08), 0, 0));
+}
+QString ValueUnit(const QString& key, const QString& title)
+{
+    if (key == "centerMM") return "源模型";
+    if (key == "sizeMM" || title.contains("模型单位") || title.contains("模型长度单位")) return "模型单位";
+    if (title.contains("（mm³）") || title.contains("立方毫米")) return "mm³";
+    if (title.contains("（mm）") || title.contains("毫米")) return "mm";
+    if (title.contains("对齐长度单位")) return "对齐单位";
+    if (title.contains("（度）")) return "°";
+    if (title.contains("（毫秒）")) return "ms";
+    if (title.contains("（体素）")) return "体素";
+    if (title.contains("（0～1）")) return "0～1";
+    return {};
+}
 class BooleanCheckBox final : public QCheckBox {
 public:
     using QCheckBox::QCheckBox;
@@ -137,7 +237,7 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
         else if(m_key=="centerMM")m_title="区域中心（源模型坐标）";
     }
     m_boolean = m_schema.isBool() || (m_schema.isNull() && Shape(m_key).isBool());
-    setObjectName(m_key); setAccessibleName(m_title);
+    setObjectName(m_key); setAccessibleName(ShortTitle(m_key,m_title)); setAccessibleDescription(m_title+"\n"+GetParameterHelp(m_key));
     auto effective = value;
     if (effective.isNull()) effective = m_schema.isNull() ? Shape(m_key) : m_schema;
     const auto effectiveArray = effective.toArray();
@@ -146,32 +246,29 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
             && (m_listItem || !(IsList(m_key) || effectiveArray.isEmpty()
                 || (!effectiveArray.first().isDouble() && !effectiveArray.first().isString())))));
     setProperty("propertyRow", m_isPropertyRow);
+    m_isVector = m_isPropertyRow && effective.isArray();
     setMinimumWidth(0); setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_layout = new QGridLayout(this);
     m_layout->setContentsMargins(0,0,0,0); m_layout->setSpacing(6);m_layout->setColumnStretch(2,1);
-    if (!m_key.isEmpty() && showTitle) {
-        auto labelText=m_title;
-        if(m_module=="Roi") {
-            if(m_key=="centerMM")labelText="中心（源模型）";
-            else if(m_key=="sizeMM")labelText="完整尺寸（模型单位）";
-            else if(m_key=="axis")labelText="轴向（源模型）";
-        }
-        auto* label = new QLabel(labelText, this); label->setObjectName("parameterTitle");if(labelText!=m_title)label->setAccessibleName(m_title); label->setWordWrap(true); label->setMinimumWidth(0); label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); label->setToolTip(m_title+"\n"+GetParameterHelp(m_key));
+    const bool duplicateHeading=m_module=="Artifact" && (m_key=="ring" || m_key=="diffusion") && effective.isObject() && !m_optional;
+    if (!m_key.isEmpty() && showTitle && !duplicateHeading) {
+        auto* label = new QLabel(ShortTitle(m_key,m_title), this); m_titleLabel=label;
+        label->setObjectName("parameterTitle"); label->setAccessibleName(label->text());
+        label->setAccessibleDescription(accessibleDescription());label->setToolTip(accessibleDescription());
+        label->setMinimumWidth(0); label->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Preferred);
+        const auto unit=ValueUnit(m_key,m_title);
+        if(!unit.isEmpty()) {m_unitLabel=new QLabel(unit,this);m_unitLabel->setObjectName("parameterUnit");}
         if (m_isPropertyRow) {
-            label->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Preferred);
-            auto labelPolicy=label->sizePolicy();labelPolicy.setHeightForWidth(true);label->setSizePolicy(labelPolicy);
-            // 列约束由布局持有；Ignored 标签的几何不能用作相邻值列的占位。
-            m_layout->setColumnMinimumWidth(0,m_listItem ? 0 : 88);
-            if(!m_listItem)label->setFixedWidth(88);
             m_layout->addWidget(label,0,0);
         } else {
             auto* heading = new QHBoxLayout; heading->addWidget(label, 1);
+            if(m_unitLabel)heading->addWidget(m_unitLabel);
             if (m_optional && !m_boolean) {
                 m_specified = new QCheckBox("指定", this); m_specified->setObjectName("specified");
                 m_specified->setAccessibleName("提供参数：" + m_title);
                 m_specified->setToolTip("取消仅表示不提供此参数，由业务使用默认值或保留原值；不会清零或设置 false。"); heading->addWidget(m_specified);
             }
-            m_layout->addLayout(heading,0,0,1,3);m_bodyRow=1;
+            m_layout->addLayout(heading,0,0,1,4);m_bodyRow=1;
         }
         if (m_isPropertyRow && m_optional && !m_boolean) {
             m_specified = new QCheckBox(this); m_specified->setObjectName("specified");
@@ -186,6 +283,47 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
         }
     }
     SetValue(value);
+}
+void ParameterEditor::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);SetPropertyLayout();
+}
+void ParameterEditor::SetPropertyLayout()
+{
+    if(!m_isPropertyRow) {
+        int nameWidth=0;
+        for(const auto& field:m_fields)if(!field.second->isHidden() && field.second->m_titleLabel)
+            nameWidth=std::max(nameWidth,field.second->m_titleLabel->fontMetrics().horizontalAdvance(field.second->m_titleLabel->text()));
+        const int limit=fontMetrics().horizontalAdvance(QString(9,QChar(0x540d)));
+        for(const auto& field:m_fields) {
+            field.second->m_nameColumnWidth=std::min(nameWidth,limit);field.second->SetPropertyLayout();
+        }
+        return;
+    }
+    if(!m_isPropertyRow || !m_titleLabel || !m_body)return;
+    const int preferred=m_nameColumnWidth>0 ? m_nameColumnWidth : m_titleLabel->sizeHint().width();
+    const int nameWidth=m_listItem ? m_titleLabel->sizeHint().width() : std::min(preferred,std::max(1,width()*2/5));
+    const int unitWidth=m_unitLabel?m_unitLabel->sizeHint().width()+m_layout->spacing():0;
+    const int optionalWidth=m_specified?m_specified->sizeHint().width()+m_layout->spacing():0;
+    // 数组空间不足时整行下移；分量编辑器不再与名称和可选开关竞争同一窄列。
+    const int componentWidth=fontMetrics().horizontalAdvance("-8888.88")+fontMetrics().horizontalAdvance("X")+24;
+    const bool below=m_isVector && width()-nameWidth-unitWidth-optionalWidth-2*m_layout->spacing()<GetCount()*componentWidth;
+    if(m_appliedNameWidth==nameWidth && m_vectorBelow==below)return;
+    m_appliedNameWidth=nameWidth;m_vectorBelow=below;setProperty("vectorBelow",below);
+    m_layout->removeWidget(m_titleLabel);m_layout->removeWidget(m_body);
+    if(m_specified)m_layout->removeWidget(m_specified);
+    if(m_unitLabel)m_layout->removeWidget(m_unitLabel);
+    m_layout->setColumnMinimumWidth(0,below?0:nameWidth);
+    m_titleLabel->setMinimumWidth(below?0:nameWidth);m_titleLabel->setMaximumWidth(below?QWIDGETSIZE_MAX:nameWidth);
+    m_layout->addWidget(m_titleLabel,0,0);
+    if(m_specified)m_layout->addWidget(m_specified,0,1);
+    if(below) {
+        if(m_unitLabel)m_layout->addWidget(m_unitLabel,0,2,1,2,Qt::AlignRight);
+        m_layout->addWidget(m_body,1,0,1,4);
+    } else {
+        m_layout->addWidget(m_body,0,m_specified?2:1,1,m_specified?1:2);
+        if(m_unitLabel)m_layout->addWidget(m_unitLabel,0,3);
+    }
 }
 bool ParameterEditor::GetFieldApplicable(const QString& key) const
 {
@@ -286,11 +424,13 @@ void ParameterEditor::SetFieldVisibility()
     for (const auto& field : m_fields) field.second->setVisible(!bound.contains(field.first) && GetFieldApplicable(field.first));
     for (const auto& section : m_groupSections) {
         auto* page = m_groupPages.at(section.first);
-        const bool populated = std::any_of(m_fields.begin(), m_fields.end(), [&](const auto& field) {
+        bool populated = std::any_of(m_fields.begin(), m_fields.end(), [&](const auto& field) {
             return field.second->parentWidget() == page && !field.second->isHidden();
         });
+        for(auto* nested:page->findChildren<QWidget*>("parameterSection"))populated=populated || !nested->isHidden();
         section.second->setVisible(populated);
     }
+    SetPropertyLayout();
 }
 void ParameterEditor::NotifyEdited() { SetFieldVisibility(); if (onEdited) onEdited(); }
 void ParameterEditor::UpdateBooleanState()
@@ -338,14 +478,13 @@ void ParameterEditor::SetDefaultValue(const QJsonValue& value)
 {
     if (!m_specified || m_specified->isChecked()) return;
     if (m_type == QJsonValue::Double && value.isDouble()) {
-        auto* input = qobject_cast<QLineEdit*>(m_input);
-        const auto text = QString::number(value.toDouble(), 'g', 17);
-        if (input && input->text() != text) input->setText(text);
+        static_cast<NumberInput*>(m_input)->SetNumber(value.toDouble());
     } else if (m_type == QJsonValue::Array && value.isArray() && value.toArray().size() == GetCount()) {
         const auto values = value.toArray();
         for (int index = 0; index < values.size(); ++index) {
-            auto* input = m_rows[index].second->findChild<QLineEdit*>("value");
-            if (input && values[index].isDouble()) input->setText(QString::number(values[index].toDouble(), 'g', 17));
+            auto* field=m_rows[index].second;
+            if(field->m_type==QJsonValue::Double && values[index].isDouble())
+                static_cast<NumberInput*>(field->m_input)->SetNumber(values[index].toDouble());
         }
     }
 }
@@ -400,8 +539,9 @@ void ParameterEditor::SetValue(const QJsonValue& value)
     m_booleanState = nullptr; m_unsetBoolean = nullptr; m_booleanSpecified = !value.isNull();
     if (m_stateBound) m_booleanEdited = value.isBool();
     m_body = new QWidget(this);
+    m_body->setProperty("parameterValue",true);m_appliedNameWidth=-1;
     if (m_isPropertyRow) m_layout->addWidget(m_body,0,m_specified ? 2 : 1,1,m_specified ? 1 : 2);
-    else m_layout->addWidget(m_body,m_bodyRow,0,1,3);
+    else m_layout->addWidget(m_body,m_bodyRow,0,1,4);
     m_type = effective.type();
     BuildValue(effective);
     UpdateBooleanState();
@@ -412,6 +552,7 @@ void ParameterEditor::SetValue(const QJsonValue& value)
         m_specified->setChecked(!value.isNull()); m_body->setEnabled(!value.isNull());
         if (m_type == QJsonValue::Object) m_body->setVisible(!value.isNull());
     }
+    SetPropertyLayout();
 }
 void ParameterEditor::BuildValue(const QJsonValue& value)
 {
@@ -432,7 +573,7 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
             m_body->setObjectName("parameterGroups");
             sections = new QVBoxLayout(m_body); sections->setContentsMargins(0,0,0,0); sections->setSpacing(4);
         } else {
-            auto* grid = new QGridLayout(m_body); grid->setContentsMargins(0,0,0,0); grid->setHorizontalSpacing(12); grid->setVerticalSpacing(6);
+            auto* grid = new QGridLayout(m_body); grid->setContentsMargins(0,0,0,0); grid->setHorizontalSpacing(12); grid->setVerticalSpacing(4);
             grids[QString()] = grid;
         }
         if(m_module=="Surface" && m_key.isEmpty() && m_action=="GlobalAutomatic") {
@@ -454,19 +595,23 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
                     auto* section = new QWidget(m_body); section->setObjectName("parameterSection");
                     section->setProperty("sectionName", group);
                     auto* sectionLayout = new QVBoxLayout(section); sectionLayout->setContentsMargins(0,0,0,0); sectionLayout->setSpacing(4);
-                    auto* toggle = new QToolButton(section); toggle->setObjectName("sectionToggle"); toggle->setText(group);
-                    toggle->setProperty("parameterSection", true); toggle->setCheckable(true);
-                    toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
                     const bool expanded = group != "高级与诊断" && group!="高级几何" && group!="精确参数" && group!="高级设置" && group!="专家设置" && group!="更多信息";
-                    toggle->setChecked(expanded); toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+                    const bool duplicateGroup=m_module=="Artifact" && (m_key=="ring" || m_key=="diffusion") && group=="算法参数";
                     page = new QWidget(section); page->setObjectName("sectionFields"); page->setVisible(expanded);
-                    sectionLayout->addWidget(toggle); sectionLayout->addWidget(page); sections->addWidget(section);
-                    // 折叠仅改变可见性，不读取输入、不重建字段，也不通知业务编辑。
-                    connect(toggle, &QToolButton::toggled, page, [page, toggle](bool isExpanded) {
-                        page->setVisible(isExpanded); toggle->setArrowType(isExpanded ? Qt::DownArrow : Qt::RightArrow);
-                    });
+                    if(!duplicateGroup) {
+                        auto* toggle = new QToolButton(section); toggle->setObjectName("sectionToggle"); toggle->setText(group);
+                        toggle->setProperty("parameterSection", true); toggle->setCheckable(true);
+                        toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+                        toggle->setChecked(expanded); toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+                        sectionLayout->addWidget(toggle);
+                        // 折叠仅改变可见性，不读取输入、不重建字段，也不通知业务编辑。
+                        connect(toggle, &QToolButton::toggled, page, [page, toggle](bool isExpanded) {
+                            page->setVisible(isExpanded); toggle->setArrowType(isExpanded ? Qt::DownArrow : Qt::RightArrow);
+                        });
+                    }
+                    sectionLayout->addWidget(page); sections->addWidget(section);
                     m_groupPages[group] = page; m_groupSections[group] = section;
-                    auto* grid = new QGridLayout(page); grid->setContentsMargins(4,2,4,4); grid->setVerticalSpacing(6);
+                    auto* grid = new QGridLayout(page); grid->setContentsMargins(4,2,4,4); grid->setVerticalSpacing(4);
                     grids[group] = grid;
                 } else page = m_groupPages.at(group);
             }
@@ -490,6 +635,11 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
             if(m_module=="Surface" && m_groupSections.count("高级设置") && m_groupSections.count("专家设置")) {
                 auto* expert=m_groupSections.at("专家设置");sections->removeWidget(expert);
                 auto* advanced=m_groupPages.at("高级设置");auto* grid=static_cast<QGridLayout*>(advanced->layout());grid->addWidget(expert,grid->rowCount(),0);
+            }
+            if(m_module=="Roi" && m_groupSections.count("精确参数") && m_groupSections.count("更多信息")) {
+                auto* details=m_groupSections.at("更多信息");sections->removeWidget(details);
+                auto* advanced=m_groupPages.at("精确参数");auto* grid=static_cast<QGridLayout*>(advanced->layout());grid->addWidget(details,grid->rowCount(),0);
+                m_groupSections.at("精确参数")->findChild<QToolButton*>("sectionToggle")->setText("高级参数");
             }
         }
         return;
@@ -525,7 +675,7 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
                 grid->setObjectName("matrixGrid"); m_body->setObjectName("matrix");
                 m_body->setProperty("matrixDimension", columns);
                 if (auto* title = findChild<QLabel*>("parameterTitle", Qt::FindDirectChildrenOnly))
-                    title->setText(m_title + QString("（%1 × %1）").arg(columns));
+                    {title->setText(ShortTitle(m_key,m_title)+QString("（%1 × %1）").arg(columns));title->setAccessibleName(title->text());}
                 for (const bool left : {true, false}) {
                     auto* bracket = new QFrame(m_body); bracket->setFixedWidth(6);
                     bracket->setStyleSheet(QString("border-top: 2px solid #718294; border-bottom: 2px solid #718294; border-%1: 2px solid #718294;").arg(left ? "left" : "right"));
@@ -569,13 +719,14 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
         connect(input, &QCheckBox::stateChanged, this, [this](int state) { m_booleanSpecified = state != Qt::PartiallyChecked; m_booleanEdited = true; UpdateBooleanState(); NotifyEdited(); });
         if (m_optional || m_stateBound) {
             layout->addWidget(input); CreateBooleanStateControls();
-            input->setAccessibleName(m_title);
+            input->setAccessibleName(m_titleLabel?m_titleLabel->text():ShortTitle(m_key,m_title));input->setAccessibleDescription(accessibleDescription());
             return;
         }
     } else {
-        QLineEdit* input = IsPath(m_key) ? static_cast<QLineEdit*>(new PathInput(m_key == "outputDir", m_body)) : new QLineEdit(m_body);
+        QLineEdit* input = value.isDouble() ? static_cast<QLineEdit*>(new NumberInput(value.toDouble(),m_body))
+            : IsPath(m_key) ? static_cast<QLineEdit*>(new PathInput(m_key == "outputDir", m_body)) : new QLineEdit(m_body);
         input->setObjectName("value"); input->setMinimumWidth(35);
-        input->setText(value.isString() ? value.toString() : QString::number(value.toDouble(), 'g', 17));
+        if(value.isString())input->setText(value.toString());
         m_input = input; input->setAccessibleName(m_title); connect(input, &QLineEdit::textEdited, this, [this] { NotifyEdited(); });
         if (IsPath(m_key)) {
             static_cast<PathInput*>(input)->onPathChanged = [this](const QString&) { NotifyEdited(); };
@@ -589,7 +740,7 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
         }
     }
     layout->addWidget(m_input, 1);
-    m_input->setAccessibleName(m_title);
+    m_input->setAccessibleName(m_titleLabel?m_titleLabel->text():ShortTitle(m_key,m_title));m_input->setAccessibleDescription(accessibleDescription());
 }
 void ParameterEditor::AddRow(const QJsonValue& value)
 {
@@ -613,7 +764,7 @@ void ParameterEditor::AddRow(const QJsonValue& value)
                 m_rowLayout->removeWidget(m_rows[i].first);m_rowLayout->insertWidget(static_cast<int>(i),m_rows[i].first);
                 auto* input=m_rows[i].second;input->m_title="第 "+QString::number(i+1)+" 组";
                 input->setAccessibleName(input->m_title);
-                input->findChild<QLabel*>("parameterTitle",Qt::FindDirectChildrenOnly)->setText(input->m_title);
+                auto* title=input->findChild<QLabel*>("parameterTitle",Qt::FindDirectChildrenOnly);title->setText(input->m_title);title->setAccessibleName(title->text());
             }
             NotifyEdited();
         });
@@ -624,7 +775,7 @@ void ParameterEditor::AddRow(const QJsonValue& value)
         for (std::size_t i = 0; i < m_rows.size(); ++i) {
             auto* editor = m_rows[i].second; editor->m_title = "第 " + QString::number(i+1) + " 组";
             editor->setAccessibleName(editor->m_title);
-            editor->findChild<QLabel*>("parameterTitle", Qt::FindDirectChildrenOnly)->setText(editor->m_title);
+            auto* title=editor->findChild<QLabel*>("parameterTitle", Qt::FindDirectChildrenOnly);title->setText(editor->m_title);title->setAccessibleName(title->text());
         }
         NotifyEdited();
     });
@@ -661,7 +812,7 @@ QJsonValue ParameterEditor::GetValue() const
     if (auto* input = qobject_cast<QCheckBox*>(m_input)) return input->isChecked();
     const auto text = static_cast<QLineEdit*>(m_input)->text();
     if (m_type == QJsonValue::String) return text;
-    bool valid = false; const double number = text.toDouble(&valid);
+    bool valid = false; const double number = static_cast<NumberInput*>(m_input)->GetNumber(&valid);
     if (!valid || !std::isfinite(number)) { m_input->setFocus(); throw std::invalid_argument((m_title + "：请输入有效数字").toStdString()); }
     return number;
 }
