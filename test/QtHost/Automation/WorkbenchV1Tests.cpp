@@ -105,6 +105,15 @@ void CheckModulePanelText(ModulePanel& panel)
         Require(!label->wordWrap() && label->fontMetrics().horizontalAdvance(label->text())<=label->width(),message.toStdString().c_str());
         Require(label->accessibleName()==label->text() && !label->accessibleDescription().isEmpty(),"visible property name is the accessible name and full explanation remains available");
     }
+    for(auto* input:panel.findChildren<QLineEdit*>("value")) {
+        if(!input->property("numericValue").toBool() || input->hasFocus() || input->visibleRegion().isEmpty())continue;
+        int digits=0;bool significant=false;
+        for(const auto character:input->text().toLower().section('e',0,0))if(character.isDigit()) {
+            significant=significant || character.digitValue()!=0;if(significant)++digits;
+        }
+        const auto message=QString("idle numeric value has at most six significant digits: %1 [%2]").arg(input->accessibleName(),input->text());
+        Require(digits<=6,message.toStdString().c_str());
+    }
     auto* scroll=panel.findChild<QScrollArea*>("operationScroll");
     Require(scroll && scroll->horizontalScrollBarPolicy()==Qt::ScrollBarAlwaysOff,"properties use one vertical scroller");
     auto* tools=panel.findChild<QToolButton*>("moreOperations");

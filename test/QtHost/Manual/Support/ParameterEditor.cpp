@@ -36,6 +36,7 @@ class NumberInput final : public QLineEdit {
 public:
     NumberInput(double value, QWidget* parent) : QLineEdit(parent)
     {
+        setProperty("numericValue",true);
         SetNumber(value);
         const auto remember = [this](const QString& text) {
             if (!m_formatting) m_exactText = text;

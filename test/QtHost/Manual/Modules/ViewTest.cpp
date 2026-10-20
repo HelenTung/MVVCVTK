@@ -209,7 +209,7 @@ ModulePanel* CreateViewTest(TestContext context, QWidget* parent)
         display->SetFieldApplicability(applicability);
         auto* isoField = display->GetField("iso");
         if (applied && !isoField->findChild<QCheckBox*>("specified")->isChecked())
-            isoField->findChild<QLineEdit*>("value")->setText(QString::number(applied->isoThreshold, 'g', 17));
+            isoField->SetDefaultValue(applied->isoThreshold);
         display->GetField("axes")->SetAppliedBoolean(applied ? QJsonValue(applied->isAxesVisible) : QJsonValue(), viewId, applied ? QString() : "当前没有可用视图");
         auto* visibility = panel->GetParameterEditor("Visibility");
         const auto scope = visibility->GetField("viewScope")->GetValue().toString();
