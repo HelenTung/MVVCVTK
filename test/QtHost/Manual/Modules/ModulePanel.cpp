@@ -109,7 +109,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     const QStringList taskGroups=m_name=="Roi"?QStringList{"创建","编辑","运算","管理"}:m_name=="Alignment"?QStringList{"对齐","几何拟合","表面偏差","尺寸/形位","报告"}:QStringList{};
     for(const auto& group:taskGroups){m_taskTabs->addItem(group);if(m_taskGroup.isEmpty())m_taskGroup=group;}
     m_taskTabs->setVisible(!taskGroups.isEmpty());m_taskTabs->setMinimumContentsLength(2);
-    m_taskTabs->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_taskTabs->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     auto* operationRow=new QHBoxLayout;operationRow->setSpacing(8);
     operationRow->addWidget(m_taskTabs);
     auto* operationLabel=new QLabel("操作",this);operationLabel->setBuddy(m_parameterTabs);operationRow->addWidget(operationLabel);operationRow->addWidget(m_parameterTabs,1);

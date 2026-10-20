@@ -221,6 +221,17 @@ void CheckWorkbenchV1(TestWindow& window)
         Require(advanced && expert && advanced->isAncestorOf(expert),"surface expert parameters are nested inside advanced settings");
         form->SetPatch({{"initialIsoValue",QJsonValue()},{"materialRange",QJsonValue()}});
     }
+    if(auto* alignment=window.GetModule("Alignment"))if(!alignment->GetActions().isEmpty()) {
+        window.GetWorkflow().onNavigate("Alignment","ImportReference",{});auto* tasks=alignment->findChild<QComboBox*>("businessTaskTabs");
+        for(int index=0;index<tasks->count();++index) {
+            tasks->setCurrentIndex(index);QCoreApplication::processEvents();
+            for(auto* combo:{tasks,alignment->findChild<QComboBox*>("parameterTabs")}) {
+                QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
+                const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
+                Require(combo->fontMetrics().horizontalAdvance(combo->currentText())<=field.width(),"all five alignment task names and their current operations fit the actual selector fields");
+            }
+        }
+    }
     if(auto* wall=window.GetModule("Wall"))if(!wall->GetActions().isEmpty()) {
         window.GetWorkflow().onNavigate("Wall","Start",{});QCoreApplication::processEvents();
         auto* toggle=wall->findChild<QToolButton*>("showOperationPrerequisites");auto* area=wall->findChild<QWidget*>("operationPrerequisites");
