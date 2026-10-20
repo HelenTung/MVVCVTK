@@ -2785,18 +2785,10 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             QCoreApplication::processEvents();
             if(step["checkViewTextFit"].toBool())CheckViewToolbarText(window);
             if(step.contains("expectedDpr"))Check(window.devicePixelRatioF()==GetNumber(step,"expectedDpr"),"the capture uses the requested application scale");
+            QPixmap pageCapture;
             if(step["checkPanelTextFit"].toBool()) {
-                std::vector<QRect> previousGeometry;int stablePasses=0;
-                Check(Wait([&] {
-                    // 约束变化可能继续投递 LayoutRequest；按实际几何收敛等待，不放宽文字或留白断言。
-                    QCoreApplication::sendPostedEvents(nullptr,QEvent::LayoutRequest);
-                    auto* scroll=page->findChild<QScrollArea*>("operationScroll");auto* footer=page->findChild<QWidget*>("businessCommandFooter");
-                    std::vector<QRect> geometry{page->geometry(),scroll->geometry(),scroll->widget()->geometry(),footer->geometry()};
-                    for(auto* child:footer->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->isVisible())geometry.push_back(child->geometry());
-                    if(geometry==previousGeometry)++stablePasses;else {previousGeometry=geometry;stablePasses=0;}
-                    return stablePasses>=2;
-                },static_cast<int>(getWaitMilliseconds(step))),"module layout geometry settles before inspection");
-                CheckModulePanelText(*page);
+                // grab 同步完成当前帧的布局与绘制；断言和保存使用同一帧，不要求内部滚动位置静止。
+                pageCapture=window.grab();CheckModulePanelText(*page);
             }
             if(step.contains("toolsScreenshot")) {
                 auto* tools=page->findChild<QToolButton*>("moreOperations");auto* menu=tools->menu();
@@ -2820,7 +2812,8 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             }
             checkObserved(step);if(step.contains("expectPrimaryAction"))Check(page->findChild<QPushButton*>("businessPrimary")->property("businessAction")==step["expectPrimaryAction"].toString(),"current page presents the expected phase without selecting a form");
             if(step.contains("screenshot")) {
-                Check(window.grab().save(GetText(step,"screenshot")),"business page screenshot saved");
+                if(pageCapture.isNull())pageCapture=window.grab();
+                Check(pageCapture.save(GetText(step,"screenshot")),"business page screenshot saved");
                 auto* split=window.findChild<QSplitter*>("workbenchSplit");const auto sizes=split->sizes();
                 auto* scroll=page->findChild<QScrollArea*>("operationScroll");auto* footer=page->findChild<QWidget*>("businessCommandFooter");
                 const bool shown=!window.findChild<QWidget*>("parameterPages")->isHidden();
