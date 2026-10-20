@@ -292,7 +292,7 @@ void ParameterEditor::SetPropertyLayout()
 {
     if(!m_isPropertyRow) {
         int nameWidth=0;
-        for(const auto& field:m_fields)if(!field.second->isHidden() && field.second->m_titleLabel)
+        for(const auto& field:m_fields)if(!field.second->isHidden() && field.second->m_isPropertyRow && field.second->m_titleLabel)
             nameWidth=std::max(nameWidth,field.second->m_titleLabel->fontMetrics().horizontalAdvance(field.second->m_titleLabel->text()));
         const int limit=fontMetrics().horizontalAdvance(QString(9,QChar(0x540d)));
         for(const auto& field:m_fields) {
@@ -600,6 +600,8 @@ void ParameterEditor::BuildValue(const QJsonValue& value)
                     page = new QWidget(section); page->setObjectName("sectionFields"); page->setVisible(expanded);
                     if(!duplicateGroup) {
                         auto* toggle = new QToolButton(section); toggle->setObjectName("sectionToggle"); toggle->setText(group);
+                        if(m_module=="Artifact" && group=="高级设置" && (m_key=="ring" || m_key=="diffusion"))
+                            toggle->setText(m_key=="ring"?"环形高级设置":"扩散高级设置");
                         toggle->setProperty("parameterSection", true); toggle->setCheckable(true);
                         toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
                         toggle->setChecked(expanded); toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
