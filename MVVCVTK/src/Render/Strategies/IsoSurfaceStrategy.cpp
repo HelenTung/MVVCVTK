@@ -1,7 +1,10 @@
 #include "IsoSurfaceStrategy.h"
 #include <vtkImageData.h>
+#include <vtkCellArray.h>
 #include <vtkObjectFactory.h>
+#include <vtkOpenGLIndexBufferObject.h>
 #include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLRenderWindow.h>
 #include <vtkPolyData.h>
 #include <vtkPointData.h>
 #include <vtkProperty.h>
@@ -15,6 +18,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -32,6 +36,13 @@ public:
     vtkTypeMacro(Mapper, vtkOpenGLPolyDataMapper);
 
     void SetEffectBinding(RenderEffectBinding* binding) { m_binding = binding; }
+    void SetPreparedProduct(std::shared_ptr<const IsoSurfaceProduct> product)
+    {
+        if (m_preparedProduct == product) return;
+        m_preparedProduct = std::move(product);
+        m_uploadedProduct.reset();
+        this->Modified();
+    }
     void RenderPiece(vtkRenderer* renderer, vtkActor* actor) override
     {
         if (m_binding) {
@@ -43,8 +54,64 @@ public:
         }
     }
 
+protected:
+    void BuildIBO(vtkRenderer* renderer, vtkActor* actor, vtkPolyData* surface) override
+    {
+        auto* context = vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow());
+        auto* property = actor->GetProperty();
+        const bool isPrepared = m_preparedProduct && context
+            && m_preparedProduct->surface.GetPointer() == surface
+            && m_preparedProduct->triangleIndicesTime != 0
+            && m_preparedProduct->triangleIndicesTime == surface->GetMeshMTime()
+            && property->GetRepresentation() == VTK_SURFACE
+            && !property->GetEdgeVisibility() && !property->GetVertexVisibility()
+            && !renderer->GetSelector()
+            && surface->GetNumberOfVerts() == 0 && surface->GetNumberOfLines() == 0
+            && surface->GetNumberOfStrips() == 0;
+        if (isPrepared) {
+            try {
+                auto* indices = this->Primitives[PrimitiveTris].IBO;
+                const auto& values = m_preparedProduct->triangleIndices;
+                const bool hasUpload = m_uploadedProduct.lock() == m_preparedProduct
+                    && m_uploadedContext == context
+                    && m_uploadedContextTime == context->GetContextCreationTime()
+                    && indices->IndexCount == values.size()
+                    && indices->IsReady()
+                    && (values.empty() || indices->GetHandle() != 0);
+                if (!hasUpload && !values.empty()
+                    && !indices->Upload(values, vtkOpenGLIndexBufferObject::ElementArrayBuffer)) {
+                    throw std::runtime_error("Optional iso index upload is unavailable.");
+                }
+                indices->IndexCount = values.size();
+                // 此窄路径只有三角面；其他表示和辅助图元交还原 BuildIBO。
+                for (int primitive = PrimitiveStart; primitive < PrimitiveEnd; ++primitive)
+                    if (primitive != PrimitiveTris) this->Primitives[primitive].IBO->IndexCount = 0;
+                this->EdgeValues.clear();
+                this->IBOBuildState.Clear();
+                m_uploadedProduct = m_preparedProduct;
+                m_uploadedContext = context;
+                m_uploadedContextTime = context->GetContextCreationTime();
+                m_isUsingPreparedIndices = true;
+                return;
+            }
+            catch (...) {
+                // 缓存或上传只是优化；恢复 VTK 原有装配/上传及错误处理。
+                this->IBOBuildState.Clear();
+            }
+        }
+        if (m_isUsingPreparedIndices) this->IBOBuildState.Clear();
+        m_isUsingPreparedIndices = false;
+        m_uploadedProduct.reset();
+        this->Superclass::BuildIBO(renderer, actor, surface);
+    }
+
 private:
     RenderEffectBinding* m_binding = nullptr;
+    std::shared_ptr<const IsoSurfaceProduct> m_preparedProduct;
+    std::weak_ptr<const IsoSurfaceProduct> m_uploadedProduct;
+    const void* m_uploadedContext = nullptr;
+    vtkMTimeType m_uploadedContextTime = 0;
+    bool m_isUsingPreparedIndices = false;
 };
 
 vtkStandardNewMacro(IsoSurfaceStrategy::Mapper);
@@ -238,6 +305,7 @@ bool IsoSurfaceStrategy::SetPolyInput(
     if (!poly || !m_mapper || !m_lodController) return false;
 
     // 上游 mesh 没有可降采样的体数据输入；质量意图保留，但不改写几何。
+    m_mapper->SetPreparedProduct(nullptr);
     m_mapper->SetInputData(poly);
     m_mapper->ScalarVisibilityOff();
     m_activeProduct.reset();
@@ -450,6 +518,7 @@ bool IsoSurfaceStrategy::SetProduct(
     const auto gpuCommitStart = std::chrono::steady_clock::now();
     if (!m_activeProduct || m_activeProduct->surface != result.product->surface)
         m_mapper->SetInputData(result.product->surface);
+    m_mapper->SetPreparedProduct(result.product);
     m_mapper->ScalarVisibilityOff();
     const auto gpuUploadUs = std::max(std::uint64_t{ 1 },
         static_cast<std::uint64_t>(

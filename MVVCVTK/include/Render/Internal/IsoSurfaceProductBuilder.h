@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 struct IsoSurfaceKey final {
     RenderInputStamp inputStamp;
@@ -33,6 +34,9 @@ struct IsoSurfaceProduct final {
     std::array<int, 3> inputDimensions{};
     double isoValue = 0.0;
     vtkSmartPointer<vtkPolyData> surface;
+    // 单一 surface 的 VTK 三角形索引，vertex offset 为 0；时间为 0 表示走原路径。
+    std::vector<unsigned int> triangleIndices;
+    vtkMTimeType triangleIndicesTime = 0;
     std::uint64_t actualBytes = 0;
     bool isPreview = false;
 };

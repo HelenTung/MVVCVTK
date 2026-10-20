@@ -540,6 +540,7 @@ void SetTaskComplete(
 
 class RenderTaskToken::Impl final {
 public:
+    bool SetActualBytes(std::uint64_t actualBytes, bool isRequired) const;
     std::shared_ptr<RenderCoordinatorState> state;
     std::shared_ptr<RenderChannelState> channel;
     std::shared_ptr<std::atomic<bool>> isCancelled;
@@ -733,39 +734,52 @@ bool RenderTaskToken::SetEstimatedBytes(const std::uint64_t bytes) const
 bool RenderTaskToken::SetActualBytes(
     const std::uint64_t actualBytes) const
 {
-    if (!m_impl) return true;
-    if (!m_impl->state || !m_impl->channel
-        || !m_impl->isCancelled) {
+    return !m_impl || m_impl->SetActualBytes(actualBytes, true);
+}
+
+bool RenderTaskToken::TrySetActualBytes(
+    const std::uint64_t actualBytes) const
+{
+    return !m_impl || m_impl->SetActualBytes(actualBytes, false);
+}
+
+bool RenderTaskToken::Impl::SetActualBytes(
+    const std::uint64_t actualBytes, const bool isRequired) const
+{
+    if (!this->state || !channel || !isCancelled) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(m_impl->state->mutex);
-    auto& state = *m_impl->state;
-    const bool isCurrentRunning = state.running
-        && state.running->channel == m_impl->channel
-        && state.running->requestRevision == m_impl->requestRevision
-        && state.running->isCancelled == m_impl->isCancelled;
-    if (!isCurrentRunning || state.isStopping
-        || m_impl->channel->isStopped
-        || m_impl->isCancelled->load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(this->state->mutex);
+    auto& coordinator = *this->state;
+    const bool isCurrentRunning = coordinator.running
+        && coordinator.running->channel == channel
+        && coordinator.running->requestRevision == requestRevision
+        && coordinator.running->isCancelled == isCancelled;
+    if (!isCurrentRunning || coordinator.isStopping
+        || channel->isStopped
+        || isCancelled->load(std::memory_order_acquire)) {
         return false;
     }
 
+    const auto reject = [&] {
+        if (isRequired) {
+            isCancelled->store(true, std::memory_order_release);
+            SetRequestFailureLocked(*channel, requestRevision,
+                RenderProductFailure::ResourceRejected,
+                "The actual render product size exceeds the CPU budget.");
+        }
+        return false;
+    };
     const std::uint64_t previousBytes =
-        state.running->accountedBytes;
+        coordinator.running->accountedBytes;
     const std::uint64_t addedBytes = actualBytes > previousBytes
         ? actualBytes - previousBytes : 0;
-    if (state.isCpuBudgetEnforced && !TryMakeCacheSpaceLocked(state, addedBytes)) {
-        m_impl->isCancelled->store(true, std::memory_order_release);
-        SetRequestFailureLocked(
-            *m_impl->channel,
-            m_impl->requestRevision,
-            RenderProductFailure::ResourceRejected,
-            "The actual render product size exceeds the CPU budget.");
-        return false;
+    if (coordinator.isCpuBudgetEnforced && !TryMakeCacheSpaceLocked(coordinator, addedBytes)) {
+        return reject();
     }
 
-    const auto resources = GetResourceStateLocked(state);
+    const auto resources = GetResourceStateLocked(coordinator);
     std::uint64_t committedBytes = 0;
     const bool hasCommittedSum = GetSumValid(
         resources.activeBytes,
@@ -775,20 +789,14 @@ bool RenderTaskToken::SetActualBytes(
             committedBytes,
             resources.cacheBytes,
             committedBytes);
-    if (state.isCpuBudgetEnforced && (!hasCommittedSum
-        || actualBytes > state.cpuBudgetBytes
-        || committedBytes > state.cpuBudgetBytes - actualBytes)) {
-        m_impl->isCancelled->store(true, std::memory_order_release);
-        SetRequestFailureLocked(
-            *m_impl->channel,
-            m_impl->requestRevision,
-            RenderProductFailure::ResourceRejected,
-            "The actual render product size exceeds the CPU budget.");
-        return false;
+    if (coordinator.isCpuBudgetEnforced && (!hasCommittedSum
+        || actualBytes > coordinator.cpuBudgetBytes
+        || committedBytes > coordinator.cpuBudgetBytes - actualBytes)) {
+        return reject();
     }
-    state.running->accountedBytes = std::max(previousBytes, actualBytes);
-    state.running->retainedBytes = actualBytes;
-    m_impl->channel->transition.stats.candidateBytes = actualBytes;
+    coordinator.running->accountedBytes = std::max(previousBytes, actualBytes);
+    coordinator.running->retainedBytes = actualBytes;
+    channel->transition.stats.candidateBytes = actualBytes;
     return true;
 }
 
