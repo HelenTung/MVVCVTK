@@ -51,7 +51,9 @@ private:
     bool m_stateBound = false, m_booleanEdited = false;
     QJsonValue m_appliedBoolean;
     QString m_stateContext, m_booleanUnavailable;
-    QVBoxLayout* m_layout = nullptr;
+    QGridLayout* m_layout = nullptr;
+    bool m_isPropertyRow = false;
+    int m_bodyRow = 0;
     QCheckBox* m_specified = nullptr;
     QLabel* m_booleanState = nullptr;
     QPushButton* m_unsetBoolean = nullptr;

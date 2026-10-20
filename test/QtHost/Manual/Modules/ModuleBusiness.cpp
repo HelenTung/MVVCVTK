@@ -9,6 +9,7 @@
 #include <QTreeWidget>
 #include <QTabWidget>
 #include <QSignalBlocker>
+#include <QToolButton>
 #include <algorithm>
 namespace Manual {
 QJsonObject ModulePanel::GetActionParameters(const QString& action) const
@@ -133,10 +134,11 @@ void ModulePanel::RefreshBusinessStep(const QJsonObject& state,const QJsonObject
     if(m_entries.empty()) step={"当前构建未启用此功能","请选择启用对应 Feature 的完整项目配置。","","不可用",{}};
     m_businessStage->setText(step.stage); m_businessNext->setText("下一步 · "+step.next);
     auto source=state["source"].toString();if(source.startsWith("00000000000000000000000000000000:"))source.clear();
-    m_businessSource->setText(source.isEmpty() ? "本次业务输入 · 顶部当前输入" : "本次业务来源 · "+source.right(18)+
-        (source==input["dataRevision"].toString() ? "（当前输入）" : "（与当前输入不同）"));
+    m_businessSource->setText(!source.isEmpty() && source!=input["dataRevision"].toString()
+        ? "业务来源 · "+source.right(18)+"（与当前输入不同）"
+        : input["available"].toBool() ? "输入 · "+input["datasetId"].toString() : "输入 · 尚未加载数据");
     m_businessSource->setToolTip("业务源精确修订："+source);
-    m_businessSource->setVisible(!source.isEmpty() && source!=input["dataRevision"].toString());
+    m_businessSource->setVisible(true);
     QString display;
     if(state["hasResult"].toBool() && state.contains("isDisplayReady"))display=state["isDisplayReady"].toBool() ? "显示 · 已就绪" : "显示 · 尚未就绪；已发布结果与统计保留";
     else if(state["hasResult"].toBool() && state.contains("isOverlayVisible"))display=state["isOverlayVisible"].toBool() ? "显示 · 结果叠加可见" : "显示 · 结果叠加未显示；已发布结果与统计保留";
@@ -150,6 +152,8 @@ void ModulePanel::RefreshBusinessStep(const QJsonObject& state,const QJsonObject
     m_primary->setEnabled(!step.action.isEmpty() && m_entries.count(step.action) && reason.isEmpty());
     m_primary->setToolTip(reason.isEmpty() ? step.next : reason);
     if(!reason.isEmpty() && !step.action.isEmpty()) m_businessNext->setText("下一步 · "+step.next+"\n"+reason);
+    m_businessNext->setVisible(m_help->isChecked() || (!reason.isEmpty() && !m_requirements.count(m_parameterAction)));
+    findChild<QWidget*>("businessContext")->setVisible(!m_businessNext->isHidden() || !display.isEmpty());
     QStringList actions;
     for(const auto& action:step.secondary) {
         if(action==step.action) continue;
@@ -194,7 +198,7 @@ void ModulePanel::RefreshBusinessStep(const QJsonObject& state,const QJsonObject
         button->setVisible(!action.startsWith("Open") || button->isEnabled());
         button->setToolTip(requirement.isEmpty()?button->accessibleName():requirement);
     }
-    m_nextActions->setVisible(!actions.isEmpty());
+    m_nextActions->hide();
 }
 void ModulePanel::RefreshSources(const QJsonObject& graph,const QJsonObject& input)
 {

@@ -108,6 +108,7 @@ public:
     std::function<QString(const QString&, const QJsonObject&)> validateAction;
 protected:
     TestContext m_context;
+    void resizeEvent(QResizeEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 private:
@@ -184,6 +185,7 @@ private:
     bool m_isObserving = false;
     bool m_parameterFocusQueued = false;
     void QueueParameterFocus();
+    void SetCommandHeight();
     void SetNode(QTreeWidgetItem* item);
     void SelectSceneItem(QTreeWidgetItem* item);
     void FilterNodes();

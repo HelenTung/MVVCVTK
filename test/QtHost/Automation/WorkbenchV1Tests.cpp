@@ -19,6 +19,9 @@
 #include <QStyleOptionComboBox>
 #include <QAbstractItemModel>
 #include <QAbstractButton>
+#include <QLabel>
+#include <QMenu>
+#include <QLayout>
 #include <stdexcept>
 #include <cmath>
 namespace Manual {
@@ -69,6 +72,39 @@ void CheckViewToolbarText(TestWindow& window)
         Require(combo->fontMetrics().horizontalAdvance(combo->currentText())<=field.width(),message.toStdString().c_str());
     }
 }
+void CheckModulePanelText(ModulePanel& panel)
+{
+    if(!panel.isVisible())return;
+    for(auto* button:panel.findChildren<QAbstractButton*>()) {
+        if(button->visibleRegion().isEmpty() || button->text().isEmpty())continue;
+        const auto message=QString("panel command fits: %1 [%2], width %3, required %4")
+            .arg(button->objectName(),button->text()).arg(button->width()).arg(button->sizeHint().width());
+        Require(button->width()>=button->sizeHint().width() && button->visibleRegion().boundingRect().width()==button->width(),message.toStdString().c_str());
+    }
+    for(auto* combo:panel.findChildren<QComboBox*>()) {
+        if(combo->visibleRegion().isEmpty() || combo->isEditable())continue;
+        QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
+        const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
+        const auto message=QString("panel selector fits: %1 [%2], field %3, required %4")
+            .arg(combo->objectName(),combo->currentText()).arg(field.width()).arg(combo->fontMetrics().horizontalAdvance(combo->currentText()));
+        Require(combo->fontMetrics().horizontalAdvance(combo->currentText())<=field.width(),message.toStdString().c_str());
+    }
+    for(auto* label:panel.findChildren<QLabel*>("parameterTitle")) {
+        auto* field=label->parentWidget();
+        if(label->visibleRegion().isEmpty() || !field->property("propertyRow").toBool())continue;
+        auto* row=field->layout();auto* body=row->itemAt(row->count()-1)->widget();
+        Require(body && body->x()>=label->geometry().right()+1,"property names and values occupy separate columns without overlap");
+        Require(field->rect().contains(body->geometry()),"property values remain inside their row");
+        Require(label->heightForWidth(label->width())<=label->height(),"wrapped property names remain fully visible");
+    }
+    auto* scroll=panel.findChild<QScrollArea*>("operationScroll");
+    Require(scroll && scroll->horizontalScrollBarPolicy()==Qt::ScrollBarAlwaysOff,"properties use one vertical scroller");
+    auto* tools=panel.findChild<QToolButton*>("moreOperations");
+    Require(tools && !scroll->isAncestorOf(tools),"tools and business commands stay outside the property scroller");
+    auto* footer=panel.findChild<QWidget*>("businessCommandFooter");int occupied=0;
+    for(auto* child:footer->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->isVisible())occupied=std::max(occupied,child->geometry().bottom()+1);
+    Require(footer->height()-occupied<=footer->layout()->contentsMargins().bottom()+8,"the command footer contains no unused vertical block");
+}
 void CheckWorkbenchV1(TestWindow& window)
 {
     CheckNavigationWidth(window);
@@ -113,6 +149,8 @@ void CheckWorkbenchV1(TestWindow& window)
         hidden->setMinimumHeight(0);
         for(auto* button:roi->findChildren<QPushButton*>())if(button->objectName().startsWith("next_"))
             Require(button->accessibleName()==button->text(),"ROI accessible button names follow their visible labels");
+        auto* tools=roi->findChild<QToolButton*>("moreOperations");
+        Require(tools->menu()->findChild<QAction*>("command_Cancel"),"ROI cancel remains discoverable in the shared tools menu");
     }
     if(auto* surface=window.GetModule("Surface"))if(!surface->GetActions().isEmpty()) {
         window.GetWorkflow().onNavigate("Surface","GlobalAutomatic",{});

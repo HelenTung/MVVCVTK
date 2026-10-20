@@ -438,8 +438,12 @@ QStringList GetBoundParameters(const QString& module, const QString& action)
 }
 QString GetParameterGroup(const QString& module, const QString& key)
 {
+    if(module=="Data" && (key=="originLPS" || key=="directionLPS"))return "高级几何";
+    if(module=="Artifact" && QStringList{"protectionRoi","qualityRoi","timeoutMs","angularMin","threshMin","threshMax","mode","maxCorrection","slabDepth"}.contains(key))return "高级设置";
+    if(module=="Wall" && QStringList{"materialLabels","materialThreshold","coneAngleDegrees","directionCount","boundaryPolicy","maxBoundaryError"}.contains(key))return "高级设置";
     if(module=="Roi" && QStringList{"boxToSource","direction3D","planeToSource","sourceToView","viewToClip","contours","pathMM","sourceToTarget","meshToSource"}.contains(key))return "精确参数";
     if(module=="Roi" && QStringList{"roi","operands","outputMode","targetSource","domainRoi"}.contains(key))return "输入与输出";
+    if(module=="Roi" && QStringList{"group","description","isArchived"}.contains(key))return "更多信息";
     if(module=="Roi")return QStringList{"name","group","description","shape","selectionMode","isArchived"}.contains(key)?"区域信息":"区域几何";
     if(module=="Surface") {
         if(key=="parentGeneration")return "专家设置";

@@ -25,6 +25,7 @@ QMainWindow, QWidget#workbench { background: @canvas; }
 QWidget#workbenchToolbar, QWidget#workbenchNavigation, QWidget#workbenchInput,
 QWidget#objectColumn, QWidget#parameterPages { background: @surface; }
 QWidget#workbenchToolbar, QWidget#objectColumn, QWidget#parameterPages { border-radius: 6px; }
+QWidget#parameterPages, QWidget#parameterPages QWidget { font-family: "Microsoft YaHei UI"; }
 QLabel#currentInputIdentity, QLabel#columnTitle, QLabel#moduleTitle { color: @text; font-weight: 600; }
 QLabel#currentInputGeometry, QLabel#businessInput, QLabel#operationDescription,
 QLabel#moduleNotice, QLabel#selectedObjectSummary { color: @muted; }
@@ -33,7 +34,9 @@ QLabel#businessNext { color: @text; }
 QLabel#businessDisplay { color: @muted; }
 QLabel#businessRecovery, QLabel#commandRequirement { color: @warning; background: @warningSurface; padding: 8px; border-radius: 4px; }
 QLabel#moduleTitle, QLabel#workbenchTitle { font-size: @headingPointspt; font-weight: 600; }
-QLabel#operationTitle, QLabel#parameterTitle { font-weight: 600; }
+QLabel#operationTitle { font-weight: 600; }
+QLabel#parameterTitle { color: @muted; font-weight: 400; }
+QWidget[propertyRow="true"] { border-bottom: 1px solid @subtle; }
 QWidget#viewHeader { background: @surface; }
 QWidget#operationFields, QWidget#sectionFields { background: @surface; }
 QWidget#businessContext { background: @subtle; border-radius: 4px; }
@@ -75,8 +78,8 @@ QTabBar::tab:hover { color: @accent; }
 QTabBar#workspaceTabs::tab { background: @surface; padding: 10px 16px; }
 QTabBar#workspaceTabs::tab:selected { background: @selection; }
 QTabWidget::pane { border: 1px solid @outline; background: @surface; }
-QToolButton[parameterSection="true"] { text-align: left; background: @subtle; border: 0; border-radius: 4px; color: @text; font-weight: 600; padding: 8px; }
-QToolButton[parameterSection="true"]:focus { border: 1px dashed @accent; padding: 7px; }
+QToolButton[parameterSection="true"] { text-align: left; background: @subtle; border: 0; border-radius: 2px; color: @text; font-weight: 600; padding: 4px 6px; }
+QToolButton[parameterSection="true"]:focus { border: 1px dashed @accent; padding: 3px 5px; }
 QPlainTextEdit { border: 1px solid @outline; background: @surface; color: @text; }
 QMenu, QToolTip { background: @surface; color: @text; border: 1px solid @outline; }
 QMenu::item { padding: 8px 24px; }

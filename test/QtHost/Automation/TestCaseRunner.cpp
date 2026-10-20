@@ -489,9 +489,12 @@ void CheckUiAndRecords(TestWindow& window)
     auto* diagnostics=window.findChild<QAction*>("showDiagnostics");
     auto* details=window.findChild<QWidget*>("diagnosticDetails");
     auto* showResults=window.findChild<QToolButton*>("showBusinessStatistics");
+    auto* help=window.GetModule("Data")->findChild<QToolButton*>("showOperationHelp");help->setChecked(true);
     Check(diagnostics && details && details->isHidden() && !window.findChild<QWidget*>("diagnosticBar")
-        && window.GetModule("Data")->findChild<QLabel*>("businessNext")->isVisible(),
-        "module guidance stays visible without a bottom message strip");
+        && window.GetModule("Data")->findChild<QLabel*>("businessNext")->isVisible()
+        && !window.GetModule("Data")->findChild<QLabel*>("businessNext")->text().isEmpty(),
+        "module guidance is available through the visible help control without a bottom message strip");
+    help->setChecked(false);
     const auto compactSize=window.size();
     diagnostics->trigger();Check(Wait([&]{return details->isVisible() && window.size()==compactSize;},3000),"diagnostics expand within the unchanged outer window");
     window.grab().save("diagnostics-expanded.png");showResults->setChecked(false);Check(Wait([&]{return !details->isVisible() && window.size()==compactSize;},3000),"closing diagnostics keeps the prior outer size");
@@ -2781,6 +2784,18 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             }
             QCoreApplication::processEvents();
             if(step["checkViewTextFit"].toBool())CheckViewToolbarText(window);
+            if(step.contains("expectedDpr"))Check(window.devicePixelRatioF()==GetNumber(step,"expectedDpr"),"the capture uses the requested application scale");
+            if(step["checkPanelTextFit"].toBool())CheckModulePanelText(*page);
+            if(step.contains("toolsScreenshot")) {
+                auto* tools=page->findChild<QToolButton*>("moreOperations");auto* menu=tools->menu();
+                menu->popup(tools->mapToGlobal(QPoint(0,tools->height())));QCoreApplication::processEvents();
+                Check(menu->isVisible(),"the shared tools menu is visible");
+                for(auto* action:menu->actions())if(action->isVisible() && !action->isSeparator())
+                    Check(menu->actionGeometry(action).width()>=menu->fontMetrics().horizontalAdvance(action->text())+24,"tool menu text remains complete");
+                Check(menu->grab().save(GetText(step,"toolsScreenshot")),"tools menu screenshot saved");
+                QKeyEvent close(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(menu,&close);
+                Check(!menu->isVisible(),"Escape closes the tools menu");
+            }
             if(step["expectInputElided"].toBool()) {
                 const auto* identity=window.findChild<QLabel*>("currentInputIdentity");const auto input=window.GetSession()->GetImageDescriptor();
                 Check(identity && identity->text().endsWith(QChar(0x2026)),"long input identity yields space with a visible ellipsis");
@@ -2799,9 +2814,18 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 const bool shown=!window.findChild<QWidget*>("parameterPages")->isHidden();
                 if(shown)Check(scroll->height()>=100 && page->rect().contains(QRect(footer->mapTo(page,QPoint()),footer->size()))
                     && page->findChildren<QScrollArea*>().size()==1,"the complete parameter area and current footer fit without nested scrollers");
-                ExportJson(GetText(step,"screenshot")+".layout.json",{{"module",module},{"width",window.width()},{"height",window.height()},
+                QJsonArray propertyGeometry;
+                for(auto* label:page->findChildren<QLabel*>("parameterTitle"))if(label->isVisible()) {
+                    auto* field=label->parentWidget();auto* row=field->layout();auto* body=row->itemAt(row->count()-1)->widget();
+                    propertyGeometry.append(QJsonObject{{"key",field->objectName()},{"fieldWidth",field->width()},
+                        {"labelX",label->x()},{"labelWidth",label->width()},{"valueX",body?body->x():-1},{"valueWidth",body?body->width():-1}});
+                }
+                QJsonArray commandGeometry;
+                for(auto* child:footer->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->isVisible())
+                    commandGeometry.append(QJsonObject{{"name",child->objectName()},{"y",child->y()},{"height",child->height()},{"hint",child->sizeHint().height()}});
+                ExportJson(GetText(step,"screenshot")+".layout.json",{{"module",module},{"width",window.width()},{"height",window.height()},{"devicePixelRatio",window.devicePixelRatioF()},
                     {"columns",QJsonArray{sizes[0],sizes[1],sizes[2]}},{"parametersVisible",shown},{"parameterHeight",scroll->height()},
-                    {"footerHeight",footer->height()},{"scrollMaximum",scroll->verticalScrollBar()->maximum()}});
+                    {"footerHeight",footer->height()},{"scrollMaximum",scroll->verticalScrollBar()->maximum()},{"properties",propertyGeometry},{"commands",commandGeometry}});
             }
             continue;
         }
@@ -2857,7 +2881,15 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             else window.GetWorkflow().onNavigate(module,parameterAction,params);
             QCoreApplication::processEvents();panel->Observe();
             QPointer<QPushButton> button;
-            const bool available=Wait([&]{panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");return button && button->isVisible() && button->isEnabled();},timeout);
+            QPointer<QAction> nextCommand;
+            const bool available=Wait([&]{
+                panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");
+                if(control=="nextButton") {
+                    auto* tools=panel->findChild<QToolButton*>("moreOperations");nextCommand=tools->menu()->findChild<QAction*>("nextMenu_"+action);
+                    return tools->isVisible() && tools->isEnabled() && nextCommand && nextCommand->isVisible() && nextCommand->isEnabled();
+                }
+                return button && button->isVisible() && button->isEnabled();
+            },timeout);
             if(!available)std::cout << "CONTROL BLOCKED: " << module.toStdString() << "." << action.toStdString()
                 << " tooltip=" << (button ? button->toolTip().toStdString() : "missing control") << " state="
                 << QJsonDocument(panel->GetObservedState()).toJson(QJsonDocument::Compact).toStdString() << std::endl;
@@ -2865,7 +2897,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             if(step["expectPrimaryAction"].isString())Check(button->property("businessAction").toString()==step["expectPrimaryAction"].toString(),"stage primary matches the planned business phase");
             id=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
             std::cout<<"PRIMARY CLICK: "<<module.toStdString()<<"."<<action.toStdString()<<" record="<<id<<std::endl;
-            button->click();
+            if(nextCommand)nextCommand->trigger();else button->click();
             std::cout<<"PRIMARY RETURN: "<<module.toStdString()<<"."<<action.toStdString()<<std::endl;
             const bool dispatched=Wait([&]{return !window.GetRecords().GetRecord(id).isEmpty();},timeout);
             if(!dispatched)std::cerr<<"PRIMARY DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
