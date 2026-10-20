@@ -168,8 +168,11 @@ bool GetFailedFrameWakeValid()
     return f.frames.GetSceneStates()[0].sceneEpoch == 2
         && !f.views[0].GetRenderNeeded() && !f.views[1].GetRenderNeeded();
 }
-bool GetInputTransitionBarrierValid(const bool changesData)
+enum class TransitionExit { Complete, Failed, Cancelled, Stop, Detach };
+bool GetInputTransitionBarrierValid(const bool changesData,
+    const TransitionExit exit = TransitionExit::Complete)
 {
+    const bool detachesPending = exit == TransitionExit::Detach;
     const auto check = [](bool condition, const char* reason) {
         if (!condition) std::cerr << "Input transition barrier: " << reason << '\n';
         return condition;
@@ -234,14 +237,20 @@ bool GetInputTransitionBarrierValid(const bool changesData)
     if (!primary || primary->data->self != target) return false;
     const auto binding = primary->binding->revision;
     setInput(1, target, binding);
+    auto preparingView = std::static_pointer_cast<ViewProbe>(f.views[0].app.view);
+    preparingView->state.isPresentationPending = true;
     (void)f.updates[1]->SetRenderNeeded();
     FeatureSceneDelta delta;
     delta.viewIds = {"0", "1"};
     delta.requestId = 77;
-    if (!coordinator.Enqueue("transition-test", delta)) return false;
+    const auto attachment = std::make_shared<std::atomic<bool>>(true);
+    if (!coordinator.Enqueue("transition-test", delta, 1, attachment)) return false;
     int completions = 0;
     bool completed = false;
     if (!coordinator.SendDisplayComplete([&]() -> std::optional<bool> {
+        if (!attachment->load()) return false;
+        if (!preparingView->state.isPresentationPending
+            && preparingView->state.hasPresentationFailed) return false;
         const auto scenes = f.frames.GetSceneStates();
         if (scenes.size() != 2) return false;
         for (const auto& scene : scenes) {
@@ -251,20 +260,20 @@ bool GetInputTransitionBarrierValid(const bool changesData)
         return true;
     }, [&](bool succeeded) { ++completions; completed = succeeded; })) return false;
     for (int attempt = 0; attempt < 2; ++attempt) {
-        if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed,
-                "mixed input must fail before scene commit")) return false;
+        if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Deferred,
+                "valid inputs awaiting group convergence must defer before scene commit")) return false;
         const auto scenes = f.frames.GetSceneStates();
         if (!check(coordinator.GetCommittedEpoch() == 1 && completions == 0
             && scenes.size() == 2
             && f.views[0].pendingRenderEpoch == 1 && f.views[1].pendingRenderEpoch == 1
             && f.views[0].GetRenderNeeded() && f.views[1].GetRenderNeeded()
             && appliedIntents.size() == 1 && appliedIntents[0].delta.requestId == 77,
-            "failure lost dirty, pending render, intent or completion boundary")) return false;
+            "deferral lost dirty, pending render, intent or completion boundary")) return false;
         for (const auto& scene : scenes) {
             if (!check(scene.sceneEpoch == 1 && scene.presentation
                 && scene.presentation->dataRevision == original->data->self
                 && scene.presentation->bindingRevision == original->binding->revision,
-                "failed stage exposed a partial scene")) return false;
+                "deferred stage exposed a partial scene")) return false;
         }
         const auto render = f.frames.SendFrameRender({{"0", "1"}, .001}, [] { return true; });
         if (!check(render.status == HostRenderStatus::Deferred
@@ -274,11 +283,63 @@ bool GetInputTransitionBarrierValid(const bool changesData)
     if (!check(f.updates[0]->notifications == 0 && f.updates[1]->notifications == 1,
         "rollback generated work without a new event")) return false;
 
+    if (exit == TransitionExit::Failed || exit == TransitionExit::Cancelled) {
+        preparingView->state.isPresentationPending = false;
+        preparingView->state.hasPresentationFailed = true;
+        return check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed
+            && completions == 1 && !completed && coordinator.GetCommittedEpoch() == 1
+            && coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed
+            && completions == 1 && data->GetPrimaryImage()->data->self == target,
+            "terminal candidate retained deferred completion or reverted committed data");
+    }
+
+    // 真正失败或已取消的候选没有等待理由；不能用另一个 pending 位掩盖失败。
+    preparingView->state.hasPresentationFailed = true;
+    if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed,
+        "failed or cancelled candidate was hidden by deferral")) return false;
+    preparingView->state.hasPresentationFailed = false;
+    preparingView->state.isPresentationPending = false;
+    if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed,
+        "stable conflicting inputs were accepted as a transition")) return false;
+    preparingView->state.isPresentationPending = true;
+    // 暂缓的组先于后续 View 被采样，也不能遮蔽缺相机和非法图引用。
+    f.contexts[1]->hasCamera = false;
+    if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed,
+        "preparing input hid a missing camera")) return false;
+    f.contexts[1]->hasCamera = true;
+    setInput(1, {data->CreateDataEntityId(), 1}, binding);
+    if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed,
+        "preparing input hid an invalid graph reference")) return false;
+    setInput(1, target, binding);
+    if (changesData) {
+        for (auto& view : f.views) view.config.syncPolicy = HostViewSyncPolicy::ExplicitInputs;
+        if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Failed,
+            "preparing input hid incompatible explicit sources")) return false;
+        for (auto& view : f.views) view.config.syncPolicy = HostViewSyncPolicy::SamePrimary;
+    }
+    if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Deferred,
+        "negative probes lost the retryable transition")) return false;
+    if (exit == TransitionExit::Stop) {
+        coordinator.Stop();
+        return check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Stopped
+            && completions == 1 && !completed && coordinator.GetCommittedEpoch() == 1
+            && f.contexts[0]->renderCount == 0 && f.contexts[1]->renderCount == 0
+            && data->GetPrimaryImage()->data->self == target,
+            "Stop left a deferred completion or reverted committed business data");
+    }
+    if (detachesPending) {
+        attachment->store(false);
+        if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Deferred
+            && completions == 1 && !completed,
+            "detached owner retained a deferred display completion")) return false;
+    }
+
     // 用明确的新完成事件推进另一 View，不靠 sleep 或持续置脏促成恢复。
     setInput(0, target, binding);
+    preparingView->state.isPresentationPending = false;
     (void)f.updates[0]->SetRenderNeeded();
     if (!check(coordinator.SendUpdates() == HostFrameCoordinator::FlushStatus::Completed
-        && coordinator.GetCommittedEpoch() == 2 && completions == 1 && completed
+        && coordinator.GetCommittedEpoch() == 2 && completions == 1 && completed == !detachesPending
         && f.frames.GetSceneStates().size() == 2
         && !f.views[0].GetRenderNeeded() && !f.views[1].GetRenderNeeded(),
         "new work did not commit the complete group exactly once")) return false;
@@ -467,6 +528,10 @@ int main(int argc, char** argv)
     check(GetFailedFrameWakeValid(), "failed frame retains changes without self-waking and resumes on new work");
     check(GetInputTransitionBarrierValid(false), "binding transition rejects partial frames and recovers on new work");
     check(GetInputTransitionBarrierValid(true), "data transition rejects partial frames and recovers on new work");
+    check(GetInputTransitionBarrierValid(true, TransitionExit::Failed), "failed candidate terminates a deferred display request exactly once");
+    check(GetInputTransitionBarrierValid(true, TransitionExit::Cancelled), "cancelled candidate terminates a deferred display request exactly once");
+    check(GetInputTransitionBarrierValid(true, TransitionExit::Stop), "Stop cancels a deferred input transition exactly once");
+    check(GetInputTransitionBarrierValid(true, TransitionExit::Detach), "Detach cancels deferred display ownership without blocking convergence");
     check(GetRenderRetryValid(), "render retry preserves new dirty and completed views");
     check(GetStoppedStageValid(), "stopped view cannot reappear from staged projection");
     check(GetProjectionReuseValid(), "stable projection refreshes independent state and samples feature IDs once");
