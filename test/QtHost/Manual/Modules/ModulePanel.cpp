@@ -40,8 +40,6 @@
 #include <QToolButton>
 #include <QScrollBar>
 #include <QTabWidget>
-#include <QTabBar>
-#include <QStackedWidget>
 #include <QTimer>
 #include <atomic>
 #include <future>
@@ -65,19 +63,20 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     auto* heading = new QHBoxLayout;
     auto* title = new QLabel(GetDisplayName(), this); title->setObjectName("moduleTitle"); title->setWordWrap(true); heading->addWidget(title,1);
     m_help = new QToolButton(this); m_help->setText("使用说明"); m_help->setToolTip("展开当前模块的用途与使用说明。"); m_help->setCheckable(true); m_help->setObjectName("showOperationHelp"); heading->addWidget(m_help); layout->addLayout(heading);
-    m_noticeLabel = new QLabel(this); m_noticeLabel->setObjectName("moduleNotice"); m_noticeLabel->setWordWrap(true); m_noticeLabel->hide(); layout->addWidget(m_noticeLabel);
+    m_noticeLabel = new QLabel(this); m_noticeLabel->setObjectName("moduleNotice"); m_noticeLabel->setWordWrap(true); m_noticeLabel->hide();
     connect(m_help,&QToolButton::toggled,this,[this](bool visible){
         m_noticeLabel->setVisible((visible || m_entries.empty()) && !m_notice.isEmpty());
-        if(m_name=="Roi" && (m_parameterAction=="Begin" || m_parameterAction=="SetDraft")) {
-            m_operationTitle->setVisible(visible); m_operationDescription->setVisible(visible);
-        }
+        m_hasRefreshed=false;RefreshWorkflow();
     });
     m_businessStage = new QLabel(this); m_businessStage->setObjectName("businessStage"); m_businessStage->setWordWrap(true); layout->addWidget(m_businessStage);
+    m_feedback=new QLabel(this);m_feedback->setObjectName("moduleFeedback");m_feedback->setWordWrap(true);
+    m_feedback->setTextFormat(Qt::PlainText);m_feedback->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);
+    m_feedback->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);m_feedback->hide();layout->addWidget(m_feedback);
     m_businessSource = new QLabel(this); m_businessSource->setObjectName("businessInput"); m_businessSource->setWordWrap(true);
     m_businessDisplay = new QLabel(this);m_businessDisplay->setObjectName("businessDisplay");m_businessDisplay->setWordWrap(true);m_businessDisplay->hide();
     m_businessNext = new QLabel(this); m_businessNext->setObjectName("businessNext"); m_businessNext->setWordWrap(true);
     auto* commandFooter=new QWidget(this);commandFooter->setObjectName("businessCommandFooter");
-    auto* footerLayout=new QVBoxLayout(commandFooter);footerLayout->setContentsMargins(0,10,0,0);footerLayout->setSpacing(6);
+    auto* footerLayout=new QVBoxLayout(commandFooter);footerLayout->setContentsMargins(0,8,0,0);footerLayout->setSpacing(6);
     m_primary = new QPushButton(commandFooter); m_primary->setObjectName("businessPrimary"); m_primary->setProperty("primaryCommand",true); m_primary->setMinimumHeight(42); footerLayout->addWidget(m_primary);
     m_executionMessage = new QLabel(commandFooter); m_executionMessage->setObjectName("businessRecovery"); m_executionMessage->setWordWrap(true); m_executionMessage->hide(); footerLayout->addWidget(m_executionMessage);
     m_viewReport=new QPushButton("查看结果明细",commandFooter);m_viewReport->setObjectName("viewBusinessReport");m_viewReport->hide();footerLayout->addWidget(m_viewReport);
@@ -92,28 +91,26 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
         if (!action.isEmpty()) SendBusinessAction(action,usesOutput);
         } catch(const std::exception& e){SetState({{"inputError",QString::fromUtf8(e.what())}});}
     });
-    // 计算/停止是命令按钮，标签栏只切换参数分组，不执行命令。
+    // 计算/停止是命令按钮，下拉框只选择参数，不执行业务命令。
     m_quickActions = new QWidget(this); m_quickActions->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     m_quickLayout = new QGridLayout(m_quickActions); m_quickLayout->setContentsMargins(0,0,0,0); m_quickLayout->setSpacing(6);
     auto* navigation = new QHBoxLayout;
-    m_parameterTabs = new QTabBar(this); m_parameterTabs->setObjectName("parameterTabs");
-    navigation->addWidget(new QLabel("任务参数", this),1);
-    m_parameterTabs->setExpanding(false); m_parameterTabs->setUsesScrollButtons(true); m_parameterTabs->setElideMode(Qt::ElideNone); m_parameterTabs->setDrawBase(false);
-    m_moreOperations = new QToolButton(this); m_moreOperations->setObjectName("moreOperations"); m_moreOperations->setText("选择操作");
+    m_parameterTabs = new QComboBox(this); m_parameterTabs->setObjectName("parameterTabs");m_parameterTabs->setAccessibleName("当前操作");
+    m_parameterTabs->setMinimumContentsLength(8);m_parameterTabs->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_moreOperations = new QToolButton(this); m_moreOperations->setObjectName("moreOperations"); m_moreOperations->setText("工具");m_moreOperations->setAccessibleName("操作工具");
     m_moreOperations->setPopupMode(QToolButton::InstantPopup); m_operationMenu = new QMenu(m_moreOperations); m_operationMenu->setToolTipsVisible(true); m_moreOperations->setMenu(m_operationMenu);
-    navigation->addWidget(m_moreOperations); layout->addLayout(navigation);
-    m_taskTabs=new QTabBar(this);m_taskTabs->setObjectName("businessTaskTabs");m_taskTabs->setExpanding(false);m_taskTabs->setUsesScrollButtons(true);
+    m_taskTabs=new QComboBox(this);m_taskTabs->setObjectName("businessTaskTabs");m_taskTabs->setAccessibleName("操作分组");
     const QStringList taskGroups=m_name=="Roi"?QStringList{"创建","编辑","运算","管理"}:m_name=="Alignment"?QStringList{"对齐","几何拟合","表面偏差","尺寸/形位","报告"}:QStringList{};
-    for(const auto& group:taskGroups){m_taskTabs->addTab(group);if(m_taskGroup.isEmpty())m_taskGroup=group;}
-    m_taskTabs->setVisible(!taskGroups.isEmpty());layout->addWidget(m_taskTabs);layout->addWidget(m_parameterTabs);
-    connect(m_taskTabs,&QTabBar::currentChanged,this,[this](int index) {
-        if(index<0)return;m_taskGroup=m_taskTabs->tabText(index);
+    for(const auto& group:taskGroups){m_taskTabs->addItem(group);if(m_taskGroup.isEmpty())m_taskGroup=group;}
+    m_taskTabs->setVisible(!taskGroups.isEmpty());navigation->addWidget(m_taskTabs);navigation->addWidget(m_parameterTabs,1);navigation->addWidget(m_moreOperations);layout->addLayout(navigation);
+    connect(m_taskTabs,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index) {
+        if(index<0)return;m_taskGroup=m_taskTabs->itemText(index);
         auto action=m_taskSelections.value(m_taskGroup);
         if(action.isEmpty())for(const auto& name:m_actionOrder)if(GetActionGroup(name)==m_taskGroup && m_commandRows.count(name)){action=name;break;}
         if(!action.isEmpty())SelectAction(action);else {m_hasRefreshed=false;RefreshWorkflow();}
     });
-    connect(m_parameterTabs, &QTabBar::currentChanged, this, [this](int index) {
-        if (index >= 0) SelectAction(m_parameterTabs->tabData(index).toString());
+    connect(m_parameterTabs, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (index >= 0) SelectAction(m_parameterTabs->itemData(index).toString());
     });
     m_operationTitle = new QLabel(this); m_operationTitle->setObjectName("operationTitle"); m_operationTitle->setWordWrap(true);
     m_operationDescription = new QLabel(this); m_operationDescription->setObjectName("operationDescription"); m_operationDescription->setWordWrap(true);
@@ -174,7 +171,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     });
     m_parameterScroll = new QScrollArea(this); m_parameterScroll->setObjectName("operationScroll");
     m_parameterScroll->setWidgetResizable(true); m_parameterScroll->setFrameShape(QFrame::NoFrame);
-    m_parameterScroll->setMinimumHeight(40);
+    m_parameterScroll->setMinimumHeight(100);m_parameterScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* operations = new QWidget(m_parameterScroll); operations->setObjectName("operationFields"); m_actionLayout = new QVBoxLayout(operations);
     m_actionLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_actionLayout->setContentsMargins(0,0,8,0); m_actionLayout->setSpacing(12); m_actionLayout->setAlignment(Qt::AlignTop);
@@ -182,10 +179,12 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     auto* businessContext = new QWidget(operations); businessContext->setObjectName("businessContext");
     auto* contextLayout = new QVBoxLayout(businessContext); contextLayout->setContentsMargins(8,8,8,8); contextLayout->setSpacing(6);
     contextLayout->addWidget(m_businessSource); contextLayout->addWidget(m_businessNext); contextLayout->addWidget(m_businessDisplay);
-    m_actionLayout->addWidget(businessContext);
+    m_actionLayout->addWidget(m_noticeLabel);m_actionLayout->addWidget(businessContext);
     m_actionLayout->addWidget(m_operationTitle);m_actionLayout->addWidget(m_operationDescription);
     m_parameterScroll->setWidget(operations); layout->addWidget(m_parameterScroll,1);
-    m_commandArea = new QStackedWidget(this); m_commandArea->setObjectName("operationCommands");
+    // 仅当前命令页进入布局。Qt 5 的堆叠布局会把隐藏页的最小高度一起计入。
+    m_commandArea = new QWidget(this); m_commandArea->setObjectName("operationCommands");
+    m_commandLayout=new QVBoxLayout(m_commandArea);m_commandLayout->setContentsMargins(0,0,0,0);m_commandLayout->setSpacing(0);
     m_commandArea->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);footerLayout->addWidget(m_commandArea);
     m_actionLayout->addWidget(m_quickActions);layout->addWidget(commandFooter);
     connect(m_scene, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
@@ -197,6 +196,14 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     });
 }
 QWidget* ModulePanel::GetBrowser() const { return m_browser; }
+void ModulePanel::SetFeedback(const QString& text,const char* tone)
+{
+    m_feedback->setText(text);m_feedback->setAccessibleName(text);m_feedback->setToolTip(text);m_feedback->setVisible(!text.isEmpty());
+    if(m_feedback->property("feedbackTone").toString()!=tone) {
+        m_feedback->setProperty("feedbackTone",tone);m_feedback->style()->unpolish(m_feedback);m_feedback->style()->polish(m_feedback);
+    }
+}
+QString ModulePanel::GetFeedback() const { return m_feedback->text(); }
 ModulePanel::~ModulePanel(){CancelReadTasks();m_readTasks.clear();m_statistics->Cancel();delete m_statistics;}
 void ModulePanel::StartReadTask(std::uint64_t id, QString status,
     std::function<QJsonObject(const ReadTaskContext&)> work, std::function<void()> onSucceeded)
@@ -302,8 +309,8 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
     ParameterEditor* form = nullptr;
     if (!defaults.isEmpty()) { form = new ParameterEditor(m_name, name, {}, defaults, defaults, this); m_forms[name] = form; }
     if (form && form->GetHasInputs()) {
-        auto* card = new QGroupBox(GetParameterSectionText(m_name, name), m_parameterScroll); card->setObjectName("card_" + name); card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-        auto* layout = new QVBoxLayout(card); layout->setSpacing(10); layout->setContentsMargins(12,18,12,12);
+        auto* card = new QWidget(m_parameterScroll); card->setObjectName("card_" + name); card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+        auto* layout = new QVBoxLayout(card); layout->setSpacing(6); layout->setContentsMargins(0,0,0,0);
         form->onEdited = [this, name] {
             if(name=="GraphInfo")m_sourceRoot.clear();
             m_parameterAction=name;
@@ -318,23 +325,11 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         requirement->setMinimumWidth(0); requirement->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
         commandLayout->addWidget(requirement); m_requirements[name] = requirement;
         auto* footer = new QHBoxLayout; footer->setContentsMargins(0,0,0,0); commandLayout->addLayout(footer);
-        auto* files = new QToolButton(commands); files->setText("参数文件"); files->setPopupMode(QToolButton::InstantPopup);
-        auto* menu = new QMenu(files); files->setMenu(menu);
-        menu->addAction("导入参数", this, [this, name] {
-            const auto path = QFileDialog::getOpenFileName(this, "导入参数", {}, "JSON (*.json)"); if (path.isEmpty()) return;
-            try { SetParameters(name, LoadJson(path)); } catch (const std::exception& e) { SetState({{"inputError", QString::fromUtf8(e.what())}}); }
-        });
-        menu->addAction("导出参数", this, [this, name] {
-            const auto path = QFileDialog::getSaveFileName(this, "导出参数", {}, "JSON (*.json)"); if (path.isEmpty()) return;
-            try { ExportJson(path, m_forms.at(name)->GetValue().toObject()); } catch (const std::exception& e) { SetState({{"inputError", QString::fromUtf8(e.what())}}); }
-        });
-        menu->addAction("恢复默认", this, [this, name] { SetParameters(name, m_entries.at(name).defaults); });
         button->setProperty("primaryCommand",false);
-        footer->addWidget(files); footer->addStretch(); footer->addWidget(button);
-        m_commandArea->addWidget(commands); m_commandRows[name] = commands;
+        footer->addWidget(button);commands->hide();m_commandRows[name] = commands;
         m_actionLayout->addWidget(card); m_cards[name] = card;
         const QSignalBlocker blocker(m_parameterTabs);
-        const auto index = m_parameterTabs->addTab(GetParameterSectionText(m_name, name)); m_parameterTabs->setTabData(index, name);
+        m_parameterTabs->addItem(GetActionText(m_name, name),name);
         if (m_parameterAction.isEmpty()) m_parameterAction = name;
     } else { m_cards[name] = button; if (form) form->hide(); }
     if (m_currentAction.isEmpty()) m_currentAction = name;
@@ -640,7 +635,7 @@ void ModulePanel::RefreshWorkflow()
     QStringList pages;
     if(m_taskTabs->count()) {
         const auto group=GetActionGroup(m_parameterAction);
-        const auto tab=[&]{for(int i=0;i<m_taskTabs->count();++i)if(m_taskTabs->tabText(i)==group)return i;return -1;}();
+        const auto tab=m_taskTabs->findText(group);
         if(tab>=0){const QSignalBlocker blocker(m_taskTabs);m_taskGroup=group;m_taskTabs->setCurrentIndex(tab);m_taskSelections[group]=m_parameterAction;}
         for(const auto& name:m_actionOrder)if(GetActionGroup(name)==m_taskGroup && m_commandRows.count(name))pages.append(name);
     } else for (const auto& name : primaryPages.value(m_name)) if (m_commandRows.count(name)) pages.append(name);
@@ -650,22 +645,20 @@ void ModulePanel::RefreshWorkflow()
     {
         const QSignalBlocker blocker(m_parameterTabs);
         QStringList previous;
-        for (int i = 0; i < m_parameterTabs->count(); ++i) previous.append(m_parameterTabs->tabData(i).toString());
+        for (int i = 0; i < m_parameterTabs->count(); ++i) previous.append(m_parameterTabs->itemData(i).toString());
         if (previous.size() != pages.size() || !std::equal(previous.cbegin(), previous.cend(), pages.cbegin())) {
-            while (m_parameterTabs->count()) m_parameterTabs->removeTab(0);
+            m_parameterTabs->clear();
             for (const auto& name : pages) {
-                auto title = GetParameterSectionText(m_name,name); if (title.endsWith("参数")) title.chop(2);
-                const auto index = m_parameterTabs->addTab(title); m_parameterTabs->setTabData(index,name);
-                m_parameterTabs->setTabToolTip(index,GetActionText(m_name,name));
+                m_parameterTabs->addItem(GetActionText(m_name,name),name);
+                m_parameterTabs->setItemData(m_parameterTabs->count()-1,GetActionDescription(m_name,name),Qt::ToolTipRole);
             }
         }
         int active = -1;
         for (int i = 0; i < m_parameterTabs->count(); ++i) {
-            const auto name = m_parameterTabs->tabData(i).toString();
-            m_parameterTabs->setTabEnabled(i, !closing);
+            const auto name = m_parameterTabs->itemData(i).toString();
             if (name == m_parameterAction) active = i;
         }
-        m_parameterTabs->setCurrentIndex(active); m_parameterTabs->setVisible(!pages.isEmpty());
+        m_parameterTabs->setCurrentIndex(active);m_parameterTabs->setEnabled(!closing); m_parameterTabs->setVisible(!pages.isEmpty());
     }
     static const QHash<QString, QStringList> quickCommands{
         {"Data", {"Descriptor"}}, {"View", {"State"}}, {"Roi", {"Commit", "Cancel"}},
@@ -676,8 +669,6 @@ void ModulePanel::RefreshWorkflow()
     QStringList visible;
     for (const auto& name : quickCommands.value(m_name))
         if (m_entries.count(name) && m_cards.at(name) == m_buttons.at(name) && name!=m_primary->property("businessAction").toString() && !m_nextActionIds.contains(name)) visible.append(name);
-    if(m_taskTabs->count())for(const auto& name:m_actionOrder)
-        if(GetActionGroup(name)==m_taskGroup && m_cards.at(name)==m_buttons.at(name) && name!=m_primary->property("businessAction").toString() && !m_nextActionIds.contains(name) && !visible.contains(name))visible.append(name);
     if (visible.size() != m_visibleActions.size() || !std::equal(visible.cbegin(), visible.cend(), m_visibleActions.cbegin())) {
         const TestTiming layoutTiming(m_context.records, "Layout.Rebuild." + m_name);
         while (auto* item = m_quickLayout->takeAt(0)) delete item;
@@ -705,6 +696,7 @@ void ModulePanel::RefreshWorkflow()
         }
         // 按业务能力禁用命令并说明原因；参数页仍可浏览，后台完成后自动恢复。
         button->setEnabled(!m_context.workflow.GetIsClosing() && reason.isEmpty());
+        if(!button->isEnabled() && !m_primary->isEnabled() && m_commandRows.count(name))button->hide();
         button->setToolTip(GetActionDescription(m_name, name) + (reason.isEmpty() ? "" : "\n" + reason));
         button->setProperty("selectedOperation", name == m_currentAction);
         if (m_name == "Crop" && (name == "KeepInside" || name == "RemoveInside" || name == "PositionOnly")) {
@@ -712,9 +704,13 @@ void ModulePanel::RefreshWorkflow()
             button->setChecked(state["isActive"].toBool() && state["editMode"].toInt() == (name == "KeepInside" ? 1 : name == "RemoveInside" ? 2 : 0));
         }
     }
-    if (m_commandRows.count(m_parameterAction)) {
-        m_commandArea->setCurrentWidget(m_commandRows.at(m_parameterAction)); m_commandArea->show();
-    } else m_commandArea->hide();
+    auto* commands=m_commandRows.count(m_parameterAction)?m_commandRows.at(m_parameterAction):nullptr;
+    if(commands!=m_currentCommands) {
+        if(m_currentCommands){m_commandLayout->removeWidget(m_currentCommands);m_currentCommands->hide();}
+        m_currentCommands=commands;
+        if(commands){m_commandLayout->addWidget(commands);commands->show();}
+    }
+    m_commandArea->setVisible(commands!=nullptr);m_commandArea->updateGeometry();
     m_quickActions->setVisible(!visible.isEmpty());
     m_moreOperations->setVisible(!m_entries.empty());
     m_noticeLabel->setVisible((m_help->isChecked() || m_entries.empty()) && !m_notice.isEmpty());
@@ -726,11 +722,17 @@ void ModulePanel::RefreshWorkflow()
         m_operationDescription->setText("结果：输入 A − 输入 B。A 为本次编辑草稿或明确所选 ROI；B 为下方操作数，提交后输出目标固定。\n输出："+params["outputMode"].toString());
     }
     // 区域编辑的名称已在标签页中显示；专门运算的定义和前置条件仍保持可见。
-    const bool compactRoi=m_name=="Roi" && (m_parameterAction=="Begin" || m_parameterAction=="SetDraft") && !m_help->isChecked();
-    m_operationTitle->setVisible(!m_parameterAction.isEmpty() && !compactRoi); m_operationDescription->setVisible(!m_parameterAction.isEmpty() && !compactRoi);
+    m_operationTitle->hide();m_operationDescription->setVisible(!m_parameterAction.isEmpty() && (m_help->isChecked() || (m_name=="Roi" && m_parameterAction=="Difference")));
     // QMenu::clear 不负责销毁子菜单；刷新前显式回收原分类容器。
     const auto oldMenus = m_operationMenu->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
     m_operationMenu->clear(); qDeleteAll(oldMenus);
+    if(m_forms.count(m_parameterAction)) {
+        const auto name=m_parameterAction;
+        auto* parameters=m_operationMenu->addMenu("当前操作参数");
+        parameters->addAction("导入参数…",this,[this,name]{const auto path=QFileDialog::getOpenFileName(this,"导入参数",{},"JSON (*.json)");if(path.isEmpty())return;try{SetParameters(name,LoadJson(path));}catch(const std::exception& e){SetState({{"inputError",QString::fromUtf8(e.what())}});}});
+        parameters->addAction("导出参数…",this,[this,name]{const auto path=QFileDialog::getSaveFileName(this,"导出参数",{},"JSON (*.json)");if(path.isEmpty())return;try{ExportJson(path,m_forms.at(name)->GetValue().toObject());}catch(const std::exception& e){SetState({{"inputError",QString::fromUtf8(e.what())}});}});
+        parameters->addAction("恢复默认",this,[this,name]{SetParameters(name,m_entries.at(name).defaults);});m_operationMenu->addSeparator();
+    }
     QMap<QString, QMenu*> menus;
     for (const auto& name : m_actionOrder) {
 
@@ -956,8 +958,10 @@ void ModulePanel::SetState(const QJsonObject& value)
         if (result.contains("mask") || result.contains("samples") || result.contains("residuals")) m_lastResult = result;
     }
     if (!value.contains("operationId") && !value.contains("inputError")) m_observed = value;
-    if (value.contains("inputError") && onMessage)
-        onMessage(GetDisplayName() + " ｜ 参数错误：" + value["inputError"].toString());
+    if (value.contains("inputError")) {
+        const auto message=GetDisplayName() + " ｜ 参数错误：" + value["inputError"].toString();
+        if(onMessage)onMessage(message);SetFeedback(message,"error");
+    }
     if (!value.contains("operationId") && (value["progress"].isDouble() || value["progressPercent"].isDouble())) {
         if (!value["requestId"].isString()) return;
         const double progress = value["progressPercent"].isDouble() ? value["progressPercent"].toDouble() : value["progress"].toDouble() * 100.0;

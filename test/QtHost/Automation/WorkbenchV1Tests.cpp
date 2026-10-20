@@ -11,12 +11,33 @@
 #include <QScrollArea>
 #include <QMouseEvent>
 #include <QKeyEvent>
+#include <QToolButton>
+#include <QSplitter>
+#include <QSettings>
+#include <QApplication>
 #include <stdexcept>
 #include <cmath>
 namespace Manual {
 namespace { void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);} }
 void CheckWorkbenchV1(TestWindow& window)
 {
+    auto* split=window.findChild<QSplitter*>("workbenchSplit");
+    auto* objects=window.findChild<QToolButton*>("toggleObjectColumn");
+    auto* parameters=window.findChild<QToolButton*>("toggleParameterColumn");
+    auto* viewArea=window.findChild<QWidget*>("viewArea");
+    objects->setChecked(true);parameters->setChecked(true);QCoreApplication::processEvents();
+    const auto originalSizes=split->sizes();const int originalCanvas=viewArea->width();
+    for(const auto& entry:{std::pair<int,QToolButton*>{0,objects},{2,parameters}}) {
+        entry.second->setFocus();
+        QKeyEvent press(QEvent::KeyPress,Qt::Key_Space,Qt::NoModifier),release(QEvent::KeyRelease,Qt::Key_Space,Qt::NoModifier);
+        QApplication::sendEvent(entry.second,&press);QApplication::sendEvent(entry.second,&release);QCoreApplication::processEvents();
+        Require(split->widget(entry.first)->isHidden() && viewArea->width()>originalCanvas,"keyboard collapse gives the released sidebar width to the views");
+        Require(window.focusWidget()==entry.second,"collapsed sidebar leaves logical keyboard focus on its expand button");
+        QSettings preferences(QCoreApplication::applicationDirPath()+"/QtFeatureWorkbench.ini",QSettings::IniFormat);
+        Require(!preferences.value(entry.first==0?"layout/objectsVisible":"layout/parametersVisible").toBool(),"collapsed state is written to persistent preferences");
+        QApplication::sendEvent(entry.second,&press);QApplication::sendEvent(entry.second,&release);QCoreApplication::processEvents();
+        Require(split->widget(entry.first)->isVisible() && std::abs(split->sizes()[entry.first]-originalSizes[entry.first])<=2,"keyboard expansion restores the last sidebar width");
+    }
     ParameterEditor optional("Roi","SetDraft","boxToSource",QJsonValue(),QJsonValue());
     int optionalEdits=0;optional.onEdited=[&]{++optionalEdits;};
     QJsonArray identity;for(int i=0;i<16;++i)identity.append(i%5==0?1:0);
@@ -27,13 +48,20 @@ void CheckWorkbenchV1(TestWindow& window)
     Require(optional.GetValue()==identity,"optional matrix toggle restores its actual default matrix");
     const auto count=window.GetRecords().GetRecords()["records"].toArray().size();
     if(auto* roi=window.GetModule("Roi"))if(!roi->GetActions().isEmpty()) {
-        auto* tabs=roi->findChild<QTabBar*>("businessTaskTabs");Require(tabs && tabs->count()==4,"ROI has creation, edit, operation and management tasks");
+        auto* tabs=roi->findChild<QComboBox*>("businessTaskTabs");Require(tabs && tabs->count()==4,"ROI has creation, edit, operation and management tasks");
         window.GetWorkflow().onNavigate("Roi","Begin",{});
         for(int i=0;i<4;++i){tabs->setCurrentIndex(i);QCoreApplication::processEvents();Require(tabs->currentIndex()==i,"ROI task selection is stable after workflow refresh");}
         roi->SelectAction("Difference");auto* form=roi->GetParameterEditor("Difference");
         Require(!form->GetField("operands")->isHidden() && form->GetField("radius")->isHidden(),"difference offers operands without unrelated morphology parameters");
         auto* primary=roi->findChild<QPushButton*>("businessPrimary");auto* scroll=roi->findChild<QScrollArea*>("operationScroll");
         Require(primary->parentWidget()->objectName()=="businessCommandFooter" && !scroll->isAncestorOf(primary),"ROI save remains outside the parameter scroller");
+        const auto footerHeight=primary->parentWidget()->height();auto* hidden=roi->findChild<QWidget*>("commands_SurfaceInterior");
+        Require(hidden && hidden->isHidden(),"the command height regression uses an existing hidden mode");
+        hidden->setMinimumHeight(1200);QCoreApplication::processEvents();
+        Require(primary->parentWidget()->height()==footerHeight && scroll->height()>=100,"a hidden command page cannot reserve footer height or crush the parameter area");
+        hidden->setMinimumHeight(0);
+        for(auto* button:roi->findChildren<QPushButton*>())if(button->objectName().startsWith("next_"))
+            Require(button->accessibleName()==button->text(),"ROI accessible button names follow their visible labels");
     }
     if(auto* surface=window.GetModule("Surface"))if(!surface->GetActions().isEmpty()) {
         window.GetWorkflow().onNavigate("Surface","GlobalAutomatic",{});

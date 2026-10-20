@@ -8,10 +8,11 @@
 #include <QMainWindow>
 #include <QLabel>
 #include <QStackedWidget>
-#include <QTabBar>
+#include <QFile>
 #include <vtkGenericOpenGLRenderWindow.h>
 class QVTKOpenGLNativeWidget;
 class QGridLayout;
+class QAction;
 namespace Manual {
 class ResultReport;
 class ObjectBrowser;
@@ -26,6 +27,8 @@ public:
     std::shared_ptr<VtkAppHostSession> GetSession() const { return m_runtime.GetSession(); }
     bool GetIsReady() const { return m_isReady; }
     QString GetFailure() const { return m_failure; }
+    QString GetLogPath() const { return m_log.fileName(); }
+    QString GetFeedback() const;
     void SetViewsVisible(bool visible);
     void SetInputFile(const QString& path);
     bool StopSession();
@@ -39,8 +42,10 @@ protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 private:
-    void AppendLog(const QString& message);
+    void AppendLog(const QString& message, const QString& module = "工作台");
     void ShowMessage(const QString& message, const char* tone = "neutral");
+    void SetColumnVisible(int column, bool visible);
+    void SaveColumns();
     void UpdateMeasurements();
     void QueueObserve();
     void SetWorkspace(int index);
@@ -66,16 +71,21 @@ private:
     QComboBox* m_renderMode = nullptr;
     QPushButton* m_openVolume = nullptr;
     QPushButton* m_stop = nullptr;
-    QTabBar* m_workspaceTabs = nullptr;
-    QTabBar* m_featureTabs = nullptr;
+    QComboBox* m_workspaceTabs = nullptr;
+    QComboBox* m_featureTabs = nullptr;
+    QSplitter* m_split = nullptr;
+    QToolButton* m_objectToggle = nullptr;
+    QToolButton* m_parameterToggle = nullptr;
+    int m_objectWidth = 240;
+    int m_parameterWidth = 400;
+    bool m_restoringColumns = false;
     QStringList m_workspaceSelections{"Data", "Artifact", "Alignment"};
     QGridLayout* m_viewGrid = nullptr;
     QWidget* m_viewArea = nullptr;
     QLabel* m_inputIdentity = nullptr;
     QLabel* m_inputGeometry = nullptr;
-    QLabel* m_messageData = nullptr;
-    QPushButton* m_sourceButton = nullptr;
-    QPushButton* m_originalInput = nullptr;
+    QAction* m_sourceAction = nullptr;
+    QAction* m_originalInputAction = nullptr;
     QString m_originalRevision;
     QString m_inputSummary;
     QJsonObject m_objectGraph;
@@ -84,9 +94,13 @@ private:
     QString m_objectInput;
     std::optional<double> m_objectOpacity;
     QLabel* m_measurements = nullptr;
-    QLabel* m_latestMessage = nullptr;
     QLabel* m_operationState = nullptr;
-    QPlainTextEdit* m_log = nullptr;
+    QFile m_log;
+    QString m_logFailure;
+    QString m_feedbackText;
+    QString m_lastOutcome;
+    QLabel* m_startupFeedback = nullptr;
+    bool m_settingsFailureReported = false;
     ResultReport* m_report = nullptr;
     bool m_observeQueued = false;
     bool m_visibilityQueued = false;

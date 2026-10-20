@@ -1,4 +1,5 @@
 #include "BusinessStatistics.h"
+#include "WorkbenchStyle.h"
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QTreeWidget>
@@ -13,6 +14,7 @@
 #include <QSignalBlocker>
 #include <QWheelEvent>
 #include <QKeyEvent>
+#include <QLocale>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -48,7 +50,10 @@ public:
     void ResetRange(){m_hasRange=false;update();}
 protected:
     void paintEvent(QPaintEvent*) override {
-        QPainter painter(this); painter.fillRect(rect(),Qt::white); painter.setPen(QColor("#62758b"));
+        const auto colors=GetWorkbenchPlotColors();
+        // Qt 5 的非十进制本地数字不连续（例如〇），避免刻度被映射成括号。
+        auto locale=QLocale();if(!locale.zeroDigit().isDigit())locale=QLocale::c();
+        QPainter painter(this); painter.fillRect(rect(),colors.surface); painter.setPen(colors.text);
         const auto counts=m_owner.m_data["counts"].toArray(),edges=m_owner.m_data["edges"].toArray();
         const auto comparison=m_owner.m_data["comparisonCounts"].toArray();
         if(counts.isEmpty() || edges.size()!=counts.size()+1){painter.drawText(rect(),Qt::AlignCenter,"暂无可用分布数据");return;}
@@ -62,19 +67,21 @@ protected:
         for(const auto value:comparison)maximum=std::max(maximum,value.toDouble());
         painter.drawText(QRectF(4,2,width()-8,18),Qt::AlignLeft,m_owner.m_data["yUnit"].toString());
         const int gridSteps=area.height()<60?2:3;
-        for(int i=0;i<=gridSteps;++i){const auto y=area.bottom()-area.height()*i/gridSteps;painter.setPen(QColor("#e0e8f1"));painter.drawLine(QPointF(area.left(),y),QPointF(area.right(),y));painter.setPen(QColor("#62758b"));painter.drawText(QRectF(0,y-8,56,16),Qt::AlignRight,QString::number(maximum*i/gridSteps,'g',4));}
-        painter.setPen(Qt::NoPen);painter.setBrush(QColor("#7ba4cc"));
+        for(int i=0;i<=gridSteps;++i){const auto y=area.bottom()-area.height()*i/gridSteps;painter.setPen(colors.grid);painter.drawLine(QPointF(area.left(),y),QPointF(area.right(),y));painter.setPen(colors.text);painter.drawText(QRectF(0,y-8,56,16),Qt::AlignRight,locale.toString(maximum*i/gridSteps,'g',4));}
+        painter.setPen(colors.text);
+        painter.setPen(Qt::NoPen);
         const auto span=high-low;painter.save();painter.setClipRect(area);
         for(int i=0;i<counts.size();++i){const auto h=maximum>0 ? area.height()*counts[i].toDouble()/maximum : 0;const auto x=area.left()+area.width()*(edges[i].toDouble()-low)/span;const auto w=area.width()*(edges[i+1].toDouble()-edges[i].toDouble())/span;
-            painter.setBrush(QColor("#7ba4cc"));painter.drawRect(QRectF(x,area.bottom()-h,std::max(0.5,(comparison.isEmpty()?w:w*0.5)-0.5),h));
-            if(comparison.size()==counts.size()){const auto other=maximum>0?area.height()*comparison[i].toDouble()/maximum:0;painter.setBrush(QColor("#c58d4e"));painter.drawRect(QRectF(x+w*0.5,area.bottom()-other,std::max(0.5,w*0.5-0.5),other));}}
-        painter.restore();painter.setPen(QColor("#62758b"));
-        painter.drawText(QRectF(area.left()-12,area.bottom()+4,100,18),Qt::AlignLeft,QString::number(low,'g',6));
-        painter.drawText(QRectF(area.right()-100,area.bottom()+4,110,18),Qt::AlignRight,QString::number(high,'g',6));
+            painter.setBrush(colors.series);painter.setPen(Qt::NoPen);painter.drawRect(QRectF(x,area.bottom()-h,std::max(0.5,(comparison.isEmpty()?w:w*0.5)-0.5),h));
+            if(comparison.size()==counts.size()){const auto other=maximum>0?area.height()*comparison[i].toDouble()/maximum:0;const QRectF bar(x+w*0.5,area.bottom()-other,std::max(0.5,w*0.5-0.5),other);painter.setBrush(QBrush(colors.comparison,Qt::DiagCrossPattern));painter.setPen(QPen(colors.comparison,0.8));painter.drawRect(bar);}}
+        painter.restore();
+        painter.setPen(colors.text);
+        painter.drawText(QRectF(area.left()-12,area.bottom()+4,100,18),Qt::AlignLeft,locale.toString(low,'g',6));
+        painter.drawText(QRectF(area.right()-100,area.bottom()+4,110,18),Qt::AlignRight,locale.toString(high,'g',6));
         painter.drawText(QRectF(area.left(),height()-18,area.width(),18),Qt::AlignCenter,m_owner.m_data["xUnit"].toString());
         if(high>low) for(const auto marker:m_owner.m_data["markers"].toArray()) {
             const auto item=marker.toObject(); const auto value=item["key"].toString(item["label"].toString())==m_dragKey?m_candidate:item["value"].toDouble();if(value<low || value>high)continue;
-            const auto x=area.left()+area.width()*(value-low)/(high-low);painter.setPen(QColor("#b87724"));painter.drawLine(QPointF(x,area.top()),QPointF(x,area.bottom()));painter.drawText(QRectF(x+2,6,90,18),item["label"].toString());
+            const auto x=area.left()+area.width()*(value-low)/(high-low);painter.setPen(colors.marker);painter.drawLine(QPointF(x,area.top()),QPointF(x,area.bottom()));painter.drawText(QRectF(x+2,6,90,18),item["label"].toString());
         }
     }
     void mouseMoveEvent(QMouseEvent* event) override {
@@ -179,7 +186,9 @@ void BusinessStatistics::SetHistogram(const QJsonObject& data)
 }
 void BusinessStatistics::Present(const QJsonObject& data)
 {
-    m_data=data;m_title->setText(data["title"].toString());m_description->setText(data["description"].toString());m_description->setToolTip(data["description"].toString());
+    m_data=data;m_title->setText(data["title"].toString());
+    const auto description=data["description"].toString()+(data["comparisonCounts"].toArray().isEmpty()?QString():QString(" · 源：实心；候选：纹理"));
+    m_description->setText(description);m_description->setToolTip(description);
     m_plot->setVisible(!data["counts"].toArray().isEmpty() || m_state==State::Loading);m_plot->update();
 }
 void BusinessStatistics::ResetPresentation(){onInterval={};onRow={};onMarker={};m_tableRows={};m_tableHeadings.clear();m_table->clear();m_tabs->setTabEnabled(1,false);}

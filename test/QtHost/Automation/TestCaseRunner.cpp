@@ -63,6 +63,9 @@
 #include <QLabel>
 #include <QMenu>
 #include <QContextMenuEvent>
+#include <QAbstractItemModel>
+#include <QKeyEvent>
+#include <QSettings>
 #include <iostream>
 #include <functional>
 #include <algorithm>
@@ -98,6 +101,13 @@
 #include <QVTKOpenGLNativeWidget.h>
 namespace Manual {
 namespace {
+bool GetComboEnabled(QComboBox* combo,int index) { return combo->model()->flags(combo->model()->index(index,0)).testFlag(Qt::ItemIsEnabled); }
+void SelectComboIndex(QComboBox* combo,int index)
+{
+    QKeyEvent home(QEvent::KeyPress,Qt::Key_Home,Qt::NoModifier);QApplication::sendEvent(combo,&home);
+    for(int i=0;i<index;++i){QKeyEvent next(QEvent::KeyPress,Qt::Key_Down,Qt::NoModifier);QApplication::sendEvent(combo,&next);}
+}
+
 bool Wait(const std::function<bool()>& done, int timeoutMs = 0)
 {
     QElapsedTimer elapsed;elapsed.start();
@@ -435,11 +445,14 @@ void CheckFourViewGeometry(TestWindow& window)
 }
 void CheckUiAndRecords(TestWindow& window)
 {
-    auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
-    auto* tabs = window.findChild<QTabBar*>("featureTabs");
+    window.findChild<QToolButton*>("toggleObjectColumn")->setChecked(true);
+    window.findChild<QToolButton*>("toggleParameterColumn")->setChecked(true);
+    QCoreApplication::processEvents();
+    auto* workspaces = window.findChild<QComboBox*>("workspaceTabs");
+    auto* tabs = window.findChild<QComboBox*>("featureTabs");
     auto* pages = window.findChild<QStackedWidget*>("parameterPages");
     auto* browsers = window.findChild<QStackedWidget*>("browserStack");
-    Check(workspaces && workspaces->count() == 3 && tabs && tabs->shape() == QTabBar::RoundedNorth,
+    Check(workspaces && workspaces->count() == 3 && tabs && tabs->isVisible(),
         "task workspaces organize horizontal module navigation");
     QSet<QString> moduleIds;
     QStringList remembered{"", "", ""};
@@ -447,18 +460,18 @@ void CheckUiAndRecords(TestWindow& window)
         const QStringList groups[]{ {"Data","View","Rotation"},{"Roi","Crop","Artifact","Part","Surface"},{"Alignment","Wall","Gap"} };
         for(int group=0;group<3;++group) {
             const bool hasModules=std::any_of(groups[group].begin(),groups[group].end(),[&](const QString& id){return GetEnabled(window,id);});
-            Check(workspaces->isTabEnabled(group)==hasModules,"workspace availability follows its compiled business modules");
+            Check(GetComboEnabled(workspaces,group)==hasModules,"workspace availability follows its compiled business modules");
             if(!hasModules)continue;
             workspaces->setCurrentIndex(group);
             for (int i = 0; i < tabs->count(); ++i) {
                 tabs->setCurrentIndex(i);
-                const auto id = tabs->tabData(i).toString(); moduleIds.insert(id);
+                const auto id = tabs->itemData(i).toString(); moduleIds.insert(id);
                 auto* module = window.GetModule(id);
                 Check(groups[group].contains(id) && module && !module->GetActions().isEmpty(),"group navigation shows only compiled business pages");
                 Check(pages->currentWidget() == module && browsers->currentWidget() == module->GetBrowser(),
                     "module identity keeps its parameter page and source browser synchronized");
             }
-            remembered[group]=tabs->tabData(tabs->currentIndex()).toString();
+            remembered[group]=tabs->itemData(tabs->currentIndex()).toString();
         }
     }
     int enabled=0;for(const auto* id:{"Data","View","Rotation","Roi","Crop","Artifact","Part","Surface","Alignment","Wall","Gap"})if(GetEnabled(window,id))++enabled;
@@ -466,27 +479,29 @@ void CheckUiAndRecords(TestWindow& window)
     if(GetEnabled(window,"Part"))Check(moduleIds.contains("Part")
         && window.GetModule("PartEdit") == window.GetModule("Part"), "segmentation and editing share one compiled page");
     for (int group = 0; group < workspaces->count(); ++group) {
-        if(!workspaces->isTabEnabled(group))continue;
+        if(!GetComboEnabled(workspaces,group))continue;
         workspaces->setCurrentIndex(group);
-        Check(tabs->tabData(tabs->currentIndex()).toString() == remembered[group], "each workspace remembers its last selected module");
+        Check(tabs->itemData(tabs->currentIndex()).toString() == remembered[group], "each workspace remembers its last selected module");
     }
     window.GetWorkflow().onNavigate("Data", "Load", {});
-    Check(workspaces->currentIndex() == 0 && tabs->tabData(tabs->currentIndex()) == "Data", "cross-workspace navigation returns to input");
-    auto* diagnostics = window.findChild<QToolButton*>("toggleDiagnostics");
-    auto* details = window.findChild<QWidget*>("diagnosticDetails");
-    Check(diagnostics && details && details->isHidden() && window.findChild<QLabel*>("latestMessage")->isVisible(),
-        "latest feedback stays visible while detailed diagnostics are collapsed");
+    Check(workspaces->currentIndex() == 0 && tabs->itemData(tabs->currentIndex()) == "Data", "cross-workspace navigation returns to input");
+    auto* diagnostics=window.findChild<QAction*>("showDiagnostics");
+    auto* details=window.findChild<QWidget*>("diagnosticDetails");
+    auto* showResults=window.findChild<QToolButton*>("showBusinessStatistics");
+    Check(diagnostics && details && details->isHidden() && !window.findChild<QWidget*>("diagnosticBar")
+        && window.GetModule("Data")->findChild<QLabel*>("businessNext")->isVisible(),
+        "module guidance stays visible without a bottom message strip");
     const auto compactSize=window.size();
-    diagnostics->click();Check(Wait([&]{return details->isVisible() && window.size()==compactSize;},3000),"diagnostics expand within the unchanged outer window");
-    window.grab().save("diagnostics-expanded.png");diagnostics->click();Check(Wait([&]{return !details->isVisible() && window.size()==compactSize;},3000),"closing diagnostics keeps the prior outer size");
+    diagnostics->trigger();Check(Wait([&]{return details->isVisible() && window.size()==compactSize;},3000),"diagnostics expand within the unchanged outer window");
+    window.grab().save("diagnostics-expanded.png");showResults->setChecked(false);Check(Wait([&]{return !details->isVisible() && window.size()==compactSize;},3000),"closing diagnostics keeps the prior outer size");
     auto* objectToggle=window.findChild<QToolButton*>("toggleObjectColumn");auto* objects=window.findChild<QWidget*>("objectColumn");objectToggle->click();Check(objects->isHidden(),"object sidebar can be collapsed");objectToggle->click();Check(objects->isVisible(),"object sidebar can be restored");
     const auto resized=compactSize+QSize(40,20);window.resize(resized);
     Check(Wait([&]{return window.size()==resized;},3000),"user can resize the main window beyond its default size");
     window.resize(compactSize);QCoreApplication::processEvents();window.grab().save("workbench-default.png");
     window.showMaximized();Check(Wait([&]{return window.isMaximized();},3000),"main window can be maximized");QCoreApplication::processEvents();
-    diagnostics->click();
+    diagnostics->trigger();
     Check(Wait([&]{return window.isMaximized() && details->isVisible();},3000),"diagnostics keep a maximized window maximized");
-    diagnostics->click();Check(Wait([&]{return window.isMaximized();},3000),"closing diagnostics restores the previous maximized state");
+    showResults->setChecked(false);Check(Wait([&]{return window.isMaximized();},3000),"closing diagnostics restores the previous maximized state");
     window.showNormal();window.resize(compactSize);QCoreApplication::processEvents();
     Check(window.findChild<QToolButton*>("testTools")->menu()->findChild<QAction*>("performanceCapture")
         && !window.findChild<QPushButton*>("stopCalculation")->isEnabled(), "diagnostic tools are grouped and idle stop is disabled");
@@ -531,9 +546,9 @@ void CheckUiAndRecords(TestWindow& window)
         auto* page = window.GetModule(name); if (page->GetActions().isEmpty()) continue;
         const QString initial = QString(name) == "Artifact" ? "Ring" : QString(name) == "Surface" ? "GlobalAutomatic" : "Start";
         window.GetWorkflow().onNavigate(name, initial, {});
-        auto* groups = page->findChild<QTabBar*>("parameterTabs"); const auto before = window.GetRecords().GetRecords()["records"].toArray().size();
-        for (int i=0; i<groups->count(); ++i) if (groups->isTabEnabled(i)) {
-            Check(groups->tabData(i) != "Stop" && groups->tabData(i) != "Cancel" && groups->tabData(i) != "Clear", "parameter tabs exclude stop, cancel and clear commands");
+        auto* groups = page->findChild<QComboBox*>("parameterTabs"); const auto before = window.GetRecords().GetRecords()["records"].toArray().size();
+        for (int i=0; i<groups->count(); ++i) if (GetComboEnabled(groups,i)) {
+            Check(groups->itemData(i) != "Stop" && groups->itemData(i) != "Cancel" && groups->itemData(i) != "Clear", "parameter tabs exclude stop, cancel and clear commands");
             groups->setCurrentIndex(i);
         }
         Check(window.GetRecords().GetRecords()["records"].toArray().size() == before, "parameter group navigation never submits an operation");
@@ -952,14 +967,14 @@ void CheckParameterLayout(TestWindow& window)
     auto* scroll = view->findChild<QScrollArea*>("operationScroll");
     Check(scroll && scroll->height() > 96 && view->GetBrowser()->parentWidget() != view,
         "parameters occupy a separate full-height column beside the scene browser");
-    auto* commandArea = view->findChild<QStackedWidget*>("operationCommands");
+    auto* commandArea = view->findChild<QWidget*>("operationCommands");
     auto* execute = view->findChild<QPushButton*>("action_Set");
     auto* primary=view->findChild<QPushButton*>("businessPrimary");
     Check(primary && !scroll->isAncestorOf(primary) && commandArea && commandArea->isAncestorOf(execute),
         "stage primary remains outside the parameter scroll area; advanced command belongs to its form");
-    auto* operationTabs = view->findChild<QTabBar*>("parameterTabs");
+    auto* operationTabs = view->findChild<QComboBox*>("parameterTabs");
     auto* more = view->findChild<QToolButton*>("moreOperations");
-    Check(operationTabs && operationTabs->usesScrollButtons() && operationTabs->count() <= 5 && more && more->menu(),
+    Check(operationTabs && operationTabs->count() <= 5 && operationTabs->minimumContentsLength() > 0 && more && more->menu(),
         "common operations fit a compact row and all additional operations have a discoverable menu");
     const auto originalSize = window.size(); QCoreApplication::processEvents();
     const auto commandBounds = QRect(primary->mapTo(view,QPoint()),primary->size());
@@ -1754,8 +1769,8 @@ void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& dir
     Check(file.write(reinterpret_cast<const char*>(data.data()), static_cast<qint64>(data.size()*sizeof(float))) == static_cast<qint64>(data.size()*sizeof(float)), "switch regression fixture writes"); file.close();
     GetComplete(window, Click(window, "Data", "Load", {{"filePath", path}, {"datasetId", "feature-switch-regression"},
         {"dimensions", QJsonArray{n,n,n}}, {"spacingLPS", QJsonArray{1,1,1}}, {"originLPS", QJsonArray{0,0,0}}, {"sourceDigest", ""}}), "Succeeded");
-    auto* tabs = window.findChild<QTabBar*>("featureTabs");
-    auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
+    auto* tabs = window.findChild<QComboBox*>("featureTabs");
+    auto* workspaces = window.findChild<QComboBox*>("workspaceTabs");
     auto* part = window.GetModule("Part"); auto* form = part->GetParameterEditor("Start");
     const auto threshold = form->GetField("threshold");
     for (int round = 0; round < 3; ++round) {
@@ -2022,12 +2037,29 @@ void StartSelfTest(TestWindow& window)
     CheckBooleanControls(window);
     auto* view = window.GetModule("View");
     view->SetParameterPatch("Reset", {{"viewId", "missing"}});
+    window.GetWorkflow().onNavigate("Data","Load",{});
     GetComplete(window, SendUnavailable(window, "View", "Reset"), "Rejected");
-    const auto* log = window.findChild<QPlainTextEdit*>("businessLog");
-    Check(log && log->toPlainText().contains("显示与导航 · 重置视图") && log->toPlainText().contains("操作被拒绝"),
-        "unavailable display commands retain Chinese rejection details for programmatic requests");
-    Check(log->toPlainText().contains(QRegularExpression("\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}\\]")),
-        "business timestamps use readable ASCII digits regardless of system locale");
+    QFile log(window.GetLogPath());Check(log.open(QIODevice::ReadOnly),"session log can be read beside the executable");
+    const auto logText=QString::fromUtf8(log.readAll());
+    Check(QFileInfo(log.fileName()).absolutePath()==QCoreApplication::applicationDirPath(),"session log uses the actual executable directory");
+    Check(logText.contains("显示与导航 · 重置视图") && logText.contains("操作被拒绝"),
+        "unavailable display commands retain Chinese rejection details in the UTF-8 file");
+    Check(logText.contains(QRegularExpression("\\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}\\] \\[显示与导航\\]")),
+        "diagnostic lines carry an unambiguous timestamp and originating module");
+    const auto* operationState=window.findChild<QLabel*>("operationState");
+    Check(operationState->text().contains("显示与导航") && operationState->text().contains("拒绝")
+        && operationState->accessibleName()=="会话状态："+operationState->text(),"a background module rejection remains visible with a synchronized accessible status");
+    window.GetWorkflow().onNavigate("View","Reset",{});QCoreApplication::processEvents();
+    Check(view->findChild<QLabel*>("moduleFeedback")->isVisible() && view->GetFeedback().contains("操作被拒绝"),
+        "rejection also stays visible inside its owning module");
+    log.close();
+    QFile filledLog(window.GetLogPath());Check(filledLog.open(QIODevice::Append),"rotation fixture can extend this session's own log");
+    const QByteArray padding(4*1024*1024,'x');Check(filledLog.write(padding)==padding.size(),"rotation fixture reaches the configured size boundary");filledLog.close();
+    window.SetInputFile(QCoreApplication::applicationDirPath()+"/missing-log-rotation-input.raw");
+    QFile previousLog(window.GetLogPath()+".previous.txt");
+    Check(previousLog.open(QIODevice::ReadOnly) && QString::fromUtf8(previousLog.readAll()).contains("操作被拒绝"),"rotation keeps the earlier diagnostic details");previousLog.close();
+    QFile rotatedLog(window.GetLogPath());Check(rotatedLog.open(QIODevice::ReadOnly) && rotatedLog.size()<4*1024*1024
+        && QString::fromUtf8(rotatedLog.readAll()).contains("请选择存在的体数据文件"),"rotation continues writing actual UTF-8 diagnostics within the size bound");
     QTemporaryDir directory;
     Check(directory.isValid(), "temporary fixture directory");
     std::vector<float> voxels(24 * 24 * 24, 0.0f);
@@ -2645,10 +2677,18 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
     shutdownTimeoutMs=static_cast<int>(shutdown);
     if(script.contains("windowSize")) {
         const auto size=script["windowSize"].toArray();
-        Check(size.size()==2 && size[0].toInt()>=1000 && size[1].toInt()>=800,
+        Check(size.size()==2 && size[0].toInt()>=window.minimumWidth() && size[1].toInt()>=window.minimumHeight(),
             "scenario declares a usable business screenshot window");
         window.resize(size[0].toInt(),size[1].toInt());QCoreApplication::processEvents();
     }
+    if(script["expectColumns"].isObject()) {
+        const auto expected=script["expectColumns"].toObject();
+        for(const auto& entry:{std::pair<const char*,const char*>{"objects","toggleObjectColumn"},{"parameters","toggleParameterColumn"}})
+            if(expected.contains(entry.first))Check(window.findChild<QToolButton*>(entry.second)->isChecked()==expected[entry.first].toBool(),"a new process restores the saved sidebar state");
+    }
+    window.findChild<QToolButton*>("toggleObjectColumn")->setChecked(true);
+    window.findChild<QToolButton*>("toggleParameterColumn")->setChecked(true);
+    QCoreApplication::processEvents();
     const auto initialWindowSize=window.size();
     if(script["viewLayout"].isString()) {
         auto* choice=window.findChild<QComboBox*>("viewLayout");const auto index=choice->findData(script["viewLayout"].toString());
@@ -2722,22 +2762,39 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         const auto step = value.toObject();
         const auto params = GetResolved(step["parameters"], results).toObject();
         if(step["control"]=="checkPage") {
-            const auto module=GetText(step,"module");auto* tabs=window.findChild<QTabBar*>("featureTabs");int index=-1;
+            window.findChild<QToolButton*>("toggleObjectColumn")->setChecked(true);
+            window.findChild<QToolButton*>("toggleParameterColumn")->setChecked(true);
+            const auto module=GetText(step,"module");auto* tabs=window.findChild<QComboBox*>("featureTabs");int index=-1;
             const int group=QStringList{"Data","View","Rotation"}.contains(module)?0:QStringList{"Roi","Crop","Artifact","Part","Surface"}.contains(module)?1:2;
-            auto* workspaces=window.findChild<QTabBar*>("workspaceTabs");Check(workspaces->isTabEnabled(group),"planned business group is compiled");
-            const auto groupPoint=workspaces->tabRect(group).center();
-            QMouseEvent groupPress(QEvent::MouseButtonPress,groupPoint,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(workspaces,&groupPress);
-            QMouseEvent groupRelease(QEvent::MouseButtonRelease,groupPoint,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(workspaces,&groupRelease);QCoreApplication::processEvents();
-            for(int i=0;i<tabs->count();++i)if(tabs->tabData(i)==module)index=i;
-            Check(index>=0,"planned business tab is present");
-            const auto point=tabs->tabRect(index).center();
-            QMouseEvent press(QEvent::MouseButtonPress,point,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
-            QApplication::sendEvent(tabs,&press);QMouseEvent release(QEvent::MouseButtonRelease,point,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(tabs,&release);
+            auto* workspaces=window.findChild<QComboBox*>("workspaceTabs");Check(GetComboEnabled(workspaces,group),"planned business group is compiled");
+            SelectComboIndex(workspaces,group);QCoreApplication::processEvents();
+            for(int i=0;i<tabs->count();++i)if(tabs->itemData(i)==module)index=i;
+            Check(index>=0,"planned business module is present");
+            SelectComboIndex(tabs,index);
             auto* page=window.GetModule(module);QCoreApplication::processEvents();page->Observe();
-            Check(page->isVisible() && page->findChild<QPushButton*>("businessPrimary")->isVisible(),"Qt tab mouse event reveals the planned stage and primary");
+            Check(page->isVisible() && page->findChild<QPushButton*>("businessPrimary")->isVisible(),"Qt navigation key events reveal the planned stage and primary");
             Check(window.size()==initialWindowSize,"tab clicks preserve the current outer window size");
+            if(step.contains("parameterAction")){page->SelectAction(GetText(step,"parameterAction"));QCoreApplication::processEvents();}
+            for(const auto& entry:{std::pair<const char*,const char*>{"objects","toggleObjectColumn"},{"parameters","toggleParameterColumn"}}) {
+                if(step["columns"].toObject().contains(entry.first))window.findChild<QToolButton*>(entry.second)->setChecked(step["columns"].toObject()[entry.first].toBool());
+            }
+            QCoreApplication::processEvents();
+            if(step["columns"].toObject()["parameters"].toBool(true)) {
+                const auto* scroll=page->findChild<QScrollArea*>("operationScroll");
+                Check(scroll->height()>=100,"parameter area retains usable height in every visible mode");
+            }
             checkObserved(step);if(step.contains("expectPrimaryAction"))Check(page->findChild<QPushButton*>("businessPrimary")->property("businessAction")==step["expectPrimaryAction"].toString(),"current page presents the expected phase without selecting a form");
-            if(step.contains("screenshot"))Check(window.grab().save(GetText(step,"screenshot")),"business page screenshot saved");
+            if(step.contains("screenshot")) {
+                Check(window.grab().save(GetText(step,"screenshot")),"business page screenshot saved");
+                auto* split=window.findChild<QSplitter*>("workbenchSplit");const auto sizes=split->sizes();
+                auto* scroll=page->findChild<QScrollArea*>("operationScroll");auto* footer=page->findChild<QWidget*>("businessCommandFooter");
+                const bool shown=!window.findChild<QWidget*>("parameterPages")->isHidden();
+                if(shown)Check(scroll->height()>=100 && page->rect().contains(QRect(footer->mapTo(page,QPoint()),footer->size()))
+                    && page->findChildren<QScrollArea*>().size()==1,"the complete parameter area and current footer fit without nested scrollers");
+                ExportJson(GetText(step,"screenshot")+".layout.json",{{"module",module},{"width",window.width()},{"height",window.height()},
+                    {"columns",QJsonArray{sizes[0],sizes[1],sizes[2]}},{"parametersVisible",shown},{"parameterHeight",scroll->height()},
+                    {"footerHeight",footer->height()},{"scrollMaximum",scroll->verticalScrollBar()->maximum()}});
+            }
             continue;
         }
         if(step["control"]=="editParameters") {
@@ -2805,7 +2862,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             const bool dispatched=Wait([&]{return !window.GetRecords().GetRecord(id).isEmpty();},timeout);
             if(!dispatched)std::cerr<<"PRIMARY DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
                 <<" primary="<<button->property("businessAction").toString().toStdString()<<" enabled="<<button->isEnabled()
-                <<" message="<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
+                <<" message="<<window.GetFeedback().toStdString()
                 <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
             Check(dispatched,"primary click creates the actual operation record");
         } else if(control=="catalogAction") {
@@ -2834,10 +2891,10 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         QTimer switching, cancellation;
         int switchCount = 0;
         if (step["switchFeaturesWhilePending"].toBool()) {
-            auto* tabs = window.findChild<QTabBar*>("featureTabs");
+            auto* tabs = window.findChild<QComboBox*>("featureTabs");
             QObject::connect(&switching, &QTimer::timeout, &window, [&, tabs] {
                 if (window.GetRecords().GetRecord(id)["isTerminal"].toBool()) { switching.stop(); return; }
-                auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
+                auto* workspaces = window.findChild<QComboBox*>("workspaceTabs");
                 if (tabs->currentIndex()+1 < tabs->count()) tabs->setCurrentIndex(tabs->currentIndex()+1);
                 else { workspaces->setCurrentIndex((workspaces->currentIndex()+1) % workspaces->count()); tabs->setCurrentIndex(0); }
                 ++switchCount;
@@ -2892,7 +2949,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         checkObserved(step);
         if(step.contains("expectFollowupStatus")) {
             const bool followed=Wait([&]{return !window.GetRecords().GetRecord(id+1).isEmpty();},2000);
-            if(!followed)std::cerr<<"FOLLOWUP MISSING: "<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
+            if(!followed)std::cerr<<"FOLLOWUP MISSING: "<<window.GetFeedback().toStdString()
                 <<" state="<<GetJsonText(window.GetModule(GetText(step,"module"))->GetObservedState()).toStdString()<<std::endl;
             Check(followed,"combined primary dispatches its real follow-up transaction");
             const auto followup=GetComplete(window,id+1,GetText(step,"expectFollowupStatus"),timeout);

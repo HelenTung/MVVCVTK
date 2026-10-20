@@ -25,8 +25,6 @@ class QVBoxLayout;
 class QSplitter;
 class QLineEdit;
 class QTabWidget;
-class QTabBar;
-class QStackedWidget;
 class QToolButton;
 class QMenu;
 
@@ -61,6 +59,8 @@ public:
     std::size_t CancelReadTasks();
     void SetState(const QJsonObject& value);
     void SetNotice(const QString& text);
+    void SetFeedback(const QString& text, const char* tone = "neutral");
+    QString GetFeedback() const;
     QString GetNotice() const { return m_notice; }
     void SendHost(std::uint64_t id, HostRequest&& request);
     void SetInput(std::uint64_t id, const DataRevisionRef& revision);
@@ -137,8 +137,8 @@ private:
     QGridLayout* m_nextLayout = nullptr;
     QStringList m_nextActionIds;
     QTabWidget* m_browser = nullptr;
-    QTabBar* m_parameterTabs = nullptr;
-    QTabBar* m_taskTabs = nullptr;
+    QComboBox* m_parameterTabs = nullptr;
+    QComboBox* m_taskTabs = nullptr;
     QString m_taskGroup;
     QMap<QString,QString> m_taskSelections;
     QString m_parameterAction;
@@ -148,7 +148,10 @@ private:
     QToolButton* m_help = nullptr;
     QToolButton* m_moreOperations = nullptr;
     QMenu* m_operationMenu = nullptr;
-    QStackedWidget* m_commandArea = nullptr;
+    QWidget* m_commandArea = nullptr;
+    QVBoxLayout* m_commandLayout = nullptr;
+    QWidget* m_currentCommands = nullptr;
+    QLabel* m_feedback = nullptr;
     std::map<QString, QWidget*> m_commandRows;
     std::map<QString, QLabel*> m_requirements;
     QLineEdit* m_nodeSearch = nullptr;

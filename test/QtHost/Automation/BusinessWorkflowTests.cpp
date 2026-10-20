@@ -109,7 +109,7 @@ void CheckBusinessWorkflow(TestWindow& window)
         auto* primary=page->findChild<QPushButton*>("businessPrimary");auto* stage=page->findChild<QLabel*>("businessStage");auto* scroll=page->findChild<QScrollArea*>("operationScroll");
         Require(primary && stage && scroll && !scroll->isAncestorOf(primary),"every business has a fixed stage primary outside parameter scrolling");
     }
-    Require(window.findChild<QLabel*>("messageDataSummary") && window.findChild<QWidget*>("workbenchInput")->isAncestorOf(window.findChild<QLabel*>("currentInputIdentity")),"actual adopted input identity stays in the fixed input strip");
+    Require(!window.findChild<QWidget*>("diagnosticBar") && window.findChild<QWidget*>("workbenchInput")->isAncestorOf(window.findChild<QLabel*>("currentInputIdentity")),"actual adopted input identity stays in the fixed input strip");
     const auto weighted=BuildHistogram({-1,0,1},{2,3,5},"area","fixed result","mm","mm2");
     Require(Sum(weighted)==10,"area histogram sums area rather than sample count");
     Require(BuildHistogram({std::numeric_limits<double>::quiet_NaN()},{},"invalid","invalid","gray","count")["counts"].toArray().isEmpty(),"invalid samples are not inserted in zero bin");

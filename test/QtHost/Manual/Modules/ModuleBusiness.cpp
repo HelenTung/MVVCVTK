@@ -136,6 +136,7 @@ void ModulePanel::RefreshBusinessStep(const QJsonObject& state,const QJsonObject
     m_businessSource->setText(source.isEmpty() ? "本次业务输入 · 顶部当前输入" : "本次业务来源 · "+source.right(18)+
         (source==input["dataRevision"].toString() ? "（当前输入）" : "（与当前输入不同）"));
     m_businessSource->setToolTip("业务源精确修订："+source);
+    m_businessSource->setVisible(!source.isEmpty() && source!=input["dataRevision"].toString());
     QString display;
     if(state["hasResult"].toBool() && state.contains("isDisplayReady"))display=state["isDisplayReady"].toBool() ? "显示 · 已就绪" : "显示 · 尚未就绪；已发布结果与统计保留";
     else if(state["hasResult"].toBool() && state.contains("isOverlayVisible"))display=state["isOverlayVisible"].toBool() ? "显示 · 结果叠加可见" : "显示 · 结果叠加未显示；已发布结果与统计保留";
@@ -173,7 +174,7 @@ void ModulePanel::RefreshBusinessStep(const QJsonObject& state,const QJsonObject
                 else if(action=="SetMetadata")text="区域信息";
             }
             auto* button=new QPushButton(text,m_nextActions); button->setObjectName("next_"+action);
-            button->setAccessibleName(actionTitle);
+            button->setAccessibleName(text);button->setAccessibleDescription(actionTitle);
             connect(button,&QPushButton::clicked,this,[this,action] {
                 if(m_forms.count(action) && m_forms.at(action)->GetHasInputs()) SelectAction(action);
                 else SendBusinessAction(action);
@@ -190,6 +191,7 @@ void ModulePanel::RefreshBusinessStep(const QJsonObject& state,const QJsonObject
         const bool busy=m_context.workflow.GetBusyOperation() && m_entries.count(action)
             && m_entries.at(action).policy!=TestPolicy::Stop && m_entries.at(action).policy!=TestPolicy::Read && m_entries.at(action).policy!=TestPolicy::View;
         button->setEnabled(!m_context.workflow.GetIsClosing() && (parameter || (requirement.isEmpty() && !busy)));
+        button->setVisible(!action.startsWith("Open") || button->isEnabled());
         button->setToolTip(requirement.isEmpty()?button->accessibleName():requirement);
     }
     m_nextActions->setVisible(!actions.isEmpty());

@@ -5,21 +5,30 @@
 #include <algorithm>
 #include <utility>
 namespace Manual {
+WorkbenchPlotColors GetWorkbenchPlotColors()
+{
+    const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
+    if (dark) return {QColor("#222e3c"), QColor("#b8c5d4"), QColor("#526174"),
+        QColor("#8fbfdf"), QColor("#efb56f"), QColor("#f5cb88")};
+    return {QColor("#ffffff"), QColor("#526174"), QColor("#d8e0e8"),
+        QColor("#37688b"), QColor("#90521c"), QColor("#875215")};
+}
+
 QString GetWorkbenchStyle()
 {
     // 颜色按用途集中定义；深色系统调色板使用对应的表面与文字。
     const bool dark = QApplication::palette().color(QPalette::Window).lightness() < 128;
     const auto bodyPoints = std::max(12.0, QApplication::font().pointSizeF());
     auto style = QStringLiteral(R"(
-QWidget { color: @text; font-family: "Microsoft YaHei UI"; font-size: @bodyPointspt; }
+QWidget { color: @text; font-size: @bodyPointspt; }
 QMainWindow, QWidget#workbench { background: @canvas; }
 QWidget#workbenchToolbar, QWidget#workbenchNavigation, QWidget#workbenchInput,
-QWidget#diagnosticBar, QWidget#objectColumn, QWidget#parameterPages { background: @surface; }
+QWidget#objectColumn, QWidget#parameterPages { background: @surface; }
 QWidget#workbenchToolbar, QWidget#objectColumn, QWidget#parameterPages { border-radius: 6px; }
 QLabel#currentInputIdentity, QLabel#columnTitle, QLabel#moduleTitle { color: @text; font-weight: 600; }
 QLabel#currentInputGeometry, QLabel#businessInput, QLabel#operationDescription,
-QLabel#moduleNotice, QLabel#selectedObjectSummary, QLabel#messageDataSummary { color: @muted; }
-QLabel#businessStage { color: @accent; background: @selection; padding: 8px; border-radius: 4px; font-weight: 600; }
+QLabel#moduleNotice, QLabel#selectedObjectSummary { color: @muted; }
+QLabel#businessStage { color: @status; background: @statusSurface; padding: 4px; border-radius: 4px; font-weight: 600; }
 QLabel#businessNext { color: @text; }
 QLabel#businessDisplay { color: @muted; }
 QLabel#businessRecovery, QLabel#commandRequirement { color: @warning; background: @warningSurface; padding: 8px; border-radius: 4px; }
@@ -31,10 +40,11 @@ QWidget#businessContext { background: @subtle; border-radius: 4px; }
 QWidget#businessCommandFooter { border-top: 1px solid @outline; }
 QLabel#businessMeasurements { background: @subtle; padding: 8px; color: @muted; }
 QLabel#operationState { color: @muted; background: @subtle; padding: 6px 10px; border-radius: 4px; }
-QLabel#latestMessage { border-left: 3px solid transparent; padding-left: 6px; }
-QLabel#latestMessage[feedbackTone="busy"] { color: @accent; border-left-color: @accent; background: @selection; }
-QLabel#latestMessage[feedbackTone="warning"] { color: @warning; border-left-color: @warning; background: @warningSurface; }
-QLabel#latestMessage[feedbackTone="error"] { color: @error; border-left-color: @error; background: @errorSurface; }
+QLabel#moduleFeedback { color: @muted; border-left: 3px solid @outline; padding-left: 6px; }
+QLabel#moduleFeedback[feedbackTone="neutral"] { color: @muted; border-left-color: @outline; }
+QLabel#moduleFeedback[feedbackTone="busy"] { color: @status; border-left-color: @status; background: @statusSurface; }
+QLabel#moduleFeedback[feedbackTone="warning"] { color: @warning; border-left-color: @warning; background: @warningSurface; }
+QLabel#moduleFeedback[feedbackTone="error"] { color: @error; border-left-color: @error; background: @errorSurface; }
 QTreeWidget, QTableView { border: 1px solid @outline; background: @surface; alternate-background-color: @subtle; gridline-color: @outline; }
 QTreeWidget::item { padding: 6px 3px; }
 QTreeWidget::item:selected, QTableView::item:selected { background: @selection; color: @text; }
@@ -94,10 +104,12 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         {"@error", dark ? "#ffb4b4" : "#a62b26"},
         {"@onAccent", dark ? "#152436" : "#ffffff"},
         {"@accentHover", dark ? "#b5d7ff" : "#164c83"},
-        {"@accent", dark ? "#9ac9ff" : "#1e5fa3"}};
+        {"@accent", dark ? "#9ac9ff" : "#1e5fa3"},
+        {"@statusSurface", dark ? "#2e3b48" : "#edf2f6"},
+        {"@status", dark ? "#c1cbd4" : "#40566d"}};
     for (const auto& color : colors) style.replace(color.first, color.second);
     style.replace("@bodyPoints", QString::number(bodyPoints, 'f', 1));
-    style.replace("@headingPoints", QString::number(bodyPoints * 1.25, 'f', 1));
+    style.replace("@headingPoints", QString::number(bodyPoints * 1.125, 'f', 1));
     return style;
 }
 }
