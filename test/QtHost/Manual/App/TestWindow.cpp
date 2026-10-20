@@ -664,10 +664,14 @@ bool TestWindow::StopSession()
     m_report->CancelTasks(true);
     // 原生报告和分页目录持有正式结果，须先释放才能退休其 OwnerRetirement 作用域。
     for(const auto& id:m_report->GetReportIds())m_report->RemoveReport(id);
+    bool readsPending=false;
     for(auto* module:m_modules) {
         module->CancelReadTasks();module->GetStatisticsWidget()->Cancel();
         if(module->onSessionClosing)module->onSessionClosing();
+        readsPending=readsPending || module->property("readTasksBusy").toBool();
     }
+    // 读取的所属线程定时器先交付唯一终态，再停止 Host 和其余未完成记录。
+    if(readsPending) { ShowMessage("正在结束读取任务，请稍候再关闭。"); return false; }
     const auto session = m_runtime.GetSession();
     const auto current = GetDescriptor(session ? session->GetImageDescriptor() : std::optional<ImageDescriptor>{});
     if (!m_runtime.Stop()) { ShowMessage("正在结束当前任务，请稍候再关闭。"); return false; }

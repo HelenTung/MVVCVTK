@@ -6,10 +6,12 @@
 #include "../../../../MVVCVTK/features/common/FeatureResultScopes.h"
 #include <QJsonObject>
 #include <QString>
+#include <functional>
 #include <map>
 #include <optional>
 class VtkAppHostSession;
 namespace Manual {
+struct ReadTaskContext;
 struct ReferenceInput {
     DataRevisionRef source;
     DataRevisionRef mesh;
@@ -28,7 +30,9 @@ public:
     DataRevisionRef CreateMask(DataRevisionRef source, const QJsonObject& params);
     QJsonObject GetViewTransforms();
     QJsonObject GetResultEvidence();
-    QJsonObject ReadRoi(DataRevisionRef roi, DataRevisionRef source, const QString& maskPath = {});
+    // 在所属线程冻结读取视图；返回的工作只访问不可变数据和线程私有的文件/哈希。
+    std::function<QJsonObject(const ReadTaskContext&)> CreateRoiReadTask(
+        DataRevisionRef roi, DataRevisionRef source, const QString& maskPath = {});
     QJsonObject ReadImageEvidence(DataRevisionRef source, const QString& maskPath, bool compareScalars);
     QJsonObject ReadWallInputs(DataRevisionRef labels, DataRevisionRef mesh) const;
     std::vector<std::uint64_t> GetRoiVertices(DataRevisionRef roi, DataRevisionRef source, DataRevisionRef mesh) const;
