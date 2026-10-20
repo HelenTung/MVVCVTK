@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -26,6 +27,20 @@ struct IsoSurfaceKey final {
     double isoValue = 0.0;
 };
 
+// 可选CPU上传缓存独立于不可变几何；取走后的只读缓冲保持产品owner，
+// 最后上传读者先释放内存，再同步归还预算。其余读者沿VTK原路径绘制。
+class IsoSurfaceIndexCache final {
+public:
+    IsoSurfaceIndexCache(std::vector<unsigned int> indices,
+        std::weak_ptr<const void> owner, std::function<void()> onReleased);
+    ~IsoSurfaceIndexCache();
+    std::shared_ptr<const std::vector<unsigned int>> TakeIndices();
+    std::uint64_t GetBytes() const noexcept;
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
 struct IsoSurfaceProduct final {
     RenderInputUse inputUse;
     std::uint64_t requestRevision = 0;
@@ -35,9 +50,11 @@ struct IsoSurfaceProduct final {
     double isoValue = 0.0;
     vtkSmartPointer<vtkPolyData> surface;
     // 单一 surface 的 VTK 三角形索引，vertex offset 为 0；时间为 0 表示走原路径。
-    std::vector<unsigned int> triangleIndices;
+    std::unique_ptr<IsoSurfaceIndexCache> triangleIndices;
     vtkMTimeType triangleIndicesTime = 0;
-    std::uint64_t actualBytes = 0;
+    std::uint64_t meshBytes = 0;
+    std::uint64_t GetActualBytes() const noexcept
+    { return meshBytes + (triangleIndices ? triangleIndices->GetBytes() : 0); }
     bool isPreview = false;
 };
 

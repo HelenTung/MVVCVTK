@@ -23,8 +23,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -342,6 +344,50 @@ std::optional<std::vector<unsigned int>> BuildTriangleIndices(vtkPolyData* surfa
 
 } // namespace
 
+class IsoSurfaceIndexCache::Impl final {
+public:
+    std::mutex mutex;
+    std::unique_ptr<std::vector<unsigned int>> indices;
+    std::weak_ptr<const void> owner;
+    std::function<void()> onReleased;
+    std::atomic<std::uint64_t> bytes{0};
+};
+
+IsoSurfaceIndexCache::IsoSurfaceIndexCache(std::vector<unsigned int> indices,
+    std::weak_ptr<const void> owner, std::function<void()> onReleased)
+    : m_impl(std::make_unique<Impl>())
+{
+    m_impl->indices = std::make_unique<std::vector<unsigned int>>(std::move(indices));
+    m_impl->bytes.store(m_impl->indices->capacity() * sizeof(unsigned int));
+    m_impl->owner = std::move(owner);
+    m_impl->onReleased = std::move(onReleased);
+}
+
+IsoSurfaceIndexCache::~IsoSurfaceIndexCache() = default;
+
+std::uint64_t IsoSurfaceIndexCache::GetBytes() const noexcept
+{
+    return m_impl->bytes.load(std::memory_order_acquire);
+}
+
+std::shared_ptr<const std::vector<unsigned int>> IsoSurfaceIndexCache::TakeIndices()
+{
+    // 不持缓存锁执行归还通知，避免与协调器的缓存驱逐锁形成反向顺序。
+    std::unique_lock<std::mutex> lock(m_impl->mutex);
+    auto owner = m_impl->owner.lock();
+    if (!owner || !m_impl->indices) return {};
+    auto* indices = m_impl->indices.release();
+    lock.unlock();
+    // shared_ptr控制块分配失败也会调用deleter，仍先真实释放再归还。
+    return std::shared_ptr<const std::vector<unsigned int>>(indices,
+        [this, owner = std::move(owner)](const std::vector<unsigned int>* values) noexcept {
+            static_cast<void>(owner); // 生命周期持有，不只是缓存身份。
+            delete values;
+            m_impl->bytes.store(0, std::memory_order_release);
+            if (m_impl->onReleased) m_impl->onReleased();
+        });
+}
+
 std::optional<std::uint64_t> IsoSurfaceProductBuilder::GetEstimatedBytes(
     const IsoSurfaceBuildRequest& request)
 {
@@ -556,16 +602,21 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         product->inputDimensions = request.key.outputDimensions;
         product->isoValue = request.key.isoValue;
         product->surface = std::move(surface);
+        product->meshBytes = meshBytes;
         if (triangleIndices) {
-            product->triangleIndices = std::move(*triangleIndices);
-            product->triangleIndicesTime = product->surface->GetMeshMTime();
+            try {
+                product->triangleIndices = std::make_unique<IsoSurfaceIndexCache>(
+                    std::move(*triangleIndices), product,
+                    stopToken.GetProductBytesRelease(product, meshBytes));
+                product->triangleIndicesTime = product->surface->GetMeshMTime();
+            }
+            catch (...) { /* 可选缓存壳分配失败仍保留原网格。 */ }
         }
-        product->actualBytes = *actualBytes;
         product->isPreview = request.isPreview;
 
         VtkDataResourceLease::AttachMesh(product->surface, product->inputUse.resource);
 
-        if (!stopToken.SetProductOwner(product, *actualBytes)) {
+        if (!stopToken.SetProductOwner(product, product->GetActualBytes())) {
             return GetFailure(RenderProductFailure::ResourceRejected,
                 "The product allocation lease was rejected.");
         }

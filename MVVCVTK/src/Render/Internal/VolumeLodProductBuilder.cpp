@@ -5,6 +5,7 @@
 #include "Render/Internal/RenderWorkBudget.h"
 
 #include <vtkAlgorithm.h>
+#include <vtkAbstractArray.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkDataArray.h>
@@ -179,6 +180,9 @@ vtkSmartPointer<vtkImageData> BuildPrivateImage(vtkImageData* input)
 {
     try {
         auto* source = input->GetPointData()->GetScalars();
+        // SOA的GetVoidPointer会物化整卷AOS副本；只给确认连续的AOS壳预热。
+        if (source->GetArrayType() != vtkAbstractArray::AoSDataArrayTemplate
+            || !source->HasStandardMemoryLayout()) return nullptr;
         auto scalars = vtkSmartPointer<vtkDataArray>::Take(source->NewInstance());
         // 标量壳的 information/范围缓存只归候选所有。AOS 数组共享只读 buffer，
         // 同时保留原数组上的借用 owner/资源租约，直到最后一个候选读者释放。

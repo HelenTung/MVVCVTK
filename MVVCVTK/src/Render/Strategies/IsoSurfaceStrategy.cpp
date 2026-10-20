@@ -18,7 +18,6 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
-#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -41,6 +40,7 @@ public:
         if (m_preparedProduct == product) return;
         m_preparedProduct = std::move(product);
         m_uploadedProduct.reset();
+        m_uploadedIndexCount = 0;
         this->Modified();
     }
     void RenderPiece(vtkRenderer* renderer, vtkActor* actor) override
@@ -59,10 +59,11 @@ protected:
     {
         auto* context = vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow());
         auto* property = actor->GetProperty();
-        const bool isPrepared = m_preparedProduct && context
-            && m_preparedProduct->surface.GetPointer() == surface
-            && m_preparedProduct->triangleIndicesTime != 0
-            && m_preparedProduct->triangleIndicesTime == surface->GetMeshMTime()
+        const auto product = m_preparedProduct;
+        const bool isPrepared = product && context
+            && product->surface.GetPointer() == surface
+            && product->triangleIndicesTime != 0
+            && product->triangleIndicesTime == surface->GetMeshMTime()
             && property->GetRepresentation() == VTK_SURFACE
             && !property->GetEdgeVisibility() && !property->GetVertexVisibility()
             && !renderer->GetSelector()
@@ -71,28 +72,34 @@ protected:
         if (isPrepared) {
             try {
                 auto* indices = this->Primitives[PrimitiveTris].IBO;
-                const auto& values = m_preparedProduct->triangleIndices;
-                const bool hasUpload = m_uploadedProduct.lock() == m_preparedProduct
+                bool hasUpload = m_uploadedProduct.lock() == product
                     && m_uploadedContext == context
                     && m_uploadedContextTime == context->GetContextCreationTime()
-                    && indices->IndexCount == values.size()
-                    && indices->IsReady()
-                    && (values.empty() || indices->GetHandle() != 0);
-                if (!hasUpload && !values.empty()
-                    && !indices->Upload(values, vtkOpenGLIndexBufferObject::ElementArrayBuffer)) {
-                    throw std::runtime_error("Optional iso index upload is unavailable.");
+                    && indices->IndexCount == m_uploadedIndexCount
+                    && (m_uploadedIndexCount == 0 || (indices->IsReady() && indices->GetHandle() != 0));
+                if (!hasUpload) {
+                    auto values = product->triangleIndices ? product->triangleIndices->TakeIndices() : nullptr;
+                    // 缓存已被其他读者消耗，或上下文需要重传：原生路径仍成功显示。
+                    if (values && (values->empty()
+                        || indices->Upload(*values, vtkOpenGLIndexBufferObject::ElementArrayBuffer))) {
+                        m_uploadedIndexCount = values->size();
+                        hasUpload = true;
+                    }
+                    // 只读上传读者在此退出：先释放CPU存储，再同步归还同产品预算。
                 }
-                indices->IndexCount = values.size();
-                // 此窄路径只有三角面；其他表示和辅助图元交还原 BuildIBO。
-                for (int primitive = PrimitiveStart; primitive < PrimitiveEnd; ++primitive)
-                    if (primitive != PrimitiveTris) this->Primitives[primitive].IBO->IndexCount = 0;
-                this->EdgeValues.clear();
-                this->IBOBuildState.Clear();
-                m_uploadedProduct = m_preparedProduct;
-                m_uploadedContext = context;
-                m_uploadedContextTime = context->GetContextCreationTime();
-                m_isUsingPreparedIndices = true;
-                return;
+                if (hasUpload) {
+                    indices->IndexCount = m_uploadedIndexCount;
+                    // 此窄路径只有三角面；其他表示和辅助图元交还原 BuildIBO。
+                    for (int primitive = PrimitiveStart; primitive < PrimitiveEnd; ++primitive)
+                        if (primitive != PrimitiveTris) this->Primitives[primitive].IBO->IndexCount = 0;
+                    this->EdgeValues.clear();
+                    this->IBOBuildState.Clear();
+                    m_uploadedProduct = product;
+                    m_uploadedContext = context;
+                    m_uploadedContextTime = context->GetContextCreationTime();
+                    m_isUsingPreparedIndices = true;
+                    return;
+                }
             }
             catch (...) {
                 // 缓存或上传只是优化；恢复 VTK 原有装配/上传及错误处理。
@@ -109,6 +116,7 @@ private:
     RenderEffectBinding* m_binding = nullptr;
     std::shared_ptr<const IsoSurfaceProduct> m_preparedProduct;
     std::weak_ptr<const IsoSurfaceProduct> m_uploadedProduct;
+    std::size_t m_uploadedIndexCount = 0;
     const void* m_uploadedContext = nullptr;
     vtkMTimeType m_uploadedContextTime = 0;
     bool m_isUsingPreparedIndices = false;
@@ -499,11 +507,11 @@ bool IsoSurfaceStrategy::SetProduct(
         && !(isChannelReady
             ? m_taskChannel->SetActiveBytes(
                 activeRevision,
-                result.product->actualBytes,
+                result.product->GetActualBytes(),
                 result.product.get())
             : m_taskChannel->SetCachedActive(
                 activeRevision,
-                result.product->actualBytes,
+                result.product->GetActualBytes(),
                 result.product.get()))) {
         m_transition.status = RenderProductStatus::Failed;
         m_transition.failureReason =
@@ -547,7 +555,7 @@ bool IsoSurfaceStrategy::SetProduct(
     m_transition.stats.cpuBindUs = gpuUploadUs;
     m_transition.stats.gpuUploadUs = 0;
     m_transition.stats.candidateBytes = 0;
-    m_transition.stats.activeBytes = result.product->actualBytes;
+    m_transition.stats.activeBytes = result.product->GetActualBytes();
     m_transition.stats.resolvedDimensions =
         result.product->inputDimensions;
     m_transition.stats.isPreview = isPreview;
@@ -880,6 +888,7 @@ RenderTransitionState
 IsoSurfaceStrategy::GetTransitionState() const
 {
     auto state = m_transition;
+    if (m_activeProduct) state.stats.activeBytes = m_activeProduct->GetActualBytes();
     if (m_taskChannel) {
         const auto channelState = m_taskChannel->GetState();
         if (channelState.stats.requestRevision
@@ -888,6 +897,7 @@ IsoSurfaceStrategy::GetTransitionState() const
                 channelState.stats.candidateBytes;
             state.stats.cacheBytes =
                 channelState.stats.cacheBytes;
+            state.stats.activeBytes = channelState.stats.activeBytes;
         }
     }
     return state;

@@ -47,6 +47,14 @@
 #include <vtkCellArray.h>
 #include <vtkImageData.h>
 #include <vtkFloatArray.h>
+#include <vtkDataObject.h>
+#include <vtkIdTypeArray.h>
+#include <vtkPoints.h>
+#include <vtkSOADataArrayTemplate.h>
+#include <vtkHardwareSelector.h>
+#include <vtkOpenGLHardwareSelector.h>
+#include <vtkSelection.h>
+#include <vtkSelectionNode.h>
 #include <vtkInformation.h>
 #include <vtkPointData.h>
 #include <vtkPolyDataMapper.h>
@@ -127,6 +135,18 @@ public:
             shouldThrow = false;
             throw std::runtime_error("injected optional range preparation failure");
         }
+        return this->Superclass::GetVoidPointer(index);
+    }
+};
+
+class SoaRangeReadProbe final : public vtkSOADataArrayTemplate<float> {
+public:
+    static SoaRangeReadProbe* New() {return new SoaRangeReadProbe;}
+    vtkTypeMacro(SoaRangeReadProbe, vtkSOADataArrayTemplate<float>);
+    inline static int voidPointerCalls = 0;
+    void* GetVoidPointer(vtkIdType index) override
+    {
+        ++voidPointerCalls;
         return this->Superclass::GetVoidPointer(index);
     }
 };
@@ -937,7 +957,7 @@ int GetIsoBuilderFailCount()
             && buildResult.product->surface
             && buildResult.product->surface->GetNumberOfPoints() > 0
             && buildResult.product->surface->GetNumberOfCells() > 0
-            && buildResult.product->actualBytes > 0
+            && buildResult.product->GetActualBytes() > 0
             && vtkTrivialProducer::SafeDownCast(
                 mapper->GetInputAlgorithm()),
         "Iso builder returns a materialized producer-free CPU product")
@@ -1163,17 +1183,20 @@ int GetIsoIndexProfileFailCount()
         work.work = [&](RenderTaskToken token) {result = IsoSurfaceProductBuilder().BuildProduct(request, token);};
         const auto admission = channel->StartTask(std::move(work));
         const bool sent = lane->SendOne();
+        auto upload = result.product && result.product->triangleIndices
+            ? result.product->triangleIndices->TakeIndices() : nullptr;
         const bool valid = admission == RenderTaskAdmission::Accepted && sent && result.product
-            && result.product->surface && result.product->triangleIndicesTime != 0;
+            && result.product->surface && result.product->triangleIndicesTime != 0 && upload;
         if (valid) {
             std::cout << "ISO_INDEX_PROFILE dimensions=" << dimensions[0] << ',' << dimensions[1] << ',' << dimensions[2]
                 << " iso=" << iso << " points=" << result.product->surface->GetNumberOfPoints()
                 << " polygons=" << result.product->surface->GetNumberOfPolys()
-                << " emitted_triangles=" << result.product->triangleIndices.size() / 3
-                << " index_capacity_bytes=" << result.product->triangleIndices.capacity() * sizeof(unsigned int)
+                << " emitted_triangles=" << upload->size() / 3
+                << " index_capacity_bytes=" << upload->capacity() * sizeof(unsigned int)
                 << " mesh_bytes=" << static_cast<std::uint64_t>(result.product->surface->GetActualMemorySize()) * 1024
-                << " product_bytes=" << result.product->actualBytes << '\n';
+                << " product_bytes=" << result.product->GetActualBytes() << '\n';
         }
+        upload.reset();
         result.product.reset(); (void)channel->Stop(); channel.reset();
         const auto released = resources.GetResourceState();
         return GetCaseResult(valid && released.runningBytes == 0 && released.pendingBytes == 0,
@@ -1182,6 +1205,77 @@ int GetIsoIndexProfileFailCount()
     catch (...) {
         return GetCaseResult(false, "Explicit Iso profile completes without an exception") ? 0 : 1;
     }
+}
+
+int GetIsoIndexReleaseFailCount()
+{
+    int failures = 0;
+    auto image = BuildIsoImage();
+    auto request = GetIsoRequest(image, 1, VolumeQuality::Ultra, 0.0);
+    auto lane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator resources([lane](RenderLaneWork work) {return lane->Start(std::move(work));});
+    auto first = resources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    auto second = resources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    IsoSurfaceBuildResult result; std::function<void()> released;
+    RenderTaskRequest work; work.requestRevision = 1;
+    work.estimatedBytes = *IsoSurfaceProductBuilder::GetEstimatedBytes(request);
+    work.work = [&](RenderTaskToken token) {
+        result = IsoSurfaceProductBuilder().BuildProduct(request, token);
+        if (result.product) released = token.GetProductBytesRelease(result.product, result.product->meshBytes);
+    };
+    bool valid = first->StartTask(std::move(work)) == RenderTaskAdmission::Accepted && lane->SendOne()
+        && result.product && result.product->triangleIndices;
+    if (!valid) return GetCaseResult(false, "Managed Iso upload-release fixture builds its CPU candidate") ? 0 : 1;
+    const auto total = result.product->GetActualBytes(), mesh = result.product->meshBytes;
+    auto upload = result.product->triangleIndices->TakeIndices();
+    auto reader = upload;
+    auto other = std::make_shared<int>(0);
+    valid = resources.SetIsoSurfaceProduct(request.key, result.product)
+        && first->SetActiveBytes(1, total, result.product.get()) && first->CompleteActiveBytes(1)
+        && second->SetCachedActive(2, total, result.product.get()) && second->CompleteActiveBytes(2)
+        && second->SetCachedActive(3, 32, other.get()) && valid;
+    auto state = resources.GetResourceState();
+    valid = valid && upload && total > mesh && state.activeBytes == total + 32
+        && !resources.SetCpuBudgetBytes(mesh + 32);
+    upload.reset();
+    valid = valid && resources.GetResourceState().activeBytes == total + 32;
+    reader.reset();
+    if (released) {released(); released();} // 重复通知不能再次扣掉mesh。
+    state = resources.GetResourceState();
+    valid = valid && result.product->GetActualBytes() == mesh && state.activeBytes == mesh + 32
+        && state.cacheBytes == 0 && state.pendingBytes == 0 && resources.SetCpuBudgetBytes(mesh + 32)
+        && first->SetCachedActive(4, total, result.product.get()) && first->CompleteActiveBytes(4)
+        && second->RestoreActiveBytes(3) && resources.GetResourceState().activeBytes == mesh;
+    failures += GetCaseResult(valid,
+        "CPU upload release shrinks shared active/retiring/cache leases once and stale activation cannot recharge freed indices") ? 0 : 1;
+    first.reset(); second.reset(); result.product.reset(); (void)resources.StartStop();
+    failures += GetCaseResult(resources.GetResourceState().pendingBytes == 0
+        && resources.GetResourceState().cacheBytes == 0,
+        "Released Iso product bookkeeping returns to zero after all channels and cache retire") ? 0 : 1;
+
+    auto stopLane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator stopResources([stopLane](RenderLaneWork task) {return stopLane->Start(std::move(task));});
+    auto channel = stopResources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    IsoSurfaceBuildResult stopped;
+    RenderTaskRequest stopWork; stopWork.requestRevision = 1;
+    stopWork.estimatedBytes = *IsoSurfaceProductBuilder::GetEstimatedBytes(request);
+    stopWork.work = [&](RenderTaskToken token) {stopped = IsoSurfaceProductBuilder().BuildProduct(request, token);};
+    valid = channel->StartTask(std::move(stopWork)) == RenderTaskAdmission::Accepted && stopLane->SendOne()
+        && stopped.product && stopped.product->triangleIndices;
+    if (valid) {
+        const auto bytes = stopped.product->GetActualBytes();
+        auto held = stopped.product->triangleIndices->TakeIndices();
+        valid = stopResources.SetIsoSurfaceProduct(request.key, stopped.product) && held && valid;
+        stopped.product.reset(); channel.reset(); (void)stopResources.StartStop();
+        valid = valid && stopResources.GetResourceState().pendingBytes == bytes;
+        std::thread lastReader([held = std::move(held)]() mutable {held.reset();});
+        lastReader.join();
+        const auto finalState = stopResources.GetResourceState();
+        valid = valid && finalState.activeBytes == 0 && finalState.pendingBytes == 0
+            && finalState.runningBytes == 0 && finalState.cacheBytes == 0;
+    }
+    return failures + (GetCaseResult(valid,
+        "Stop preserves an in-flight CPU upload reader and returns all bytes when its final reader exits") ? 0 : 1);
 }
 
 int GetIsoIndexFailCount()
@@ -1197,11 +1291,16 @@ int GetIsoIndexFailCount()
     std::vector<unsigned int> reference;
     vtkOpenGLIndexBufferObject::AppendTriangleIndexBuffer(reference,
         prepared.product->surface->GetPolys(), prepared.product->surface->GetPoints(), 0, nullptr, nullptr);
+    auto preparedIndices = prepared.product->triangleIndices ? prepared.product->triangleIndices->TakeIndices() : nullptr;
     failures += GetCaseResult(!reference.empty()
-        && prepared.product->triangleIndices == reference
+        && preparedIndices && *preparedIndices == reference
         && prepared.product->triangleIndicesTime == prepared.product->surface->GetMeshMTime()
-        && prepared.product->actualBytes == meshBytes + prepared.product->triangleIndices.capacity() * sizeof(unsigned int),
+        && prepared.product->GetActualBytes() == meshBytes + preparedIndices->capacity() * sizeof(unsigned int),
         "Iso batches preserve VTK triangle order, unsigned index type and zero vertex offset with exact retained bytes") ? 0 : 1;
+    preparedIndices.reset();
+    failures += GetCaseResult(prepared.product->GetActualBytes() == meshBytes
+        && !prepared.product->triangleIndices->TakeIndices(),
+        "An Iso CPU upload cache is consumed once without changing its immutable mesh") ? 0 : 1;
 
     auto budgetLane = std::make_shared<ManualRenderLane>();
     RenderResourceCoordinator budgetResources([budgetLane](RenderLaneWork work) {return budgetLane->Start(std::move(work));});
@@ -1222,8 +1321,8 @@ int GetIsoIndexFailCount()
     const bool wasSent = budgetLane->SendOne();
     failures += GetCaseResult(admitted == RenderTaskAdmission::Accepted && wasSent && wasBudgetSet
         && fallback.product && fallback.failureReason == RenderProductFailure::None
-        && fallback.product->triangleIndicesTime == 0 && fallback.product->triangleIndices.empty()
-        && fallback.product->actualBytes == meshBytes
+        && fallback.product->triangleIndicesTime == 0 && !fallback.product->triangleIndices
+        && fallback.product->GetActualBytes() == meshBytes
         && budgetChannel->GetState().status == RenderProductStatus::Ready,
         "An insufficient optional Iso budget keeps the original mesh product successful") ? 0 : 1;
 
@@ -1249,7 +1348,7 @@ int GetIsoIndexFailCount()
 
     auto renderer = vtkSmartPointer<vtkRenderer>::New();
     auto window = vtkSmartPointer<vtkRenderWindow>::New();
-    window->SetOffScreenRendering(1); window->SetSize(64, 64); window->AddRenderer(renderer);
+    window->SetOffScreenRendering(1); window->SetSize(64, 64); window->SetMultiSamples(0); window->AddRenderer(renderer);
     auto capture = vtkSmartPointer<vtkWindowToImageFilter>::New();
     capture->SetInput(window); capture->ReadFrontBufferOff(); capture->SetInputBufferTypeToRGBA();
     const auto pixels = [&] {
@@ -1309,7 +1408,37 @@ int GetIsoIndexFailCount()
             return same;
         };
         valid = samePixels("surface") && valid;
+        const auto activeBytes = resources->GetResourceState().activeBytes;
+        if (activeBytes != product->GetActualBytes())
+            std::cerr << "ISO_INDEX_ADOPTED_BYTES actual=" << activeBytes << " expected=" << product->GetActualBytes() << '\n';
+        valid = activeBytes == product->GetActualBytes() && valid;
         if (checkModes) {
+            // 点选择会要求不同的IBO表示；返回普通绘制后仍须逐字节相同。
+            // 产品actor默认不可拾取，此处只在夹具显式启用选择能力。
+            actor->PickableOn();
+            const auto selectedIds = [&](vtkMapper* mapper) {
+                actor->SetMapper(mapper);
+                auto selector = vtkSmartPointer<vtkOpenGLHardwareSelector>::New();
+                selector->SetRenderer(renderer); selector->SetArea(0, 0, 63, 63);
+                selector->SetFieldAssociation(vtkDataObject::FIELD_ASSOCIATION_POINTS);
+                auto selection = vtkSmartPointer<vtkSelection>::Take(selector->Select());
+                std::vector<vtkIdType> ids;
+                if (selection) for (unsigned int node = 0; node < selection->GetNumberOfNodes(); ++node) {
+                    auto* values = vtkIdTypeArray::SafeDownCast(selection->GetNode(node)->GetSelectionList());
+                    if (values) for (vtkIdType index = 0; index < values->GetNumberOfValues(); ++index)
+                        ids.push_back(values->GetValue(index));
+                }
+                std::sort(ids.begin(), ids.end()); return ids;
+            };
+            actor->GetProperty()->SetPointSize(3);
+            const auto optimizedIds = selectedIds(optimized);
+            const auto legacyIds = selectedIds(legacy);
+            if (legacyIds.empty() || optimizedIds != legacyIds)
+                std::cerr << "ISO_INDEX_SELECTION legacy_ids=" << legacyIds.size() << " prepared_ids=" << optimizedIds.size()
+                    << " equal=" << (optimizedIds == legacyIds) << '\n';
+            valid = !legacyIds.empty() && optimizedIds == legacyIds && samePixels("selector-return") && valid;
+            actor->PickableOff();
+            actor->GetProperty()->SetRepresentationToPoints(); valid = samePixels("points") && valid;
             actor->GetProperty()->SetRepresentationToWireframe(); valid = samePixels("wireframe") && valid;
             actor->GetProperty()->SetRepresentationToSurface();
             actor->GetProperty()->EdgeVisibilityOn(); valid = samePixels("edges") && valid;
@@ -1323,8 +1452,10 @@ int GetIsoIndexFailCount()
         legacy->ReleaseGraphicsResources(window); optimized->ReleaseGraphicsResources(window);
         return valid;
     };
-    failures += GetCaseResult(checkRender(prepared.product, true),
-        "Prepared Iso indices and representation/edge/vertex/resource-reset fallbacks match nonempty legacy RGBA exactly") ? 0 : 1;
+    const auto renderProduct = IsoSurfaceProductBuilder().BuildProduct(request, RenderTaskToken{});
+    failures += GetCaseResult(checkRender(renderProduct.product, true)
+        && renderProduct.product->GetActualBytes() == meshBytes,
+        "Prepared Iso indices release CPU storage and points/selection/representation/resource-reset fallbacks match legacy RGBA exactly") ? 0 : 1;
     failures += GetCaseResult(checkRender(fallback.product, false),
         "Optional Iso budget fallback renders exactly the same nonempty RGBA as the original mapper") ? 0 : 1;
 
@@ -1336,13 +1467,48 @@ int GetIsoIndexFailCount()
         originalCells->GetCellAtId(cell, count, ids); fewerCells->InsertNextCell(count, ids);
     }
     changed->SetPolys(fewerCells);
-    auto stale = std::make_shared<IsoSurfaceProduct>(*prepared.product);
-    stale->surface = changed;
-    stale->actualBytes = static_cast<std::uint64_t>(changed->GetActualMemorySize()) * 1024
-        + stale->triangleIndices.capacity() * sizeof(unsigned int);
+    const auto makeProduct = [&](vtkPolyData* surface, vtkMTimeType indexTime, std::vector<unsigned int> indices) {
+        auto product = std::make_shared<IsoSurfaceProduct>();
+        product->inputUse = prepared.product->inputUse; product->requestRevision = prepared.product->requestRevision;
+        product->inputStamp = prepared.product->inputStamp; product->requestedQuality = prepared.product->requestedQuality;
+        product->inputDimensions = prepared.product->inputDimensions; product->isoValue = prepared.product->isoValue;
+        product->surface = surface; product->meshBytes = static_cast<std::uint64_t>(surface->GetActualMemorySize()) * 1024;
+        product->triangleIndicesTime = indexTime;
+        product->triangleIndices = std::make_unique<IsoSurfaceIndexCache>(std::move(indices), product, std::function<void()>{});
+        return product;
+    };
+    auto stale = makeProduct(changed, prepared.product->triangleIndicesTime, reference);
     failures += GetCaseResult(stale->triangleIndicesTime != changed->GetMeshMTime()
         && checkRender(stale, false),
         "Changed private Iso topology invalidates prepared indices and preserves legacy RGBA") ? 0 : 1;
+
+    for (int variant = 0; variant < 4; ++variant) {
+        auto mixed = vtkSmartPointer<vtkPolyData>::New();
+        auto points = vtkSmartPointer<vtkPoints>::New();
+        for (const auto& point : std::array<std::array<double, 3>, 8>{{
+            {{-1,-1,0}},{{1,-1,0}},{{-1,1,0}},{{1,1,0}},
+            {{2,-.8,0}},{{3,-.8,0}},{{2,.8,0}},{{3,.8,0}}}})
+            points->InsertNextPoint(point.data());
+        mixed->SetPoints(points);
+        auto polys = vtkSmartPointer<vtkCellArray>::New();
+        const vtkIdType triangle[]{0,1,2}; polys->InsertNextCell(3, triangle); mixed->SetPolys(polys);
+        if (variant == 0 || variant == 3) {
+            auto verts = vtkSmartPointer<vtkCellArray>::New(); const vtkIdType vertex[]{3};
+            verts->InsertNextCell(1, vertex); mixed->SetVerts(verts);
+        }
+        if (variant == 1 || variant == 3) {
+            auto lines = vtkSmartPointer<vtkCellArray>::New(); const vtkIdType line[]{1,3};
+            lines->InsertNextCell(2, line); mixed->SetLines(lines);
+        }
+        if (variant == 2 || variant == 3) {
+            auto strips = vtkSmartPointer<vtkCellArray>::New(); const vtkIdType strip[]{4,5,6,7};
+            strips->InsertNextCell(4, strip); mixed->SetStrips(strips);
+        }
+        mixed->ComputeCellsBounds();
+        auto mixedProduct = makeProduct(mixed, mixed->GetMeshMTime(), {0,1,2});
+        failures += GetCaseResult(checkRender(mixedProduct, false),
+            "Mixed vertices/lines/triangle strips bypass the triangle-only fast path and preserve legacy RGBA") ? 0 : 1;
+    }
 
     auto leaseLane = std::make_shared<ManualRenderLane>();
     auto leaseResources = std::make_shared<RenderResourceCoordinator>([leaseLane](RenderLaneWork work) {return leaseLane->Start(std::move(work));});
@@ -1354,7 +1520,7 @@ int GetIsoIndexFailCount()
         && strategy->SetInputData(image, nullptr) && leaseLane->SendOne() && strategy->SetProductCommit();
     auto retained = leaseResources->GetIsoSurfaceProduct(request.key);
     std::weak_ptr<const IsoSurfaceProduct> weakProduct = retained;
-    const auto retainedBytes = retained ? retained->actualBytes : 0;
+    const auto retainedBytes = retained ? retained->GetActualBytes() : 0;
     auto retainedActor = vtkSmartPointer<vtkActor>(vtkActor::SafeDownCast(strategy->GetMainProp()));
     retained.reset(); strategy.reset();
     (void)leaseResources->StartStop();
@@ -1365,7 +1531,7 @@ int GetIsoIndexFailCount()
     failures += GetCaseResult(validLease && weakProduct.expired() && afterRelease.pendingBytes == 0
         && afterRelease.activeBytes == 0 && afterRelease.runningBytes == 0 && afterRelease.cacheBytes == 0,
         "An externally retained Iso actor owns its CPU indices until the final mapper reader releases them") ? 0 : 1;
-    return failures + GetIsoIndexProfileFailCount();
+    return failures + GetIsoIndexReleaseFailCount() + GetIsoIndexProfileFailCount();
 }
 
 int GetVolumeBuilderFailCount()
@@ -1457,6 +1623,19 @@ int GetVolumeBuilderFailCount()
 int GetVolumeRangeFailCount()
 {
     int failures = 0;
+    auto soaImage = vtkSmartPointer<vtkImageData>::New(); soaImage->SetDimensions(4, 2, 2);
+    auto soa = vtkSmartPointer<SoaRangeReadProbe>::New();
+    soa->SetNumberOfComponents(3); soa->SetNumberOfTuples(16);
+    for (vtkIdType tuple = 0; tuple < 16; ++tuple)
+        for (int component = 0; component < 3; ++component)
+            soa->SetTypedComponent(tuple, component, static_cast<float>(tuple + component * 100));
+    soaImage->GetPointData()->SetScalars(soa); SoaRangeReadProbe::voidPointerCalls = 0;
+    const auto soaResult = VolumeLodProductBuilder().BuildProduct(
+        GetVolumeRequest(soaImage, nullptr, 1, VolumeQuality::Ultra, {4, 2, 2}, false), RenderTaskToken{});
+    failures += GetCaseResult(soaResult.product && soaResult.product->volume == soaImage
+        && SoaRangeReadProbe::voidPointerCalls == 0 && soa->GetTypedComponent(15, 2) == 215
+        && !soa->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT()),
+        "Native multi-component SOA skips optional range materialization and preserves the original successful path") ? 0 : 1;
     for (const int type : {VTK_FLOAT, VTK_DOUBLE, VTK_UNSIGNED_CHAR, VTK_SHORT, VTK_UNSIGNED_LONG_LONG}) {
         auto image = vtkSmartPointer<vtkImageData>::New();
         image->SetDimensions(4, 2, 2);

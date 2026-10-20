@@ -77,6 +77,7 @@ struct RenderProductLease final {
     std::weak_ptr<const void> owner;
     const void* identity = nullptr;
     std::uint64_t bytes = 0;
+    std::weak_ptr<const IsoSurfaceProduct> isoProduct;
 };
 
 struct RenderRunningTask final {
@@ -119,7 +120,6 @@ struct RenderCoordinatorState final {
     std::vector<IsoCacheEntry> isoCache;
     std::vector<RenderProductLease> productLeases;
     std::vector<GpuContextEntry> gpuContexts;
-    std::uint64_t cacheBytes = 0;
     std::uint64_t cacheUseStamp = 0;
     std::uint64_t productBuildCount = 0;
     std::uint64_t joinedBuildCount = 0;
@@ -139,6 +139,12 @@ std::uint64_t GetDoubleBits(const double value) noexcept
     std::memcpy(&bits, &value, sizeof(bits));
     return bits;
 }
+
+std::uint64_t GetProductBytes(const VolumeLodProduct& product) noexcept
+{ return product.actualBytes; }
+
+std::uint64_t GetProductBytes(const IsoSurfaceProduct& product) noexcept
+{ return product.GetActualBytes(); }
 
 bool GetVolumeKeyEqual(
     const VolumeLodKey& left,
@@ -187,6 +193,41 @@ struct RenderChannelState final {
     bool isStopped = false;
 };
 
+std::uint64_t GetRegisteredProductBytesLocked(const RenderCoordinatorState& state,
+    const void* identity, const std::uint64_t requestedBytes)
+{
+    const auto lease = std::find_if(state.productLeases.begin(), state.productLeases.end(),
+        [identity](const auto& item) {return item.identity == identity && !item.owner.expired();});
+    if (lease != state.productLeases.end()) {
+        auto bytes = std::min(requestedBytes, lease->bytes);
+        if (const auto isoProduct = lease->isoProduct.lock()) {
+            bytes = std::min(bytes, isoProduct->GetActualBytes());
+        }
+        return bytes;
+    }
+    const auto cachedIso = std::find_if(state.isoCache.begin(), state.isoCache.end(),
+        [identity](const auto& entry) {
+            return entry.product && entry.product.get() == identity;
+        });
+    return cachedIso == state.isoCache.end()
+        ? requestedBytes
+        : std::min(requestedBytes, cachedIso->product->GetActualBytes());
+}
+
+std::uint64_t GetCacheBytesLocked(const RenderCoordinatorState& state) noexcept
+{
+    std::uint64_t total = 0;
+    const auto add = [&total](const std::uint64_t bytes) {
+        const auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+        total = bytes > maximum - total ? maximum : total + bytes;
+    };
+    for (const auto& entry : state.volumeCache) add(entry.bytes);
+    for (const auto& entry : state.isoCache) {
+        if (entry.product) add(entry.product->GetActualBytes());
+    }
+    return total;
+}
+
 bool GetSumValid(
     const std::uint64_t left,
     const std::uint64_t right,
@@ -222,12 +263,14 @@ RenderResourceState GetResourceStateLocked(
             total = (std::numeric_limits<std::uint64_t>::max)();
         }
     };
-    const auto addActive = [&result, &activeAllocations, &addBytes](
+    const auto addActive = [&state, &result, &activeAllocations, &addBytes](
         const void* identity,
         const std::uint64_t bytes) {
-        if (bytes == 0) return;
+        const auto resolvedBytes = GetRegisteredProductBytesLocked(
+            state, identity, bytes);
+        if (resolvedBytes == 0) return;
         if (!identity) {
-            addBytes(result.activeBytes, bytes);
+            addBytes(result.activeBytes, resolvedBytes);
             return;
         }
         const auto existing = std::find_if(
@@ -236,13 +279,13 @@ RenderResourceState GetResourceStateLocked(
                 return allocation.identity == identity;
             });
         if (existing == activeAllocations.end()) {
-            activeAllocations.push_back({ identity, bytes });
-            addBytes(result.activeBytes, bytes);
+            activeAllocations.push_back({ identity, resolvedBytes });
+            addBytes(result.activeBytes, resolvedBytes);
             return;
         }
-        if (bytes > existing->bytes) {
-            addBytes(result.activeBytes, bytes - existing->bytes);
-            existing->bytes = bytes;
+        if (resolvedBytes > existing->bytes) {
+            addBytes(result.activeBytes, resolvedBytes - existing->bytes);
+            existing->bytes = resolvedBytes;
         }
     };
     for (const auto& weakChannel : state.channels) {
@@ -282,7 +325,7 @@ RenderResourceState GetResourceStateLocked(
                     return allocation.identity == entry.product.get();
                 });
         if (entry.product && !isActive) {
-            addCacheBytes(entry.bytes);
+            addCacheBytes(entry.product->GetActualBytes());
         }
     }
     // 迟到/取消的 mailbox 仍可能持有完整产品；弱 allocation 记录只在最后读者退出后失效。
@@ -296,7 +339,10 @@ RenderResourceState GetResourceStateLocked(
                 [identity](const auto& item) { return item.product.get() == identity; })
             || std::any_of(state.isoCache.begin(), state.isoCache.end(),
                 [identity](const auto& item) { return item.product.get() == identity; });
-        if (!isKnown) addBytes(result.pendingBytes, lease.bytes);
+        if (!isKnown) {
+            addBytes(result.pendingBytes,
+                GetRegisteredProductBytesLocked(state, identity, lease.bytes));
+        }
     }
     if (state.running) {
         result.runningBytes = state.running->accountedBytes;
@@ -421,11 +467,10 @@ bool TryMakeCacheSpaceLocked(
         if (!hasVictim) return false;
         const std::uint64_t removedBytes = isVolume
             ? state.volumeCache[victimIndex].bytes
-            : state.isoCache[victimIndex].bytes;
-        if (removedBytes > state.cacheBytes || removedBytes > total) {
+            : state.isoCache[victimIndex].product->GetActualBytes();
+        if (removedBytes > GetCacheBytesLocked(state) || removedBytes > total) {
             return false;
         }
-        state.cacheBytes -= removedBytes;
         total -= removedBytes;
         if (isVolume) {
             state.volumeCache.erase(
@@ -456,10 +501,9 @@ bool TryEvictOldestVolumeLocked(RenderCoordinatorState& state)
         }
     }
     if (victim == state.volumeCache.end()
-        || victim->bytes > state.cacheBytes) {
+        || victim->bytes > GetCacheBytesLocked(state)) {
         return false;
     }
-    state.cacheBytes -= victim->bytes;
     state.volumeCache.erase(victim);
     return true;
 }
@@ -816,11 +860,51 @@ bool RenderTaskToken::SetProductOwner(
         state.productLeases.end());
     const auto lease = std::find_if(state.productLeases.begin(), state.productLeases.end(),
         [&product](const auto& entry) { return entry.identity == product.get(); });
-    if (lease == state.productLeases.end()) state.productLeases.push_back({product, product.get(), actualBytes});
+    if (lease == state.productLeases.end()) state.productLeases.push_back({product, product.get(), actualBytes, {}});
     else lease->bytes = std::max(lease->bytes, actualBytes);
     state.running->productIdentity = product.get();
     m_impl->channel->candidateIdentity = product.get();
     return true;
+}
+
+std::function<void()> RenderTaskToken::GetProductBytesRelease(
+    const std::shared_ptr<const void>& product, const std::uint64_t retainedBytes) const
+{
+    if (!m_impl || !m_impl->state || !product) return {};
+    return [weakState = std::weak_ptr<RenderCoordinatorState>(m_impl->state),
+        weakOwner = std::weak_ptr<const void>(product), retainedBytes] {
+        const auto state = weakState.lock(); const auto owner = weakOwner.lock();
+        if (!state || !owner) return;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        const auto identity = owner.get();
+        const auto lease = std::find_if(state->productLeases.begin(), state->productLeases.end(),
+            [identity](const auto& item) {return item.identity == identity && !item.owner.expired();});
+        if (lease == state->productLeases.end()) return;
+        const auto bytes = std::min(lease->bytes, retainedBytes);
+        lease->bytes = bytes;
+        // 1. 产品只缩减实际常驻量；running高水位仍覆盖尚未结束的工作区。
+        if (state->running && state->running->productIdentity == identity)
+            state->running->retainedBytes = std::min(state->running->retainedBytes, bytes);
+        // 2. 同产品多个active/retiring读者和cache条目同时更新，继续按原identity去重。
+        for (const auto& weak : state->channels) {
+            const auto channel = weak.lock(); if (!channel) continue;
+            if (channel->activeProductIdentity == identity) {
+                channel->activeBytes = std::min(channel->activeBytes, bytes);
+                channel->transition.stats.activeBytes = channel->activeBytes;
+            }
+            if (channel->retiringProductIdentity == identity)
+                channel->retiringBytes = std::min(channel->retiringBytes, bytes);
+            if (channel->candidateIdentity == identity)
+                channel->transition.stats.candidateBytes = std::min(channel->transition.stats.candidateBytes, bytes);
+        }
+        const auto shrinkCache = [identity, bytes](auto& entries) {
+            for (auto& entry : entries) if (entry.product.get() == identity) {
+                const auto next = std::min(entry.bytes, bytes);
+                entry.bytes = next;
+            }
+        };
+        shrinkCache(state->volumeCache); shrinkCache(state->isoCache);
+    };
 }
 
 RenderTaskChannel::RenderTaskChannel(std::shared_ptr<Impl> impl)
@@ -910,7 +994,12 @@ RenderTransitionState RenderTaskChannel::GetState() const
         return state;
     }
     std::lock_guard<std::mutex> lock(m_impl->state->mutex);
-    return m_impl->channel->transition;
+    auto transition = m_impl->channel->transition;
+    transition.stats.activeBytes = GetRegisteredProductBytesLocked(
+        *m_impl->state,
+        m_impl->channel->activeProductIdentity,
+        m_impl->channel->activeBytes);
+    return transition;
 }
 
 bool RenderTaskChannel::SetActiveBytes(
@@ -936,12 +1025,13 @@ bool RenderTaskChannel::SetActiveBytes(
     channel.retiringRevision = channel.transition.stats.activeRevision;
     channel.retiringBytes = channel.activeBytes;
     channel.retiringProductIdentity = channel.activeProductIdentity;
-    channel.activeBytes = activeBytes;
+    const auto resolvedActiveBytes = GetRegisteredProductBytesLocked(state, productIdentity, activeBytes);
+    channel.activeBytes = resolvedActiveBytes;
     channel.activeProductIdentity = productIdentity;
     channel.transition.status = RenderProductStatus::Active;
     channel.transition.failureReason = RenderProductFailure::None;
     channel.transition.stats.activeRevision = requestRevision;
-    channel.transition.stats.activeBytes = activeBytes;
+    channel.transition.stats.activeBytes = resolvedActiveBytes;
     channel.transition.stats.candidateBytes = 0;
     channel.transition.message.clear();
     std::uint64_t total = 0;
@@ -987,13 +1077,14 @@ bool RenderTaskChannel::SetCachedActive(
         channel.retiringRevision = channel.transition.stats.activeRevision;
         channel.retiringBytes = channel.activeBytes;
         channel.retiringProductIdentity = channel.activeProductIdentity;
-        channel.activeBytes = activeBytes;
+        const auto resolvedActiveBytes = GetRegisteredProductBytesLocked(state, productIdentity, activeBytes);
+        channel.activeBytes = resolvedActiveBytes;
         channel.activeProductIdentity = productIdentity;
         channel.transition.status = RenderProductStatus::Active;
         channel.transition.failureReason = RenderProductFailure::None;
         channel.transition.stats.requestRevision = requestRevision;
         channel.transition.stats.activeRevision = requestRevision;
-        channel.transition.stats.activeBytes = activeBytes;
+        channel.transition.stats.activeBytes = resolvedActiveBytes;
         channel.transition.stats.candidateBytes = 0;
         channel.transition.message.clear();
         std::uint64_t total = 0;
@@ -1149,7 +1240,6 @@ RenderResourceCoordinator::RenderResourceCoordinator(
                     if (std::find(retired.begin(), retired.end(), it->key.inputStamp.dataRevision) == retired.end()) {
                         ++it; continue;
                     }
-                    current->cacheBytes -= it->bytes;
                     owners.push_back(std::move(it->product));
                     it = entries.erase(it);
                 }
@@ -1307,7 +1397,7 @@ RenderTaskAdmission RenderResourceCoordinator::Impl::StartProduct(const std::sha
                 auto channel = waiter.channel.lock();
                 channel->candidateIdentity = result.product.get();
                 channel->transition.status = RenderProductStatus::Ready;
-                channel->transition.stats.candidateBytes = result.product ? result.product->actualBytes : 0;
+                channel->transition.stats.candidateBytes = result.product ? GetProductBytes(*result.product) : 0;
                 waiters.push_back(std::move(waiter));
             }
             state->builds.erase(std::remove(state->builds.begin(), state->builds.end(), build), state->builds.end());
@@ -1407,7 +1497,6 @@ bool RenderResourceCoordinator::StartStop()
         discardedIsoCache = std::move(state.isoCache);
         discardedGpuContexts = std::move(state.gpuContexts);
         discardedBuilds = std::move(state.builds);
-        state.cacheBytes = 0;
         state.stopped.notify_all();
     }
     return true;
@@ -1513,7 +1602,7 @@ bool RenderResourceCoordinator::SetVolumeProduct(
     if (!TryMakeCacheSpaceLocked(state, addedBytes)
         || product->actualBytes
             > (std::numeric_limits<std::uint64_t>::max)()
-                - state.cacheBytes) {
+                - GetCacheBytesLocked(state)) {
         return false;
     }
     const std::uint64_t bytes = product->actualBytes;
@@ -1528,7 +1617,6 @@ bool RenderResourceCoordinator::SetVolumeProduct(
     catch (...) {
         return false;
     }
-    state.cacheBytes += bytes;
     return true;
 }
 
@@ -1556,13 +1644,24 @@ bool RenderResourceCoordinator::SetIsoSurfaceProduct(
     std::shared_ptr<const IsoSurfaceProduct> product)
 {
     if (!m_impl || !m_impl->state || !product || !product->surface
-        || product->actualBytes == 0 || !product->inputUse.GetIsPublished()
+        || product->GetActualBytes() == 0 || !product->inputUse.GetIsPublished()
         || product->inputStamp != key.inputStamp) {
         return false;
     }
     std::lock_guard<std::mutex> lock(m_impl->state->mutex);
     auto& state = *m_impl->state;
     if (!product->inputUse.GetIsPublished()) return false;
+    const void* const productIdentity = product.get();
+    const std::weak_ptr<const void> productOwner = product;
+    const std::weak_ptr<const IsoSurfaceProduct> isoProduct = product;
+    const auto lease = std::find_if(state.productLeases.begin(), state.productLeases.end(),
+        [productIdentity](const auto& candidate) {
+            return candidate.identity == productIdentity && !candidate.owner.expired();
+        });
+    const bool hasLease = lease != state.productLeases.end();
+    if (hasLease) lease->isoProduct = isoProduct;
+    const auto bytes = GetRegisteredProductBytesLocked(
+        state, productIdentity, product->GetActualBytes());
     const auto existing = std::find_if(
         state.isoCache.begin(), state.isoCache.end(),
         [&key](const IsoCacheEntry& candidate) {
@@ -1574,19 +1673,14 @@ bool RenderResourceCoordinator::SetIsoSurfaceProduct(
         existing->lastUse = ++state.cacheUseStamp;
         return true;
     }
-    const bool hasLease = std::any_of(state.productLeases.begin(), state.productLeases.end(),
-        [&product](const auto& lease) {
-            return !lease.owner.expired() && lease.identity == product.get();
-        });
     const std::uint64_t addedBytes = GetProductActiveLocked(
-        state, product.get()) || hasLease ? 0 : product->actualBytes;
+        state, productIdentity) || hasLease ? 0 : bytes;
     if (!TryMakeCacheSpaceLocked(state, addedBytes)
-        || product->actualBytes
+        || bytes
             > (std::numeric_limits<std::uint64_t>::max)()
-                - state.cacheBytes) {
+                - GetCacheBytesLocked(state)) {
         return false;
     }
-    const std::uint64_t bytes = product->actualBytes;
     try {
         state.isoCache.push_back(IsoCacheEntry{
             key,
@@ -1598,7 +1692,16 @@ bool RenderResourceCoordinator::SetIsoSurfaceProduct(
     catch (...) {
         return false;
     }
-    state.cacheBytes += bytes;
+    if (!hasLease) {
+        try {
+            state.productLeases.push_back({
+                productOwner, productIdentity, bytes, isoProduct
+            });
+        }
+        catch (...) {
+            // 缓存仍由产品当前字节数计量，不因可选租约记录分配失败拒绝显示。
+        }
+    }
     return true;
 }
 
