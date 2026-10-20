@@ -40,6 +40,9 @@ QToolBar#contextToolbar QToolButton { padding: 5px 8px; border-radius: 0; }
 QToolBar#quickToolbar QPushButton, QToolBar#quickToolbar QToolButton { padding: 5px 6px; }
 QDockWidget { color: @text; background: @surface; }
 QDockWidget::title { background: @subtle; padding: 6px 8px; text-align: left; }
+QDockWidget::close-button, QDockWidget::float-button { border: 1px solid transparent; border-radius: 3px; background: transparent; }
+QDockWidget::close-button:hover, QDockWidget::float-button:hover { background: @selection; }
+QDockWidget::close-button:focus, QDockWidget::float-button:focus { border: 1px dashed @accent; }
 QMainWindow::separator { width: 6px; height: 6px; background: @canvas; }
 QMainWindow::separator:hover { background: @outline; }
 QLabel#currentInputIdentity { padding: 2px 0; color: @muted; }
@@ -61,6 +64,10 @@ QWidget[propertyRow="true"] { border-bottom: 1px solid @subtle; }
 QWidget#viewHeader { background: @subtle; }
 QWidget#viewHeader QPushButton, QWidget#viewHeader QToolButton { padding: 2px 4px; min-height: 22px; }
 QWidget#viewHeader QComboBox { padding: 2px 4px; min-height: 22px; }
+QWidget#viewHeader QPushButton[dockTitleButton="true"], QWidget#viewHeader QToolButton[dockTitleButton="true"] { padding: 2px; min-width: 22px; max-width: 22px; min-height: 22px; max-height: 22px; border: 1px solid transparent; border-radius: 3px; background: transparent; }
+QWidget#viewHeader QPushButton[dockTitleButton="true"]:hover, QWidget#viewHeader QToolButton[dockTitleButton="true"]:hover { background: @selection; }
+QWidget#viewHeader QPushButton[dockTitleButton="true"]:pressed, QWidget#viewHeader QToolButton[dockTitleButton="true"]:pressed { background: @outline; }
+QWidget#viewHeader QPushButton[dockTitleButton="true"]:focus, QWidget#viewHeader QToolButton[dockTitleButton="true"]:focus { border: 1px dashed @accent; }
 QWidget#operationFields, QWidget#sectionFields { background: @surface; }
 QWidget#businessContext { background: @subtle; border-radius: 4px; }
 QWidget#businessCommandFooter { border-top: 1px solid @outline; }

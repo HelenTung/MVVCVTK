@@ -43,7 +43,20 @@ void CheckNavigationWidth(TestWindow& window)
     const auto originalSize=window.size();
     auto* groups=window.findChild<QComboBox*>("workspaceTabs");auto* modules=window.findChild<QComboBox*>("featureTabs");
     for(const auto& size:{QSize(1560,960),QSize(1180,820),QSize(1000,720)}) {
-        window.resize(size);
+        window.resize(size);window.ResetLayout();QCoreApplication::processEvents();
+        auto* scene=window.findChild<QDockWidget*>("sceneDock");auto* properties=window.findChild<QDockWidget*>("parameterDock");
+        const bool narrow=size.width()<1280;
+        Require(scene->isHidden()==narrow,"a narrow default layout leaves the secondary scene panel collapsed");
+        if(narrow){
+            const auto primaryWidth=window.findChild<QWidget*>("primary3D")->width(),sliceWidth=window.findChild<QWidget*>("slice-top-down")->width();
+            const auto widthMessage=QString("narrow layout: window %1, views %2 + %3, properties %4, scene hidden %5").arg(window.width()).arg(primaryWidth).arg(sliceWidth).arg(properties->width()).arg(scene->isHidden());
+            Require(primaryWidth+sliceWidth>window.width()/2,widthMessage.toUtf8().constData());
+            Require(properties->width()>=340&&properties->width()<window.width()/2,widthMessage.toUtf8().constData());
+            auto* toggle=window.findChild<QAction*>("toggleObjectDock");toggle->trigger();QCoreApplication::processEvents();
+            Require(scene->isVisible(),"the collapsed scene panel has a one-action expansion");window.SaveLayout();
+            scene->hide();window.RestoreLayout();QCoreApplication::processEvents();Require(scene->isVisible(),"saved expanded scene visibility overrides the narrow default");
+            window.ResetLayout();QCoreApplication::processEvents();
+        }
         for(int group=0;group<groups->count();++group) {
             if(!groups->model()->flags(groups->model()->index(group,0)).testFlag(Qt::ItemIsEnabled))continue;
             groups->setCurrentIndex(group);
@@ -66,6 +79,10 @@ void CheckNavigationWidth(TestWindow& window)
 }
 void CheckViewToolbarText(TestWindow& window)
 {
+    for(auto* button:window.findChildren<QAbstractButton*>())if(button->property("dockTitleButton").toBool()){
+        Require(!button->accessibleName().isEmpty()&&button->focusPolicy()!=Qt::NoFocus,"dock title controls keep accessible names and keyboard focus");
+        if(!button->visibleRegion().isEmpty()&&button->parentWidget()->objectName()=="viewHeader")Require(button->width()>=24&&button->height()>=24,"lightweight title icons retain a practical click target");
+    }
     for(auto* title:window.findChildren<QLabel*>("viewTitle")){
         if(title->visibleRegion().isEmpty())continue;
         const auto required=title->fontMetrics().horizontalAdvance(title->accessibleName());
@@ -93,6 +110,7 @@ void CheckViewToolbarText(TestWindow& window)
 void CheckModulePanelText(ModulePanel& panel)
 {
     if(!panel.isVisible())return;
+    Require(panel.visibleRegion().boundingRect().width()==panel.width(),"the whole property panel fits its dock without horizontal clipping");
     for(auto* button:panel.findChildren<QAbstractButton*>()) {
         if(button->visibleRegion().isEmpty() || button->text().isEmpty())continue;
         const auto message=QString("panel command fits: %1 [%2], width %3, required %4")

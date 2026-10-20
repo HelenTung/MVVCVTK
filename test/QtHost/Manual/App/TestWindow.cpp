@@ -26,6 +26,7 @@
 #include <QTabBar>
 #include <QMenuBar>
 #include <QPushButton>
+#include <QAbstractButton>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QVBoxLayout>
@@ -60,6 +61,11 @@ QIcon GetFitViewIcon()
     QPixmap pixels(16,16);pixels.fill(Qt::transparent);QPainter painter(&pixels);painter.setPen(QPen(GetWorkbenchPlotColors().text,1.5));
     for(const auto corner:{QPoint(3,3),QPoint(12,3),QPoint(3,12),QPoint(12,12)}){const auto dx=corner.x()<8?3:-3,dy=corner.y()<8?3:-3;painter.drawLine(corner,corner+QPoint(dx,0));painter.drawLine(corner,corner+QPoint(0,dy));}
     return QIcon(pixels);
+}
+QIcon GetCloseDockIcon()
+{
+    QPixmap pixels(16,16);pixels.fill(Qt::transparent);QPainter painter(&pixels);painter.setRenderHint(QPainter::Antialiasing);painter.setPen(QPen(GetWorkbenchPlotColors().text,1.5));
+    painter.drawLine(QPointF(4,4),QPointF(12,12));painter.drawLine(QPointF(12,4),QPointF(4,12));return QIcon(pixels);
 }
 }
 class InputIdentityLabel final : public QLabel {
@@ -187,10 +193,10 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     for(int i=0;i<4;++i){auto* frame=new QWidget(this);auto* fields=new QVBoxLayout(frame);fields->setContentsMargins(0,0,0,0);fields->setSpacing(2);auto* header=new QWidget(frame);header->setObjectName("viewHeader");auto* commands=new QHBoxLayout(header);commands->setContentsMargins(4,0,4,0);
         auto* viewTitle=new InputIdentityLabel(header);viewTitle->setObjectName("viewTitle");viewTitle->SetIdentity(titles[i]);commands->addWidget(viewTitle,1);
         if(i==0){m_renderMode=new QComboBox(header);m_renderMode->setObjectName("renderMode");m_renderMode->setAccessibleName("三维呈现方式");m_renderMode->addItem("等值面","CompositeIsoSurface");m_renderMode->addItem("体渲染","CompositeVolume");m_renderMode->setEnabled(false);m_renderMode->setSizeAdjustPolicy(QComboBox::AdjustToContents);commands->addWidget(m_renderMode);}
-        auto* fitButton=new QPushButton("适配",header);fitButton->setObjectName(i==0?"fitView":"fit_"+ids[i]);fitButton->setAccessibleName("适配"+titles[i]);fitButton->setToolTip("适配"+titles[i]);commands->addWidget(fitButton);if(i==0){fit=fitButton;fit->setEnabled(false);}else connect(fitButton,&QPushButton::clicked,this,[this,id=ids[i]]{if(m_isReady)if(auto* page=GetModule("View"))page->SendAction("Reset",{{"viewId",id}});});
+        auto* fitButton=new QPushButton(header);fitButton->setProperty("dockTitleButton",true);fitButton->setIcon(GetFitViewIcon());fitButton->setObjectName(i==0?"fitView":"fit_"+ids[i]);fitButton->setAccessibleName("适配"+titles[i]);fitButton->setToolTip("适配"+titles[i]);commands->addWidget(fitButton);if(i==0){fit=fitButton;fit->setEnabled(false);}else connect(fitButton,&QPushButton::clicked,this,[this,id=ids[i]]{if(m_isReady)if(auto* page=GetModule("View"))page->SendAction("Reset",{{"viewId",id}});});
         auto window=vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();window->SetAlphaBitPlanes(1);window->SetMultiSamples(0);auto* widget=new QVTKOpenGLNativeWidget(frame);widget->setObjectName(i==0?"primary3D":ids[i]);widget->setMinimumSize(160,96);widget->setRenderWindow(window);fields->addWidget(widget,1);widget->installEventFilter(this);
         auto* dock=CreateDock("viewDock_"+ids[i],titles[i],frame);
-        auto* closeButton=new QToolButton(header);closeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));closeButton->setAccessibleName("关闭"+titles[i]);closeButton->setToolTip(closeButton->accessibleName());commands->addWidget(closeButton);connect(closeButton,&QToolButton::clicked,dock,&QDockWidget::close);
+        auto* closeButton=new QToolButton(header);closeButton->setProperty("dockTitleButton",true);closeButton->setFocusPolicy(Qt::StrongFocus);closeButton->setIcon(GetCloseDockIcon());closeButton->setAccessibleName("关闭"+titles[i]);closeButton->setToolTip(closeButton->accessibleName());commands->addWidget(closeButton);connect(closeButton,&QToolButton::clicked,dock,&QDockWidget::close);
         dock->setTitleBarWidget(header);header->installEventFilter(this);m_views.push_back({ids[i],widget,window,frame,dock});}
     connect(m_renderMode, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
         if (auto* page = GetModule("View")) {
@@ -611,6 +617,12 @@ QDockWidget* TestWindow::CreateDock(const QString& name,const QString& title,QWi
 {
     auto* dock=new QDockWidget(title,this);dock->setObjectName(name);dock->setAllowedAreas(Qt::AllDockWidgetAreas);
     dock->setFeatures(QDockWidget::DockWidgetClosable|QDockWidget::DockWidgetMovable|QDockWidget::DockWidgetFloatable);dock->setWidget(content);dock->installEventFilter(this);addDockWidget(Qt::LeftDockWidgetArea,dock);
+    for(auto* button:dock->findChildren<QAbstractButton*>(QString(),Qt::FindDirectChildrenOnly)){
+        button->setProperty("dockTitleButton",true);button->setFocusPolicy(Qt::StrongFocus);
+        const bool close=button->objectName()=="qt_dockwidget_closebutton";
+        const auto update=[dock,button,close]{button->setAccessibleName((close?QString("关闭"):dock->isFloating()?QString("停靠"):QString("浮动"))+dock->windowTitle());button->setToolTip(button->accessibleName());};
+        update();connect(dock,&QDockWidget::topLevelChanged,button,update);connect(dock,&QDockWidget::windowTitleChanged,button,update);
+    }
     QAction* visibility=dock->toggleViewAction();
     if(name=="sceneDock"||name=="parameterDock"){
         visibility=new QAction(title,this);visibility->setCheckable(true);visibility->setChecked(true);visibility->setObjectName(name=="sceneDock"?"toggleObjectDock":"toggleParameterDock");visibility->setShortcut(QKeySequence(name=="sceneDock"?"Ctrl+Shift+L":"Ctrl+Shift+R"));
@@ -733,11 +745,15 @@ void TestWindow::ResetLayout()
     m_objectDock->setProperty("expandedSize",QVariant());m_parameterDock->setProperty("expandedSize",QVariant());
     findChild<QAction*>("lockWorkbenchLayout")->setChecked(false);
     for(auto* dock:findChildren<QDockWidget*>(QString(),Qt::FindDirectChildrenOnly)){dock->setFloating(false);removeDockWidget(dock);}
+    // 只在首次/显式重置时收起次要场景栏；恢复已保存布局不应用宽度策略。
+    const auto scale=std::max(1.,font().pixelSize()/16.);const bool showObjects=width()>=1280*scale;
+    const int objectWidth=260,parameterWidth=400;
     addDockWidget(Qt::LeftDockWidgetArea,m_objectDock);m_objectDock->show();addDockWidget(Qt::RightDockWidgetArea,m_parameterDock);m_parameterDock->show();
     SetViewLayout("FourViews");addDockWidget(Qt::BottomDockWidgetArea,m_grayDock);addDockWidget(Qt::BottomDockWidgetArea,m_resultDock);tabifyDockWidget(m_grayDock,m_resultDock);
     addDockWidget(Qt::BottomDockWidgetArea,m_reportDock);tabifyDockWidget(m_resultDock,m_reportDock);m_reportDock->hide();m_resultDock->hide();m_grayDock->hide();
-    resizeDocks({m_objectDock,m_parameterDock},{260,400},Qt::Horizontal);resizeDocks({m_grayDock},{300},Qt::Vertical);
-    {const QSignalBlocker left(m_objectToggle),right(m_parameterToggle);m_objectToggle->setChecked(true);m_parameterToggle->setChecked(true);}SetColumnVisible(0,true);SetColumnVisible(2,true);
+    resizeDocks({m_objectDock,m_parameterDock},{objectWidth,parameterWidth},Qt::Horizontal);resizeDocks({m_grayDock},{300},Qt::Vertical);
+    {const QSignalBlocker left(m_objectToggle),right(m_parameterToggle);m_objectToggle->setChecked(showObjects);m_parameterToggle->setChecked(true);}SetColumnVisible(0,showObjects);SetColumnVisible(2,true);
+    m_objectDock->setProperty("expandedSize",QSize(objectWidth,m_objectDock->height()));
     for(auto* bar:findChildren<QToolBar*>(QString(),Qt::FindDirectChildrenOnly))addToolBar(Qt::TopToolBarArea,bar);
 
     m_restoringLayout=old;if(m_isReady)SyncNavigation();if(!m_restoringLayout)SaveLayout();m_pump.SetVisible();
@@ -909,7 +925,7 @@ bool TestWindow::eventFilter(QObject* watched, QEvent* event)
         auto* header=static_cast<QWidget*>(watched);const auto scale=std::max(1.,header->font().pixelSize()/16.);
         // 窄停靠窗保留角色标题与鼠标拖动区；呈现方式仍可从“显示与导航”的同一属性修改。
         if(m_renderMode&&m_renderMode->parentWidget()==header)m_renderMode->setVisible(header->width()>=220*scale);
-        for(auto* button:header->findChildren<QPushButton*>()){const bool compact=header->width()<260*scale;button->setText(compact?QString():QString("适配"));button->setIcon(compact?GetFitViewIcon():QIcon());button->setMinimumWidth(button->sizeHint().width());}
+        if(event->type()==QEvent::PaletteChange)for(auto* button:header->findChildren<QAbstractButton*>())button->setIcon(qobject_cast<QPushButton*>(button)?GetFitViewIcon():GetCloseDockIcon());
     }
     if(m_layoutReady&&!m_restoringLayout&&!m_isClosing&&(event->type()==QEvent::Move||event->type()==QEvent::Resize))m_layoutTimer.start();
     // 原生鼠标/键盘仍仅走 QVTK；失焦只发送 SDK 生命周期取消。
