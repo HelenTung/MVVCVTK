@@ -73,6 +73,7 @@ ModulePanel::ModulePanel(TestContext context, QString name, QWidget* parent)
     m_feedback=new QLabel(this);m_feedback->setObjectName("moduleFeedback");m_feedback->setWordWrap(true);
     m_feedback->setTextFormat(Qt::PlainText);m_feedback->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);
     m_feedback->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);m_feedback->hide();
+    auto feedbackPolicy=m_feedback->sizePolicy();feedbackPolicy.setHeightForWidth(true);m_feedback->setSizePolicy(feedbackPolicy);
     m_businessSource = new QLabel(this); m_businessSource->setObjectName("businessInput"); m_businessSource->setWordWrap(true);
     m_businessSource->setTextFormat(Qt::PlainText);m_businessSource->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);layout->addWidget(m_businessSource);
     m_businessDisplay = new QLabel(this);m_businessDisplay->setObjectName("businessDisplay");m_businessDisplay->setWordWrap(true);m_businessDisplay->hide();
@@ -350,6 +351,7 @@ void ModulePanel::AttachAction(const QString& name, const QJsonObject& defaults,
         auto* commandLayout = new QVBoxLayout(commands); commandLayout->setContentsMargins(0,8,0,0); commandLayout->setSpacing(6);
         auto* requirement = new QLabel(commands); requirement->setObjectName("commandRequirement"); requirement->setWordWrap(true);
         requirement->setMinimumWidth(0); requirement->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+        auto requirementPolicy=requirement->sizePolicy();requirementPolicy.setHeightForWidth(true);requirement->setSizePolicy(requirementPolicy);
         commandLayout->addWidget(requirement); m_requirements[name] = requirement;
         auto* footer = new QHBoxLayout; footer->setContentsMargins(0,0,0,0); commandLayout->addLayout(footer);
         button->setProperty("primaryCommand",false);

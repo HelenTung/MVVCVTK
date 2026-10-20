@@ -159,6 +159,7 @@ ParameterEditor::ParameterEditor(QString module, QString action, QString key, QJ
         auto* label = new QLabel(labelText, this); label->setObjectName("parameterTitle");if(labelText!=m_title)label->setAccessibleName(m_title); label->setWordWrap(true); label->setMinimumWidth(0); label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); label->setToolTip(m_title+"\n"+GetParameterHelp(m_key));
         if (m_isPropertyRow) {
             label->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Preferred);
+            auto labelPolicy=label->sizePolicy();labelPolicy.setHeightForWidth(true);label->setSizePolicy(labelPolicy);
             // 列约束由布局持有；Ignored 标签的几何不能用作相邻值列的占位。
             m_layout->setColumnMinimumWidth(0,m_listItem ? 0 : 88);
             if(!m_listItem)label->setFixedWidth(88);
