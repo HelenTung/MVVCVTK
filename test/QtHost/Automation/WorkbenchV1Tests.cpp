@@ -103,7 +103,9 @@ void CheckModulePanelText(ModulePanel& panel)
     Require(tools && !scroll->isAncestorOf(tools),"tools and business commands stay outside the property scroller");
     auto* footer=panel.findChild<QWidget*>("businessCommandFooter");int occupied=0;
     for(auto* child:footer->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->isVisible())occupied=std::max(occupied,child->geometry().bottom()+1);
-    Require(footer->height()-occupied<=footer->layout()->contentsMargins().bottom()+8,"the command footer contains no unused vertical block");
+    const int gap=footer->height()-occupied,allowed=footer->layout()->contentsMargins().bottom()+8;
+    const auto footerMessage=QString("command footer gap %1 px, height %2, occupied %3, allowed %4").arg(gap).arg(footer->height()).arg(occupied).arg(allowed);
+    Require(gap<=allowed,footerMessage.toStdString().c_str());
 }
 void CheckWorkbenchV1(TestWindow& window)
 {

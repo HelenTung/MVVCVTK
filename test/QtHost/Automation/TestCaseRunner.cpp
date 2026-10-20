@@ -2788,7 +2788,14 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             QPixmap pageCapture;
             if(step["checkPanelTextFit"].toBool()) {
                 // grab 同步完成当前帧的布局与绘制；断言和保存使用同一帧，不要求内部滚动位置静止。
-                pageCapture=window.grab();CheckModulePanelText(*page);
+                std::string layoutError;
+                const bool ready=Wait([&] {
+                    pageCapture=window.grab();
+                    try {CheckModulePanelText(*page);return true;}
+                    catch(const std::runtime_error& error){layoutError=error.what();return false;}
+                },static_cast<int>(getWaitMilliseconds(step)));
+                if(!ready)throw std::runtime_error(layoutError.empty()?"module layout did not become ready":layoutError);
+                Check(ready,"the captured module frame satisfies the unchanged layout assertions");
             }
             if(step.contains("toolsScreenshot")) {
                 auto* tools=page->findChild<QToolButton*>("moreOperations");auto* menu=tools->menu();
