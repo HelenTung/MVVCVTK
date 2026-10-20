@@ -8,6 +8,7 @@
 #include "Support/JsonInput.h"
 #endif
 #include <QApplication>
+#include <QGuiApplication>
 #include <QBuffer>
 #include <QCheckBox>
 #include <QComboBox>
@@ -40,6 +41,9 @@
 #include <limits>
 #include <iostream>
 #include <stdexcept>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 namespace Manual {
 class ReportTaskTestAccess final {
@@ -55,11 +59,47 @@ public:
     static void SetRows(ResultReport& view,ReportRows rows){view.m_rows=std::move(rows);}
 };
 namespace {
+constexpr int reportWaitTimeoutMs=30000;
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 template<class F> void Wait(F pending) {
     QElapsedTimer elapsed;elapsed.start();
-    do {QCoreApplication::processEvents(QEventLoop::AllEvents,10);}while(pending() && elapsed.elapsed()<30000);
+    do {QCoreApplication::processEvents(QEventLoop::AllEvents,10);}while(pending() && elapsed.elapsed()<reportWaitTimeoutMs);
     Require(!pending(),"report repair test timed out");
+}
+void SetClipboardSeed(const QString& expected) {
+    auto* clipboard=QApplication::clipboard();
+    Require(clipboard!=nullptr,"fixture/environment: clipboard unavailable before the copy failure probe");
+    const auto platform=QGuiApplication::platformName();
+    QElapsedTimer elapsed;elapsed.start();
+    constexpr int writeAttemptLimit=3;
+    int writes=0,actualLength=-1;unsigned long openError=0;bool waitingLogged=false;
+    while(elapsed.elapsed()<reportWaitTimeoutMs && writes<writeAttemptLimit) {
+        bool available=true;
+#ifdef Q_OS_WIN
+        // 后台桌面仍共享窗口站的剪贴板；先等占用解除，不把系统锁竞争算成复制失败。
+        if(platform=="windows") {
+            available=OpenClipboard(nullptr)!=0;openError=available?0:GetLastError();
+            if(available)Require(CloseClipboard()!=0,"fixture/environment: clipboard availability check could not release clipboard");
+        }
+#endif
+        if(available) {
+            ++writes;clipboard->setText(expected);
+            QCoreApplication::processEvents(QEventLoop::AllEvents,10);
+            const auto actual=clipboard->text();actualLength=actual.size();
+            if(actual==expected) {
+                std::cout<<"Reports: clipboard seed confirmed platform="<<platform.toStdString()
+                    <<" writes="<<writes<<" elapsedMs="<<elapsed.elapsed()<<std::endl;
+                return;
+            }
+            std::cerr<<"Reports: clipboard seed readback mismatch writes="<<writes<<" actualLength="<<actualLength<<std::endl;
+        } else if(!waitingLogged) {
+            std::cout<<"Reports: clipboard seed waiting nativeOpenError="<<openError<<std::endl;waitingLogged=true;
+        }
+        // 复用报告等待的绝对期限；计时器只调度重试，精确读回始终是唯一成功判据。
+        QEventLoop retry;QTimer::singleShot(10,&retry,&QEventLoop::quit);retry.exec();
+    }
+    throw std::runtime_error(QString("fixture/environment: clipboard seed could not be confirmed before the copy failure probe; platform=%1 writes=%2 actualLength=%3 nativeOpenError=%4 elapsedMs=%5")
+        .arg(platform).arg(writes).arg(actualLength).arg(openError).arg(elapsed.elapsed()).toStdString());
 }
 ReportDocument Read(QByteArray bytes) {
     QBuffer input(&bytes);input.open(QIODevice::ReadOnly);return ReadReportCsv(input,"外部报告");
@@ -497,10 +537,16 @@ void CheckPageReadFailures() {
     Require(table->model()->data(table->model()->index(0,0)).toString()=="point-200","body read retry mixed page identities");
     table->selectionModel()->select(table->model()->index(0,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
     table->selectionModel()->select(table->model()->index(1,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
-    QApplication::clipboard()->setText("previous clipboard");
-    Require(QApplication::clipboard()->text()=="previous clipboard","fixture/environment: clipboard seed could not be confirmed before the copy failure probe");
-    failRow=201;view.findChild<QPushButton*>("copyReportCsv")->click();
+    SetClipboardSeed("previous clipboard");
+    auto* copy=view.findChild<QPushButton*>("copyReportCsv");
+    Require(copy && copy->isEnabled() && table->selectionModel()->selectedRows().size()==2
+        && table->model()->data(table->model()->index(0,0)).toString()=="point-200"
+        && table->model()->data(table->model()->index(1,0)).toString()=="point-201","copy failure probe did not retain the two selected rows on the second page");
+    const auto copyReads=reads.load();failRow=201;copy->click();
+    Require(reads-copyReads==2 && view.property("reportRowsError").toString()=="正文短读","copy failure probe did not read both selected rows and reach injected row 201");
     Require(QApplication::clipboard()->text()=="previous clipboard"&&table->model()->rowCount()==0&&!view.findChild<QPushButton*>("locateReportRow")->isEnabled(),"copy failure published partial clipboard content or left a usable stale page");
+    Require(!copy->isEnabled()&&!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"copy failure left actions enabled on the invalidated page");
+    std::cout<<"PASS: copy failure probe reached row 201 after exactly 2 selected-row reads; clipboard preserved and page actions invalidated"<<std::endl;
     failRow=-1;view.SelectReport(doc.id);Require(view.property("reportRowsError").toString().isEmpty()&&table->model()->rowCount()==200,"reselecting a recovered report did not restore its page");
 }
 void CheckSlowScanCancellation() {
