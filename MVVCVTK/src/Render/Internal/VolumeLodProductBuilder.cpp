@@ -216,19 +216,24 @@ bool SetScalarRanges(const Scalar* values, vtkDataArray* scalars,
     for (vtkIdType first = 0; first < count;) {
         if (stopToken.GetIsStopped()) return false;
         const auto last = first + std::min(chunkTuples, count - first);
-        for (vtkIdType tuple = first; tuple < last; ++tuple) {
-            for (int component = 0; component < components; ++component) {
+        for (int component = 0; component < components; ++component) {
+            // 每块只读写一次容器，避免 Debug 下每个体素的容器边界检查开销。
+            double minimum = ranges[component][0];
+            double maximum = ranges[component][1];
+            double finiteMinimum = finiteRanges[component][0];
+            double finiteMaximum = finiteRanges[component][1];
+            for (vtkIdType tuple = first; tuple < last; ++tuple) {
                 const double value = static_cast<double>(values[tuple * components + component]);
                 // 比较自然排除 NaN；普通范围保留 Inf，有限范围独立过滤。
-                auto& range = ranges[component];
-                if (value < range[0]) range[0] = value;
-                if (value > range[1]) range[1] = value;
+                if (value < minimum) minimum = value;
+                if (value > maximum) maximum = value;
                 if (std::isfinite(value)) {
-                    auto& finite = finiteRanges[component];
-                    if (value < finite[0]) finite[0] = value;
-                    if (value > finite[1]) finite[1] = value;
+                    if (value < finiteMinimum) finiteMinimum = value;
+                    if (value > finiteMaximum) finiteMaximum = value;
                 }
             }
+            ranges[component] = {minimum, maximum};
+            finiteRanges[component] = {finiteMinimum, finiteMaximum};
         }
         first = last;
     }
