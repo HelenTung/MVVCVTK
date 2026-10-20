@@ -66,7 +66,7 @@ QWidget#viewHeader QPushButton, QWidget#viewHeader QToolButton { padding: 2px 4p
 QWidget#viewHeader QComboBox { padding: 2px 4px; min-height: 22px; }
 QWidget#viewHeader QPushButton[dockTitleButton="true"], QWidget#viewHeader QToolButton[dockTitleButton="true"] { padding: 2px; min-width: 22px; max-width: 22px; min-height: 22px; max-height: 22px; border: 1px solid transparent; border-radius: 3px; background: transparent; }
 QWidget#viewHeader QPushButton[dockTitleButton="true"]:hover, QWidget#viewHeader QToolButton[dockTitleButton="true"]:hover { background: @selection; }
-QWidget#viewHeader QPushButton[dockTitleButton="true"]:pressed, QWidget#viewHeader QToolButton[dockTitleButton="true"]:pressed { background: @outline; }
+QWidget#viewHeader QPushButton[dockTitleButton="true"]:pressed, QWidget#viewHeader QToolButton[dockTitleButton="true"]:pressed { background: @selection; border-color: @accent; }
 QWidget#viewHeader QPushButton[dockTitleButton="true"]:focus, QWidget#viewHeader QToolButton[dockTitleButton="true"]:focus { border: 1px dashed @accent; }
 QWidget#operationFields, QWidget#sectionFields { background: @surface; }
 QWidget#businessContext { background: @subtle; border-radius: 4px; }
