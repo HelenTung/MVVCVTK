@@ -18,6 +18,7 @@
 #include <QStyle>
 #include <QStyleOptionComboBox>
 #include <QAbstractItemModel>
+#include <QAbstractButton>
 #include <stdexcept>
 #include <cmath>
 namespace Manual {
@@ -34,6 +35,7 @@ void CheckNavigationWidth(TestWindow& window)
             groups->setCurrentIndex(group);
             for(int module=0;module<modules->count();++module) {
                 modules->setCurrentIndex(module);QCoreApplication::processEvents();
+                CheckWorkbenchText(window);
                 for(auto* combo:{groups,modules}) {
                     QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
                     const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
@@ -45,6 +47,24 @@ void CheckNavigationWidth(TestWindow& window)
     }
     window.resize(originalSize);window.GetWorkflow().onNavigate("Data","Load",{});QCoreApplication::processEvents();
 }
+}
+void CheckWorkbenchText(TestWindow& window)
+{
+    for(auto* button:window.findChildren<QAbstractButton*>()) {
+        const auto visible=button->visibleRegion().boundingRect();
+        if(visible.isEmpty() || button->text().isEmpty())continue;
+        const auto message=QString("visible command text fits: %1 [%2], width %3, required %4")
+            .arg(button->objectName(),button->text()).arg(button->width()).arg(button->sizeHint().width());
+        Require(button->width()>=button->sizeHint().width() && visible.width()==button->width(),message.toStdString().c_str());
+    }
+    for(auto* combo:window.findChildren<QComboBox*>()) {
+        if(combo->visibleRegion().isEmpty() || combo->isEditable())continue;
+        QStyleOptionComboBox option;option.initFrom(combo);option.currentText=combo->currentText();option.frame=true;
+        const auto field=combo->style()->subControlRect(QStyle::CC_ComboBox,&option,QStyle::SC_ComboBoxEditField,combo);
+        const auto message=QString("visible selector text fits: %1 [%2], field %3, required %4")
+            .arg(combo->objectName(),combo->currentText()).arg(field.width()).arg(combo->fontMetrics().horizontalAdvance(combo->currentText()));
+        Require(combo->fontMetrics().horizontalAdvance(combo->currentText())<=field.width(),message.toStdString().c_str());
+    }
 }
 void CheckWorkbenchV1(TestWindow& window)
 {

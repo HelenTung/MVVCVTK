@@ -199,14 +199,18 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     auto* viewTitle = new QLabel("视图", m_viewArea); viewTitle->setObjectName("columnTitle"); viewHeading->addWidget(viewTitle); viewHeading->addStretch();
     auto* viewLayoutChoice = new QComboBox(m_viewArea); viewLayoutChoice->setObjectName("viewLayout");
     viewLayoutChoice->setAccessibleName("视图布局"); viewLayoutChoice->setToolTip("选择三维与切片、四视图或仅三维；分隔栏可拖动调整宽度。");
-    viewLayoutChoice->addItem("三维与切片", "Inspection");viewLayoutChoice->addItem("四视图", "FourViews"); viewLayoutChoice->addItem("仅三维", "ThreeDOnly"); viewLayoutChoice->setMinimumWidth(96);
+    viewLayoutChoice->addItem("三维与切片", "Inspection");viewLayoutChoice->addItem("四视图", "FourViews"); viewLayoutChoice->addItem("仅三维", "ThreeDOnly");
+    viewLayoutChoice->setSizeAdjustPolicy(QComboBox::AdjustToContents);viewLayoutChoice->setSizePolicy(QSizePolicy::Minimum,QSizePolicy::Fixed);
     viewHeading->addWidget(viewLayoutChoice); viewLayout->addLayout(viewHeading);
-    auto* statisticsToggle=new QToolButton(m_viewArea);m_showStatistics=statisticsToggle;statisticsToggle->setObjectName("showBusinessStatistics");statisticsToggle->setText("统计与结果");statisticsToggle->setCheckable(true);viewHeading->addWidget(statisticsToggle);
+    auto* statisticsToggle=new QToolButton(m_viewArea);m_showStatistics=statisticsToggle;statisticsToggle->setObjectName("showBusinessStatistics");statisticsToggle->setText("结果");
+    statisticsToggle->setAccessibleName("统计与结果");statisticsToggle->setToolTip("显示或收起统计与结果。");statisticsToggle->setSizePolicy(QSizePolicy::Minimum,QSizePolicy::Fixed);
+    statisticsToggle->setCheckable(true);viewHeading->addWidget(statisticsToggle);
     m_statisticsPages=new QStackedWidget(m_viewArea);m_statisticsPages->setObjectName("businessStatisticsPages");
     m_resultTabs=new QTabWidget(m_viewArea);m_resultTabs->setObjectName("workbenchResultTabs");
     m_resultTabs->addTab(m_statisticsPages,"统计与结果");m_resultTabs->addTab(m_browsers,"来源与历史");
     m_resultTabs->setMaximumHeight(210);
-    auto* expandStatistics=new QToolButton(m_viewArea);expandStatistics->setObjectName("expandBusinessStatistics");expandStatistics->setText("放大统计");viewHeading->addWidget(expandStatistics);
+    auto* expandStatistics=new QToolButton(m_viewArea);expandStatistics->setObjectName("expandBusinessStatistics");expandStatistics->setText("放大");
+    expandStatistics->setAccessibleName("放大统计");expandStatistics->setToolTip("放大统计与结果区域。");expandStatistics->setSizePolicy(QSizePolicy::Minimum,QSizePolicy::Fixed);viewHeading->addWidget(expandStatistics);
     connect(statisticsToggle,&QToolButton::toggled,this,[this](bool shown) {
         if(auto* page=static_cast<ModulePanel*>(m_pages->currentWidget())) {
             m_statisticsPreferences[page->GetName()]=shown;m_resultTabs->setVisible(shown);
@@ -216,7 +220,8 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     expandStatistics->setCheckable(true);
     connect(expandStatistics,&QToolButton::toggled,this,[this,expandStatistics](bool expanded) {
         m_showStatistics->setChecked(true);m_resultTabs->setMaximumHeight(expanded?16777215:210);
-        m_resultTabs->setMinimumHeight(expanded?300:0);expandStatistics->setText(expanded?"收起放大":"放大统计");
+        m_resultTabs->setMinimumHeight(expanded?300:0);expandStatistics->setText(expanded?"收起":"放大");
+        expandStatistics->setAccessibleName(expanded?"收起放大统计":"放大统计");expandStatistics->setToolTip(expanded?"收起放大统计，恢复视图区高度。":"放大统计与结果区域。");
         for(auto* module:m_modules)module->GetStatisticsWidget()->SetCompact(!expanded);
     });
     connect(viewLayoutChoice, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this,viewLayoutChoice](int index) { SetViewLayout(viewLayoutChoice->itemData(index).toString()); });
@@ -234,6 +239,7 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     viewToolbar->addWidget(new QLabel("三维", m_viewArea)); viewToolbar->addStretch();
     m_renderMode = new QComboBox(m_viewArea); m_renderMode->setObjectName("renderMode");
     m_renderMode->addItem("等值面", "CompositeIsoSurface"); m_renderMode->addItem("体渲染", "CompositeVolume");
+    m_renderMode->setAccessibleName("三维呈现方式");m_renderMode->setSizeAdjustPolicy(QComboBox::AdjustToContents);m_renderMode->setSizePolicy(QSizePolicy::Minimum,QSizePolicy::Fixed);
     m_renderMode->setEnabled(false); viewToolbar->addWidget(m_renderMode);
     auto* fit = new QPushButton("适配", m_viewArea); fit->setObjectName("fitView"); fit->setToolTip("将当前三维内容适配到视窗。"); fit->setEnabled(false); viewToolbar->addWidget(fit);
     primaryLayout->addWidget(primaryHeader);
@@ -258,6 +264,9 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
         slice->setRenderWindow(sliceWindow); frameLayout->addWidget(slice, 1); slice->installEventFilter(this);
         m_views.push_back({sliceIds[index], slice, sliceWindow, frame});
     }
+    // 四视图的每一列至少容纳完整三维标题栏；让分隔栏分配宽度，而非裁切标题控件。
+    m_viewArea->ensurePolished();
+    m_viewArea->setMinimumWidth(std::max({300,viewHeading->minimumSize().width(),2*primaryLayout->minimumSize().width()+viewGrid->horizontalSpacing()}));
     split->addWidget(m_pages); split->setStretchFactor(0, 0); split->setStretchFactor(1, 1); split->setStretchFactor(2, 0);
     split->setSizes({240, 840, 400});
     connect(m_objectToggle,&QToolButton::toggled,this,[this](bool shown){SetColumnVisible(0,shown);});
