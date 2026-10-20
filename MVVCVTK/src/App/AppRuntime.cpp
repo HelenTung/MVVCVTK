@@ -2165,12 +2165,15 @@ bool AppRuntime::SetViewUpdateCommit(
 {
     {
         const std::lock_guard<std::mutex> lock(m_transitionMutex);
+        const bool isRetry = isCommitted && m_transitionFailure.has_value();
+        if (isRetry && m_transitionRevision == (std::numeric_limits<std::uint64_t>::max)()) return false;
         if (!m_viewState || !m_viewState->SetUpdateCommit(isCommitted, pendingFlags)) return false;
         if (isCommitted && m_suppliedAutoWindowUpdate.has_value())
             m_hasSuppliedAutoWindow = *m_suppliedAutoWindowUpdate;
-        if (isCommitted && m_transitionFailure) {
-            // 新接受的展示请求属于一次明确重试；旧失败不能污染新参数（包括 ABA）。
-            m_transitionFailure.reset();
+        if (isRetry) {
+            // 推进请求身份，使已终结候选与旧失败立即失效，而非只清查询标记。
+            // 保留旧值至新候选冻结，清理重入期间接受的后续重试也须有独立代数。
+            ++m_transitionRevision;
             m_hasDataRefreshNeed = true;
         }
         m_suppliedAutoWindowUpdate.reset();
@@ -2404,7 +2407,7 @@ VtkRenderInputSnapshot AppRuntime::GetPrimaryRenderInput() const {
 bool AppRuntime::GetDataStageIdentityCurrent(const DataStageIdentity& identity,
     const VtkRenderInputSnapshot& input) const
 {
-    // 调用方持有 m_transitionMutex；serial 覆盖一次冻结全部参数的候选尝试。
+    // 调用方持有 m_transitionMutex；serial 标识候选尝试，转场修订区分失败后的新请求。
     // 主绑定按值另行核验，不能把同指针、同数据重绑或无关图提交当作相同请求。
     if (!m_dataStageIdentity || identity.serial != m_dataStageIdentity->serial
         || identity.transitionRevision != m_transitionRevision
@@ -2467,7 +2470,9 @@ DataStageStatus AppRuntime::BuildPipeline()
         SetTransitionFailure(requested, status);
         return status;
     };
-    if (m_dataStage && (!GetSameInput(m_dataStage->nextSnapshot, snapshot)
+    if (m_dataStage && (m_dataStage->status == DataStageStatus::Failed
+            || m_dataStage->status == DataStageStatus::Cancelled
+            || !GetSameInput(m_dataStage->nextSnapshot, snapshot)
             || !GetStageCurrent(*m_dataStage))) {
         if (!ClearDataStage(m_dataStage->transactionRevision)) return fail(DataStageStatus::Failed);
     }

@@ -708,6 +708,94 @@ bool GetRealCandidateFailureValid(const RenderProductStatus terminal, const bool
     return check(f.Stop(), "real App workers did not stop");
 }
 
+bool GetRealCandidateRetryValid(const RenderProductStatus terminal, const bool retriesWhileBlocked)
+{
+    int failedCompletions = 0, blockedCompletions = 0, retryCompletions = 0;
+    bool failedSucceeded = true, blockedSucceeded = true, retrySucceeded = false;
+    RealCandidateFixture f;
+    const auto check = [](const bool value, const char* reason) {
+        if (!value) std::cerr << "Same-binding candidate retry: " << reason << '\n';
+        return value;
+    };
+    if (!check(f.Build(), "fixture construction")) return false;
+    f.nextStatus = {RenderProductStatus::Preparing, RenderProductStatus::Preparing, RenderProductStatus::Idle};
+    const auto selected = f.Select(true);
+    if (!check(static_cast<bool>(selected), "primary publication")) return false;
+    const auto display = [&](auto applied, auto complete) {
+        return f.coordinator->SendDisplayComplete(std::move(applied), std::move(complete));
+    };
+    const auto send = [&](const double opacity, auto complete) {
+        HostViewSetRequest request;
+        request.targetView.viewId = "0";
+        request.opacity = opacity;
+        return f.router->Dispatch(std::move(request), std::move(complete), display);
+    };
+    if (!send(0.75, [&](const bool success) { ++failedCompletions; failedSucceeded = success; })
+        || !check(f.coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Deferred,
+            "candidate was not deferred")) return false;
+    const auto previous = f.frames.GetSceneStates();
+    const auto epoch = f.coordinator->GetCommittedEpoch();
+    const auto failed = f.strategies[0].back();
+    struct AllowCleanup final {
+        std::shared_ptr<CandidateStrategyProbe> strategy;
+        ~AllowCleanup() { strategy->isDetachRejected = false; }
+    } allowCleanup{failed};
+    failed->isDetachRejected = true;
+    failed->status = terminal;
+    const auto count = f.strategies[0].size();
+    const auto oldFrameKept = [&] {
+        const auto scenes = f.frames.GetSceneStates();
+        if (scenes.size() != previous.size() || f.coordinator->GetCommittedEpoch() != epoch) return false;
+        for (std::size_t index = 0; index < scenes.size(); ++index)
+            if (scenes[index].sceneEpoch != previous[index].sceneEpoch
+                || scenes[index].presentationRevision != previous[index].presentationRevision
+                || !scenes[index].presentation || !previous[index].presentation
+                || scenes[index].presentation->dataRevision != previous[index].presentation->dataRevision
+                || scenes[index].presentation->bindingRevision != previous[index].presentation->bindingRevision) return false;
+        return true;
+    };
+    if (!check(f.coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Failed
+        && failedCompletions == 1 && !failedSucceeded && oldFrameKept(),
+        "initial terminal or cleanup failure did not preserve the old frame")) return false;
+    if (retriesWhileBlocked) {
+        if (!send(0.78, [&](const bool success) { ++blockedCompletions; blockedSucceeded = success; })
+            || !check(!f.ports[0].app.view->GetViewState().hasPresentationFailed,
+                "new request inherited the prior failure on acceptance")) return false;
+        if (!check(f.coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Failed
+            && blockedCompletions == 1 && !blockedSucceeded && f.strategies[0].size() == count
+            && f.ports[0].app.view->GetViewState().hasPresentationFailed && oldFrameKept(),
+            "rejected cleanup was reported as completed or lost retry ownership")) return false;
+    }
+    // 清理恢复后，仅接纳新 opacity；主数据、binding 和生产参数均保持不变。
+    failed->isDetachRejected = false;
+    f.nextStatus.fill(RenderProductStatus::Idle);
+    for (std::size_t index = 1; index < f.strategies.size(); ++index)
+        f.strategies[index].back()->status = RenderProductStatus::Idle;
+    if (!send(0.8, [&](const bool success) { ++retryCompletions; retrySucceeded = success; })
+        || !check(!f.ports[0].app.view->GetViewState().hasPresentationFailed,
+            "retry was not accepted as a new attempt")) return false;
+    const auto result = f.coordinator->SendUpdates();
+    if (!check(result == HostFrameCoordinator::FlushStatus::Completed
+        && retryCompletions == 1 && retrySucceeded && failedCompletions == 1
+        && blockedCompletions == (retriesWhileBlocked ? 1 : 0)
+        && f.strategies[0].size() == count + 1 && f.strategies[0].back() != failed
+        && !f.ports[0].app.view->GetViewState().hasPresentationFailed
+        && f.coordinator->GetCommittedEpoch() == epoch + 1,
+        "healthy new parameters consumed the old terminal candidate")) {
+        std::cerr << "retry status=" << static_cast<int>(result) << " callbacks=" << retryCompletions
+            << " success=" << retrySucceeded << " strategies=" << count << "->" << f.strategies[0].size()
+            << " epoch=" << epoch << "->" << f.coordinator->GetCommittedEpoch() << '\n';
+        return false;
+    }
+    for (const auto& scene : f.frames.GetSceneStates())
+        if (!check(scene.presentation && scene.presentation->dataRevision == selected->data->self
+            && scene.presentation->bindingRevision == selected->binding->revision,
+            "retry changed the primary input identity")) return false;
+    return check(std::all_of(f.contexts.begin(), f.contexts.end(), [](const auto& context) {
+        return context->renderCount == 0;
+    }) && f.Stop(), "retry drew a frame or did not stop its workers");
+}
+
 class DetachWindowProbe final : public vtkGenericOpenGLRenderWindow {
 public:
     static DetachWindowProbe* New() { return new DetachWindowProbe; }
@@ -882,6 +970,10 @@ int main(int argc, char** argv)
     check(GetActualDetachPendingFrameValid(), "actual DetachFeature drains owned completion while a frame is pending without drawing");
     check(GetRealCandidateFailureValid(RenderProductStatus::Failed, true, true),
         "new request reports prior-candidate cleanup failure and later recovers");
+    for (const auto terminal : {RenderProductStatus::Failed, RenderProductStatus::Cancelled})
+        for (const bool blocked : {false, true})
+            check(GetRealCandidateRetryValid(terminal, blocked),
+                "same-binding parameter retry replaces terminal candidates after cleanup recovers");
     check(GetRenderRetryValid(), "render retry preserves new dirty and completed views");
     check(GetStoppedStageValid(), "stopped view cannot reappear from staged projection");
     check(GetProjectionReuseValid(), "stable projection refreshes independent state and samples feature IDs once");

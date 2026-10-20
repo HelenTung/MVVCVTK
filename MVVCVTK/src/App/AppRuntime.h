@@ -471,7 +471,7 @@ private:
     std::optional<bool> m_suppliedAutoWindowUpdate; // 随既有 ViewUpdate 提交，拒绝时不发布意图。
     DataRevisionRef m_isoSource;
     std::optional<DataStageIdentity> m_dataStageIdentity; // 每次全参数候选尝试递增 serial，m_transitionMutex 保护。
-    std::optional<DataStageIdentity> m_transitionFailure; // 同一锁保护，只表示当前尝试的终态。
+    std::optional<DataStageIdentity> m_transitionFailure; // 同一锁保护；查询按当前请求核验，旧值保留到新候选冻结。
     std::optional<PendingLoadCommit> m_pendingLoadCommit;
     std::uint64_t m_nextLoadTransactionRevision = 0;
     // Host 多 View 全部清除已提交 stage 后，load owner 取走同版本候选并做一次共享提交。
