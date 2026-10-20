@@ -135,7 +135,8 @@ void ObjectBrowser::SetObjects(const QJsonObject& graph,const QJsonArray& region
             if(item->data(0,Qt::UserRole).toJsonObject()!=node) {
                 item->setData(0,Qt::UserRole,node);item->setText(0,node["title"].toString());auto status=node["status"].toString();if(status.startsWith("当前输入"))status="当前";else if(status=="正式范围")status="区域";else if(status=="已归档")status="归档";item->setText(1,status);
                 item->setIcon(1,node["ref"].toString().isEmpty()?QIcon():readyIcon);
-                if(node["isVisible"].isBool()){item->setFlags(item->flags()|Qt::ItemIsUserCheckable);item->setCheckState(0,node["isVisible"].toBool()?Qt::Checked:Qt::Unchecked);}else item->setFlags(item->flags()&~Qt::ItemIsUserCheckable);
+                if(node["isVisible"].isBool()){item->setFlags(item->flags()|Qt::ItemIsUserCheckable);item->setCheckState(0,node["isVisible"].toBool()?Qt::Checked:Qt::Unchecked);}
+                else {item->setFlags(item->flags()&~Qt::ItemIsUserCheckable);item->setData(0,Qt::CheckStateRole,QVariant());}
                 item->setToolTip(0,node["title"].toString()+"\n修订："+node["ref"].toString());
                 item->setToolTip(1,node["status"].toString());
             }

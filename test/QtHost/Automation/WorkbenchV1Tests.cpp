@@ -288,7 +288,12 @@ void CheckWorkbenchV1(TestWindow& window)
     auto* mesh=tree->topLevelItem(2)->child(0);tree->setCurrentItem(mesh);Require(!use->isEnabled(),"selecting a surface cannot adopt it as grayscale input");
     browser.SetObjects(graph,{}, {},"volume:1",{});Require(tree->currentItem()==mesh,"unchanged directory preserves selection and row identity");
     int actions=0;browser.onAction=[&](const QString&,const QString& action,const QJsonObject& patch){Require(action=="UseData" && patch["graphRevision"]=="volume:1","adoption uses the selected volume revision");++actions;};
-    tree->setCurrentItem(tree->topLevelItem(0)->child(0));Require(actions==0,"ordinary directory selection is read-only");use->click();Require(actions==1,"adoption is a distinct explicit command");browser.hide();
+    tree->setCurrentItem(tree->topLevelItem(0)->child(0));Require(actions==0,"ordinary directory selection is read-only");use->click();Require(actions==1,"adoption is a distinct explicit command");
+    auto* volume=tree->topLevelItem(0)->child(0);
+    browser.SetObjects(graph,{}, {},"volume:1",{},1.0);Require(volume->checkState(0)==Qt::Checked,"known visible input has a checked visibility indicator");
+    browser.SetObjects(graph,{}, {},"volume:1",{});Require(!volume->data(0,Qt::CheckStateRole).isValid() && !(volume->flags()&Qt::ItemIsUserCheckable),"unknown visibility clears the old indicator instead of displaying a stale checked state");
+    browser.SetObjects(graph,{}, {},"volume:1",{},0.0);Require(volume->data(0,Qt::CheckStateRole).isValid() && volume->checkState(0)==Qt::Unchecked,"known hidden input has an explicit unchecked indicator");
+    browser.SetObjects(graph,{}, {},"",{});Require(!volume->data(0,Qt::CheckStateRole).isValid() && actions==1,"historical data has no inherited visibility indicator and refresh never submits a command");browser.hide();
     BusinessStatistics statistics;statistics.resize(650,400);statistics.show();
     const QJsonObject histogram{{"title","known range"},{"description","fixed source R1"},{"counts",QJsonArray{2,3}},{"edges",QJsonArray{0,50,100}},
         {"markers",QJsonArray{QJsonObject{{"key","iso"},{"label","ISO"},{"value",50},{"editable",true}}}}};
