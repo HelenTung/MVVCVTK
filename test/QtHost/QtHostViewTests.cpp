@@ -989,7 +989,8 @@ int GetRenderContractFailCount()
         if (quality == VolumeQuality::Ultra) {
             isUltraNative = dimensionMapper
                 && dimensionMapper->GetInput()
-                    == dimensionImage.GetPointer()
+                && dimensionMapper->GetInput()->GetPointData()->GetScalars()->GetVoidPointer(0)
+                    == dimensionImage->GetScalarPointer()
             && dimensionStrategy.GetResampleBuildCount()
                 == resampleCountBefore;
         }
@@ -1447,8 +1448,8 @@ int GetRenderContractFailCount()
         && qualityMask
         && qualityVolume
         && isNativeAuto
-        && qualityVolume == dimensionImage.GetPointer()
-        && qualityMask == cacheMask.GetPointer()
+        && qualityVolume->GetScalarPointer() == dimensionImage->GetScalarPointer()
+        && qualityMask->GetScalarPointer() == cacheMask->GetScalarPointer()
         && qualityInputCount == 1
         && qualityPlanCount == 1
         && qualityBuildCount == 0
@@ -1625,12 +1626,12 @@ int GetRenderContractFailCount()
             && isExtentKeyUpdated
             && firstKeyMask
             && nextKeyMask
-            && nextKeyMask == firstKeyMask.GetPointer()
+            && nextKeyMask->GetScalarPointer() == firstKeyMask->GetScalarPointer()
             && *static_cast<unsigned char*>(
                 nextKeyMask->GetScalarPointer()) == 0
             && failedClearMask == nullptr
             && keyStrategy.GetLodPlanCount() == 7,
-        "Same-pointer mutations rebuild plans while native aliases stay stable") ? 0 : 1;
+        "Same-pointer mutations rebuild private metadata while native storage stays shared") ? 0 : 1;
 
     auto image = BuildFloatImage(
         { 0.0f, 0.0f, 1.0f, 1.0f });

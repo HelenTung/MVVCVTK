@@ -36,6 +36,8 @@
 
 #include <vtkActor.h>
 #include <vtkImageData.h>
+#include <vtkFloatArray.h>
+#include <vtkInformation.h>
 #include <vtkPointData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkPlaneSource.h>
@@ -44,6 +46,10 @@
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkTrivialProducer.h>
 #include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
+#include <vtkColorTransferFunction.h>
+#include <vtkPiecewiseFunction.h>
+#include <vtkWindowToImageFilter.h>
 #include <vtkTextActor.h>
 #include <vtkTextProperty.h>
 
@@ -96,6 +102,21 @@ public:
     std::optional<std::uint64_t> freeBytes;
 private:
     std::optional<std::uint64_t> GetGpuFreeBytes() const override{return freeBytes;}
+};
+
+class RangeReadProbe final : public vtkFloatArray {
+public:
+    static RangeReadProbe* New() {return new RangeReadProbe;}
+    vtkTypeMacro(RangeReadProbe, vtkFloatArray);
+    inline static bool shouldThrow = false;
+    void* GetVoidPointer(vtkIdType index) override
+    {
+        if (shouldThrow) {
+            shouldThrow = false;
+            throw std::runtime_error("injected optional range preparation failure");
+        }
+        return this->Superclass::GetVoidPointer(index);
+    }
 };
 
 int GetGpuHeadroomFailCount()
@@ -854,13 +875,15 @@ int GetVolumeBuilderFailCount()
         RenderTaskToken{});
     failureCount += GetCaseResult(
         nativeResult.product
-            && nativeResult.product->volume == image
+            && nativeResult.product->volume != image
+            && nativeResult.product->volume->GetScalarPointer() == image->GetScalarPointer()
+            && nativeResult.product->volume->GetPointData()->GetScalars() != image->GetPointData()->GetScalars()
             && denoiseResult.product
             && denoiseResult.product->volume
             && denoiseResult.product->volume != image
             && denoiseResult.product->volume->GetNumberOfPoints()
                 == image->GetNumberOfPoints(),
-        "Volume Ultra aliases native input only when denoise is disabled")
+        "Volume Ultra shares native storage through private scalar metadata when denoise is disabled")
         ? 0 : 1;
 
     auto invalidMask = vtkSmartPointer<vtkImageData>::New();
@@ -878,6 +901,135 @@ int GetVolumeBuilderFailCount()
         "Volume builder rejects invalid mask geometry without a partial product")
         ? 0 : 1;
     return failureCount;
+}
+
+int GetVolumeRangeFailCount()
+{
+    int failures = 0;
+    for (const int type : {VTK_FLOAT, VTK_DOUBLE, VTK_UNSIGNED_CHAR, VTK_SHORT, VTK_UNSIGNED_LONG_LONG}) {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(4, 2, 2);
+        image->AllocateScalars(type, 3);
+        auto* source = image->GetPointData()->GetScalars();
+        for (vtkIdType tuple = 0; tuple < source->GetNumberOfTuples(); ++tuple) {
+            source->SetComponent(tuple, 0, tuple +
+                (type == VTK_UNSIGNED_CHAR || type == VTK_UNSIGNED_LONG_LONG ? 0.0 : -7.0));
+            source->SetComponent(tuple, 1, tuple * 3.0);
+            source->SetComponent(tuple, 2, 42.0);
+        }
+        if (type == VTK_FLOAT || type == VTK_DOUBLE) {
+            source->SetComponent(0, 0, std::numeric_limits<double>::quiet_NaN());
+            source->SetComponent(1, 0, -std::numeric_limits<double>::infinity());
+            source->SetComponent(2, 0, std::numeric_limits<double>::infinity());
+            for (vtkIdType tuple = 0; tuple < source->GetNumberOfTuples(); ++tuple) {
+                source->SetComponent(tuple, 1, std::numeric_limits<double>::quiet_NaN());
+                source->SetComponent(tuple, 2, tuple % 2 ? std::numeric_limits<double>::infinity()
+                    : -std::numeric_limits<double>::infinity());
+            }
+        }
+        source->Modified();
+        auto reference = vtkSmartPointer<vtkDataArray>::Take(source->NewInstance());
+        reference->DeepCopy(source);
+        const auto sourceTime = source->GetMTime();
+        const auto result = VolumeLodProductBuilder().BuildProduct(
+            GetVolumeRequest(image, nullptr, 1, VolumeQuality::Ultra, {4, 2, 2}, false), RenderTaskToken{});
+        auto* prepared = result.product ? result.product->volume->GetPointData()->GetScalars() : nullptr;
+        bool valid = prepared && prepared != source && prepared->GetVoidPointer(0) == source->GetVoidPointer(0)
+            && source->GetMTime() == sourceTime
+            && !source->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT())
+            && prepared->GetInformation()->Has(vtkAbstractArray::PER_COMPONENT())
+            && prepared->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT());
+        for (int component = 0; component < 3 && prepared; ++component) {
+            double expected[2]{}, actual[2]{};
+            reference->GetRange(expected, component); prepared->GetRange(actual, component);
+            valid = std::equal(expected, expected + 2, actual) && valid;
+            reference->GetFiniteRange(expected, component); prepared->GetFiniteRange(actual, component);
+            valid = std::equal(expected, expected + 2, actual) && valid;
+        }
+        failures += GetCaseResult(valid,
+            "Volume scalar candidates retain VTK ordinary/finite component semantics without changing published metadata") ? 0 : 1;
+        if (prepared) {
+            prepared->Modified();
+            failures += GetCaseResult(!prepared->GetInformation()->Has(vtkAbstractArray::PER_COMPONENT())
+                && !prepared->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT()),
+                "VTK Modified invalidates both prepared component range caches") ? 0 : 1;
+        }
+    }
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(128, 128, 32);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    image->GetPointData()->GetScalars()->Fill(3.0);
+    auto request = GetVolumeRequest(image, nullptr, 1, VolumeQuality::Ultra, {128, 128, 32}, false);
+    auto lane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator resources([lane](RenderLaneWork work) {return lane->Start(std::move(work));});
+    auto channel = resources.CreateTaskChannel(RenderProductKind::VolumeLod);
+    int checks = 0;
+    VolumeLodBuildResult cancelled;
+    RenderTaskRequest work; work.requestRevision = 1;
+    // 在已进入构建后的协作检查点撤销需要者，不用 sleep 猜线程交错。
+    work.onNeeded = [&] {return ++checks < 7;};
+    work.work = [&](RenderTaskToken token) {cancelled = VolumeLodProductBuilder().BuildProduct(request, token);};
+    const auto accepted = channel->StartTask(std::move(work));
+    const auto sent = lane->SendOne();
+    failures += GetCaseResult(accepted == RenderTaskAdmission::Accepted && sent && checks >= 7
+        && !cancelled.product && cancelled.failureReason == RenderProductFailure::Cancelled
+        && !image->GetPointData()->GetScalars()->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT()),
+        "Cancellation during scalar preparation discards private range metadata and keeps the published input") ? 0 : 1;
+
+    auto fallbackImage = vtkSmartPointer<vtkImageData>::New();
+    fallbackImage->SetDimensions(32, 32, 32);
+    auto fallbackValues = vtkSmartPointer<RangeReadProbe>::New();
+    fallbackValues->SetNumberOfTuples(32 * 32 * 32);
+    fallbackValues->Fill(128.0);
+    fallbackImage->GetPointData()->SetScalars(fallbackValues);
+    RangeReadProbe::shouldThrow = true;
+    auto fallback = VolumeLodProductBuilder().BuildProduct(
+        GetVolumeRequest(fallbackImage, nullptr, 2, VolumeQuality::Ultra, {32, 32, 32}, false), RenderTaskToken{});
+    const bool wasFallback = !RangeReadProbe::shouldThrow && fallback.product
+        && fallback.failureReason == RenderProductFailure::None
+        && !fallback.product->volume->GetPointData()->GetScalars()->GetInformation()
+            ->Has(vtkAbstractArray::PER_FINITE_COMPONENT());
+    RangeReadProbe::shouldThrow = false;
+    bool isRendered = false;
+    if (fallback.product) {
+        auto renderer = vtkSmartPointer<vtkRenderer>::New();
+        auto window = vtkSmartPointer<vtkRenderWindow>::New();
+        window->SetOffScreenRendering(1); window->SetSize(32, 32); window->AddRenderer(renderer);
+        auto mapper = vtkSmartPointer<vtkGPUVolumeRayCastMapper>::New();
+        mapper->SetUseJittering(false);
+        auto volume = vtkSmartPointer<vtkVolume>::New(); volume->SetMapper(mapper);
+        auto color = vtkSmartPointer<vtkColorTransferFunction>::New();
+        color->AddRGBPoint(0, .8, .4, .2); color->AddRGBPoint(255, .8, .4, .2);
+        auto opacity = vtkSmartPointer<vtkPiecewiseFunction>::New();
+        opacity->AddPoint(0, 0); opacity->AddPoint(255, 1);
+        volume->GetProperty()->SetColor(color); volume->GetProperty()->SetScalarOpacity(opacity);
+        renderer->AddVolume(volume); mapper->SetInputData(fallbackImage); renderer->ResetCamera();
+        auto capture = vtkSmartPointer<vtkWindowToImageFilter>::New(); capture->SetInput(window);
+        capture->ReadFrontBufferOff(); capture->SetInputBufferTypeToRGBA();
+        window->Render(); window->WaitForCompletion(); capture->Update();
+        auto* pixels = capture->GetOutput()->GetPointData()->GetScalars();
+        const auto pixelBytes = static_cast<std::size_t>(pixels->GetNumberOfValues());
+        const auto* before = static_cast<const unsigned char*>(pixels->GetVoidPointer(0));
+        const std::vector<unsigned char> expected(before, before + pixelBytes);
+        mapper->ReleaseGraphicsResources(window);
+        mapper->SetInputData(fallback.product->volume);
+        window->Render(); window->WaitForCompletion(); capture->Modified(); capture->Update();
+        pixels = capture->GetOutput()->GetPointData()->GetScalars();
+        double range[2]{}; fallback.product->volume->GetPointData()->GetScalars()->GetFiniteRange(range, 0);
+        isRendered = range[0] == 128 && range[1] == 128
+            && pixels->GetNumberOfValues() == static_cast<vtkIdType>(expected.size())
+            && std::equal(expected.begin(), expected.end(), static_cast<unsigned char*>(pixels->GetVoidPointer(0)));
+        renderer->RemoveVolume(volume); mapper->ReleaseGraphicsResources(window);
+    }
+    failures += GetCaseResult(wasFallback && isRendered,
+        "Unavailable optional range cache uses the original owner path and renders identical pixels without rejecting display") ? 0 : 1;
+    vtkWeakPointer<vtkDataArray> borrowed = fallbackValues;
+    fallbackImage = nullptr; fallbackValues = nullptr;
+    const bool hasOwner = borrowed.GetPointer() != nullptr;
+    fallback.product.reset();
+    failures += GetCaseResult(hasOwner && !borrowed.GetPointer(),
+        "Native scalar storage stays owned until the last private candidate is released") ? 0 : 1;
+    return failures;
 }
 
 int GetVolumeStrategyTaskFailCount()
@@ -1664,6 +1816,7 @@ int GetRenderProductFailCount()
         + GetIsoBuilderFailCount()
         + GetIsoStrategyTaskFailCount()
         + GetVolumeBuilderFailCount()
+        + GetVolumeRangeFailCount()
         + GetVolumeStrategyTaskFailCount()
         + GetResourceAccountingFailCount()
         + GetSharedCacheAndGpuFailCount()

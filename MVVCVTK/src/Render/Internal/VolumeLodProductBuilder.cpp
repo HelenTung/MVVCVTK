@@ -10,8 +10,11 @@
 #include <vtkDataArray.h>
 #include <vtkImageAnisotropicDiffusion3D.h>
 #include <vtkImageResample.h>
+#include <vtkInformation.h>
+#include <vtkInformationVector.h>
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
+#include <vtkTypeTraits.h>
 
 #include <algorithm>
 #include <cmath>
@@ -172,6 +175,93 @@ vtkSmartPointer<vtkImageData> GetMaterializedOutput(
     return result;
 }
 
+vtkSmartPointer<vtkImageData> BuildPrivateImage(vtkImageData* input)
+{
+    try {
+        auto* source = input->GetPointData()->GetScalars();
+        auto scalars = vtkSmartPointer<vtkDataArray>::Take(source->NewInstance());
+        // 标量壳的 information/范围缓存只归候选所有。AOS 数组共享只读 buffer，
+        // 同时保留原数组上的借用 owner/资源租约，直到最后一个候选读者释放。
+        scalars->ShallowCopy(source);
+        auto keepAlive = vtkSmartPointer<vtkCallbackCommand>::New();
+        keepAlive->SetClientData(new vtkSmartPointer<vtkDataArray>(source));
+        keepAlive->SetClientDataDeleteCallback([](void* value) {
+            delete static_cast<vtkSmartPointer<vtkDataArray>*>(value);
+        });
+        keepAlive->SetCallback([](vtkObject*, unsigned long, void*, void*) {});
+        scalars->AddObserver(vtkCommand::DeleteEvent, keepAlive);
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->ShallowCopy(input);
+        image->GetPointData()->SetScalars(scalars);
+        return image;
+    }
+    catch (...) {
+        // 私有范围缓存只是预热；分配失败仍可沿原生别名/owner 求值路径显示。
+        return nullptr;
+    }
+}
+
+template<class Scalar>
+bool SetScalarRanges(const Scalar* values, vtkDataArray* scalars,
+    const RenderTaskToken& stopToken)
+{
+    const auto count = scalars->GetNumberOfTuples();
+    const int components = scalars->GetNumberOfComponents();
+    const std::array<double, 2> emptyRange{
+        static_cast<double>(vtkTypeTraits<Scalar>::Max()),
+        static_cast<double>(vtkTypeTraits<Scalar>::Min())};
+    std::vector<std::array<double, 2>> ranges(components, emptyRange);
+    std::vector<std::array<double, 2>> finiteRanges(components, emptyRange);
+    constexpr vtkIdType chunkTuples = 65536;
+    for (vtkIdType first = 0; first < count;) {
+        if (stopToken.GetIsStopped()) return false;
+        const auto last = first + std::min(chunkTuples, count - first);
+        for (vtkIdType tuple = first; tuple < last; ++tuple) {
+            for (int component = 0; component < components; ++component) {
+                const double value = static_cast<double>(values[tuple * components + component]);
+                // 比较自然排除 NaN；普通范围保留 Inf，有限范围独立过滤。
+                auto& range = ranges[component];
+                if (value < range[0]) range[0] = value;
+                if (value > range[1]) range[1] = value;
+                if (std::isfinite(value)) {
+                    auto& finite = finiteRanges[component];
+                    if (value < finite[0]) finite[0] = value;
+                    if (value > finite[1]) finite[1] = value;
+                }
+            }
+        }
+        first = last;
+    }
+    if (stopToken.GetIsStopped()) return false;
+    auto ordinary = vtkSmartPointer<vtkInformationVector>::New();
+    auto finite = vtkSmartPointer<vtkInformationVector>::New();
+    ordinary->SetNumberOfInformationObjects(components);
+    finite->SetNumberOfInformationObjects(components);
+    for (int component = 0; component < components; ++component) {
+        ordinary->GetInformationObject(component)->Set(
+            vtkDataArray::COMPONENT_RANGE(), ranges[component].data(), 2);
+        finite->GetInformationObject(component)->Set(
+            vtkDataArray::COMPONENT_RANGE(), finiteRanges[component].data(), 2);
+    }
+    // 整组完成后才填缓存。VTK Modified() 会按原生规则使两组缓存失效。
+    scalars->GetInformation()->Set(vtkAbstractArray::PER_COMPONENT(), ordinary);
+    scalars->GetInformation()->Set(vtkAbstractArray::PER_FINITE_COMPONENT(), finite);
+    return true;
+}
+
+bool SetImageRanges(vtkImageData* image, const RenderTaskToken& stopToken)
+{
+    if (!image) return true;
+    auto* scalars = image->GetPointData()->GetScalars();
+    const auto* values = scalars->GetVoidPointer(0);
+    if (!values) return false;
+    bool isReady = false;
+    switch (scalars->GetDataType()) {
+        vtkTemplateMacro(isReady = SetScalarRanges(static_cast<const VTK_TT*>(values), scalars, stopToken));
+    }
+    return isReady;
+}
+
 } // namespace
 
 std::optional<std::uint64_t> VolumeLodProductBuilder::GetEstimatedBytes(
@@ -294,8 +384,9 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
         VtkObserverSet observers(stopToken);
 
         if (hasNativeDimensions && !request.key.isDenoiseOn) {
-            // 原生无降噪档直接共享只读源数组，避免整卷复制。
-            volume = request.input;
+            // 共享只读存储，但不让后台范围计算写入已发布数组的缓存。
+            volume = BuildPrivateImage(request.input);
+            if (!volume) volume = request.input;
         }
         else {
             if (resources) resources->SetScalarBuildCount();
@@ -348,7 +439,8 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
         vtkSmartPointer<vtkImageData> mask;
         if (request.mask) {
             if (hasNativeDimensions) {
-                mask = request.mask;
+                mask = BuildPrivateImage(request.mask);
+                if (!mask) mask = request.mask;
             }
             else {
                 maskResample = ImageProcessor::CreateScaledMask(
@@ -380,6 +472,18 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
             }
         }
 
+        // PreLoadData 会读取 finite-only 范围。普通范围与有限范围在私有
+        // 候选上一次扫描完成，owner 绑定和首次绘制不再触发整卷求值。
+        try {
+            const bool isVolumeReady = volume == request.input || SetImageRanges(volume, stopToken);
+            if (isVolumeReady && mask != request.mask) (void)SetImageRanges(mask, stopToken);
+        }
+        catch (...) {
+            // 缓存预热失败不拒绝产品；VTK 在 owner 的既有路径仍会求出范围。
+        }
+        if (stopToken.GetIsStopped()) {
+            return GetFailure(RenderProductFailure::Cancelled, "The volume LOD build was cancelled.");
+        }
         std::uint64_t actualBytes = GetDataBytes(volume);
         if (!AddBytes(GetDataBytes(mask), actualBytes)) {
             return GetFailure(
@@ -409,9 +513,9 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
         // Native products borrow the already tracked input allocation. Attaching a new result
         // lease to its shared Root scalar would keep that result alive for the entire Root lifetime.
         // New resampled/denoised allocations own the product lease down to their arrays.
-        if (product->volume!=request.input)
+        if (!hasNativeDimensions || request.key.isDenoiseOn)
             VtkDataResourceLease::AttachImage(product->volume, product->inputUse.resource);
-        if (product->mask!=request.mask)
+        if (!hasNativeDimensions)
             VtkDataResourceLease::AttachImage(product->mask, product->inputUse.resource);
 
         if (!stopToken.SetProductOwner(product, actualBytes)) {
