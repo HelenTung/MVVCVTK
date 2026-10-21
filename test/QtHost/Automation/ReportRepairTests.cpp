@@ -684,6 +684,7 @@ void CheckFileExports() {
         &&table->actions().first()->objectName()=="exportSelectedReportAction","report context menu retained clipboard or whole-report actions");
     const auto allPath=directory.filePath("all.csv");ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return allPath;});
     view.findChild<QPushButton*>("exportReportCsv")->click();Require(view.property("reportTaskBusy").toBool(),"all-row export did not admit asynchronously");Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(view.findChild<QLabel*>("reportTaskStatus")->text()=="已导出 4 行 · all.csv","completed export row count is not displayed as exact decimal digits");
     QFile allFile(allPath);Require(allFile.open(QIODevice::ReadOnly),"all-row export target unreadable");const auto allBytes=allFile.readAll();
     Require(allBytes.startsWith(QByteArray("\xef\xbb\xbf"))&&allBytes.contains("\r\n")
         &&allBytes.contains(("mvvcvtk-result="+doc.identityResult).toUtf8()),"export lost UTF-8 BOM, CRLF or result identity header annotation");
@@ -794,10 +795,12 @@ void CheckFileExports() {
     QObject::connect(pulse,&QTimer::timeout,&stress,[&]{gaps.append(pulseClock.restart());});pulse->start();
     QElapsedTimer admission;admission.start();stress.findChild<QPushButton*>("exportReportCsv")->click();const auto admissionMs=admission.elapsed();
     Require(stress.property("reportTaskBusy").toBool(),"large export failed asynchronous admission");
+    Require(stress.findChild<QLabel*>("reportTaskStatus")->text()==QString("正在导出 · 0 / %1 行").arg(stressRows),"admitted export row count is not displayed as exact decimal digits");
     bool writingShot=false;
     QElapsedTimer run;run.start();while(stress.property("reportTaskBusy").toBool()&&run.elapsed()<120000){QCoreApplication::processEvents(QEventLoop::AllEvents,10);if(!writingShot&&!evidence.isEmpty()&&stress.property("reportExportStatus").toString()=="writing"){
         const auto shot=QDir(evidence).filePath("report-export-writing.png");Require(!QFileInfo::exists(shot)&&stress.grab().save(shot),"cannot save report export writing screenshot");writingShot=true;}}
     Require(!stress.property("reportTaskBusy").toBool()&&stress.property("reportExportStatus").toString()=="completed","large export did not commit successfully");pulse->stop();
+    Require(stress.findChild<QLabel*>("reportTaskStatus")->text()==QString("已导出 %1 行 · stress.csv").arg(stressRows),"large export completion lost its exact decimal row count");
     const auto exportMs=admissionMs+run.elapsed();
     QFile stressFile(stressPath);Require(stressFile.open(QIODevice::ReadOnly),"large export file unreadable");QBuffer stressBuffer;stressBuffer.setData(stressFile.readAll());stressBuffer.open(QIODevice::ReadOnly);const auto stressCopy=ReadReportCsv(stressBuffer,"large export");
     Require(stressCopy.table->GetCount()==stressRows&&metrics->reads==stressRows&&!metrics->wrongThread.load()&&!gaps.isEmpty(),"large export row count, owner heartbeat or worker read-thread identity incorrect");

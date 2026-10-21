@@ -27,7 +27,6 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QProgressBar>
-#include <QLocale>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QHeaderView>
@@ -530,7 +529,8 @@ void ResultReport::StartExport(const QString& path,ReportRows rows,bool restrict
     },{doc},{},state);
     setProperty("reportExportPath",QString());setProperty("reportExportRows",qlonglong(0));setProperty("reportExportTotal",qlonglong(state->rowCount));
     setProperty("reportExportStatus","writing");m_openExportFolder->hide();m_exportProgress->setValue(0);m_exportProgress->show();
-    m_taskStatus->setText(QString("正在导出 · 0 / %1 行").arg(QLocale().toString(state->rowCount)));
+    // Qt 5 的系统中文数字可能不是连续码位；行数沿用表格的十进制计数，避免产生非数字字形。
+    m_taskStatus->setText(QString("正在导出 · 0 / %1 行").arg(state->rowCount));
 }
 void ResultReport::RefreshExportActions()
 {
@@ -733,7 +733,7 @@ void ResultReport::ContinueTask()
         const auto rows=exportState->rowsWritten.load(std::memory_order_relaxed);setProperty("reportExportRows",qlonglong(rows));
         m_exportProgress->setValue(exportState->rowCount?static_cast<int>(1000.0L*rows/exportState->rowCount):0);
         const bool committing=exportState->phase.load()==ExportState::Phase::Committing;
-        m_taskStatus->setText(committing?QString("正在提交 CSV 文件…"):exportState->phase.load()==ExportState::Phase::Cancelled?QString("正在取消导出…"):QString("正在导出 · %1 / %2 行").arg(QLocale().toString(rows),QLocale().toString(exportState->rowCount)));
+        m_taskStatus->setText(committing?QString("正在提交 CSV 文件…"):exportState->phase.load()==ExportState::Phase::Cancelled?QString("正在取消导出…"):QString("正在导出 · %1 / %2 行").arg(rows).arg(exportState->rowCount));
         if(committing)m_cancelTask->setEnabled(false);
     }
     if(!m_task->nativeOperation.isEmpty())setProperty("reportGenerationProgress",progress);
@@ -771,7 +771,7 @@ void ResultReport::ContinueTask()
         if(exportState && exportState->committed.load()){
             setProperty("reportExportStatus","completed");setProperty("reportExportPath",exportState->path);setProperty("reportExportRows",qlonglong(exportState->rowCount));
             m_exportProgress->setValue(1000);m_openExportFolder->show();
-            m_taskStatus->setText(QString("已导出 %1 行 · %2").arg(QLocale().toString(exportState->rowCount),QFileInfo(exportState->path).fileName()));
+            m_taskStatus->setText(QString("已导出 %1 行 · %2").arg(exportState->rowCount).arg(QFileInfo(exportState->path).fileName()));
         }else m_taskStatus->setText(cancelled?"报告任务已取消":"报告任务完成");
     }catch(const std::exception& error){m_task.reset();
         const auto message=QString::fromUtf8(error.what());
