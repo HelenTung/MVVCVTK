@@ -3518,10 +3518,12 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             Check(crop && Wait([&] {
                 const auto state=crop->GetObservedState();
                 const bool isReady=GetCropFramesReady(state);
-                if(!isReady && !checkedUnavailable) {
-                    const auto* action=crop->findChild<QPushButton*>("action_FinishEditing");
-                    Check(action && !action->isEnabled() && !action->toolTip().isEmpty(),
-                        "unfinished crop presentation disables the actual FinishEditing command with a reason");
+                // 切换数据后，非编辑文档仍有历史；后台观察会更新状态，隐藏控件保留上次页面投影。
+                // 仅活动裁剪页存在可操作的确认入口，就绪及历史帧身份继续按原条件等待。
+                if(!isReady && !checkedUnavailable && crop->isVisible() && state["isActive"].toBool()) {
+                    const auto* action=GetCropConfirmationCommand(crop);
+                    Check(action && action->isVisible() && !action->isEnabled() && !action->toolTip().isEmpty(),
+                        "unfinished active crop presentation disables the actual FinishEditing menu command with a reason");
                     const auto* primary=crop->findChild<QPushButton*>("businessPrimary");
                     if(primary && primary->isVisible() && primary->property("businessAction")=="FinishEditing")
                         Check(!primary->isEnabled() && !primary->toolTip().isEmpty(),
