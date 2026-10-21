@@ -58,6 +58,7 @@
 #include <vtkPNGReader.h>
 #include <vtkPLYReader.h>
 #include <vtkPointData.h>
+#include <vtkPropCollection.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
@@ -1921,8 +1922,10 @@ void StartPipelineRollback(int& failureCount)
             && ports.interaction.update->SendUpdates(),
         "pipeline rollback should build its committed Volume strategy",
         failureCount);
-    vtkProp3D* oldProp =
+    const vtkSmartPointer<vtkProp3D> oldProp =
         ports.interaction.model->GetMainProp();
+    const int oldPropCount =
+        renderer->GetViewProps()->GetNumberOfItems();
     vtkCamera* camera = renderer->GetActiveCamera();
     camera->SetPosition(11.0, -5.0, 17.0);
     camera->SetFocalPoint(2.0, 3.0, 4.0);
@@ -1955,10 +1958,10 @@ void StartPipelineRollback(int& failureCount)
     const double oldAngle = camera->GetViewAngle();
 
     update.mode = VizMode::IsoSurface;
-    const bool isUpdateSent =
-        ports.app.view->SendViewUpdate(update)
-        && ports.interaction.update->SendUpdates();
-    const bool isFailed = isUpdateSent
+    const bool isAccepted = ports.app.view->SendViewUpdate(update);
+    // 请求接纳不等于管线提交成功；Attach 失败必须由更新入口报告。
+    const bool isUpdateFailed = !ports.interaction.update->SendUpdates();
+    const bool isFailed = isUpdateFailed
         && failAttachCount->load() > 0;
     camera = renderer->GetActiveCamera();
     const bool isCameraRestored = camera
@@ -1999,13 +2002,18 @@ void StartPipelineRollback(int& failureCount)
             << " projection=" << camera->GetParallelProjection()
             << '\n';
     }
+    SetExpect(isAccepted,
+        "fault-injection mode request should be accepted before pipeline preparation",
+        failureCount);
     SetExpect(isFailed,
         "fault-injection strategy should make pipeline commit fail",
         failureCount);
     SetExpect(oldProp
             && ports.interaction.model->GetMainProp() == oldProp
-            && renderer->HasViewProp(oldProp),
-        "failed strategy attach must restore the committed prop",
+            && renderer->HasViewProp(oldProp)
+            && renderer->GetViewProps()->GetNumberOfItems() == oldPropCount
+            && ports.app.view->GetViewState().mode == VizMode::Volume,
+        "failed strategy attach must keep the committed mode and props without candidate residue",
         failureCount);
     SetExpect(isCameraRestored,
         "failed strategy attach must restore the full committed camera",
@@ -2015,13 +2023,34 @@ void StartPipelineRollback(int& failureCount)
     auto reboundWindow = vtkSmartPointer<vtkRenderWindow>::New();
     reboundWindow->SetOffScreenRendering(1);
     reboundWindow->AddRenderer(reboundRenderer);
-    ports.renderBind->SetRenderTarget(
+    const bool isRebound = ports.renderBind->SetRenderTarget(
         reboundWindow, reboundRenderer);
-    SetExpect(reboundRenderer->GetActiveCamera()
+    SetExpect(isRebound
+            && reboundRenderer->GetActiveCamera()
             && reboundRenderer->GetActiveCamera()
                 ->GetParallelProjection() == 0
-            && ports.interaction.model->GetMainProp() == oldProp,
+            && ports.interaction.model->GetMainProp() == oldProp
+            && reboundRenderer->HasViewProp(oldProp)
+            && !renderer->HasViewProp(oldProp)
+            && ports.app.view->GetViewState().mode == VizMode::Volume,
         "failed pending mode must not pollute committed-mode renderer rebind",
+        failureCount);
+
+    const int failedAttachCount = failAttachCount->load();
+    update.mode = VizMode::Volume;
+    const bool isRecovered = ports.app.view->SendViewUpdate(update)
+        && SendUpdatesUntil(ports.interaction.update, [&] {
+            return ports.interaction.model->GetMainProp()
+                && ports.interaction.model->GetMainProp() != oldProp;
+        });
+    SetExpect(isRecovered
+            && ports.app.view->GetViewState().mode == VizMode::Volume
+            && reboundRenderer->HasViewProp(
+                ports.interaction.model->GetMainProp())
+            && !reboundRenderer->HasViewProp(oldProp)
+            && reboundRenderer->GetViewProps()->GetNumberOfItems() == oldPropCount
+            && failAttachCount->load() == failedAttachCount,
+        "a new Volume request must recover after failed attach without stale mode or props",
         failureCount);
 }
 
