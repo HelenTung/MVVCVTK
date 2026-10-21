@@ -5,6 +5,7 @@
 #include "ReportStorage.h"
 #include <QAbstractTableModel>
 #include <QTableView>
+#include <QItemSelectionModel>
 #include <QTreeWidget>
 #include <QLineEdit>
 #include <QCheckBox>
@@ -20,7 +21,11 @@
 #include <QDialog>
 #include <numeric>
 #include <QApplication>
-#include <QClipboard>
+#include <QAction>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QProgressBar>
+#include <QLocale>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QHeaderView>
@@ -184,17 +189,37 @@ ReportRows ReadReportRows(const ReportDocument& doc,const QString& search,int co
     check();return rows.Finish();
 }
 }
+class ResultReport::ExportState final {
+public:
+    enum class Phase { Writing, Cancelled, Committing, Committed };
+    QString path;
+    ReportDocument document;
+    ReportRowId rowCount=0;
+    std::atomic<ReportRowId> rowsWritten{0};
+    std::atomic<bool> committed{false},readFailed{false};
+    // CAS 决定取消或提交谁先接纳；owner 不等待工作线程上的磁盘 commit。
+    std::atomic<Phase> phase{Phase::Writing};
+    const std::chrono::steady_clock::time_point deadline=std::chrono::steady_clock::now()+std::chrono::hours(24);
+};
 class ResultReport::Task final {
 public:
     struct Gate final {std::mutex mutex;std::condition_variable changed;bool ready=false;std::exception_ptr failure;};
     std::shared_ptr<Gate> gate=std::make_shared<Gate>();
     std::uint64_t request=0;
-    void Cancel(){ {std::lock_guard<std::mutex> lock(gate->mutex);cancelled->store(true);}gate->changed.notify_all();}
+    void Cancel(){
+        {std::lock_guard<std::mutex> lock(gate->mutex);
+            if(exportState){auto expected=ExportState::Phase::Writing;
+                if(exportState->phase.compare_exchange_strong(expected,ExportState::Phase::Cancelled)
+                    || expected==ExportState::Phase::Cancelled)cancelled->store(true);}
+            else cancelled->store(true);}
+        gate->changed.notify_all();
+    }
     ~Task(){Cancel();if(future.valid())future.wait();}
 
     std::shared_ptr<std::atomic<bool>> cancelled=std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<qulonglong>> progress=std::make_shared<std::atomic<qulonglong>>(0);
     QVector<ReportDocument> inputs;
+    std::shared_ptr<ExportState> exportState;
     std::uint64_t viewRevision=0;
     QString nativeOperation;
     int preparing=0;
@@ -218,8 +243,10 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     auto* import = new QPushButton("导入 CSV…",this); import->setObjectName("importReportCsv"); toolbar->addWidget(import);
     auto* baseline = new QPushButton("设为基准 A",this); baseline->setObjectName("setReportBaseline"); toolbar->addWidget(baseline);
     auto* compare = new QPushButton("与基准比较…",this); compare->setObjectName("compareReports"); toolbar->addWidget(compare);
-    m_copy = new QPushButton("复制选中行",this); m_copy->setObjectName("copyReportCsv"); toolbar->addWidget(m_copy);
-    m_export = new QPushButton("导出完整明细…",this); m_export->setObjectName("exportReportCsv"); toolbar->addWidget(m_export);
+    m_export = new QPushButton("导出全部…",this); m_export->setObjectName("exportReportCsv"); m_export->setProperty("primaryCommand",true); toolbar->addWidget(m_export);
+    m_exportSelection = new QPushButton("导出选中行…",this); m_exportSelection->setObjectName("exportSelectedReport"); toolbar->addWidget(m_exportSelection);
+    m_exportSelection->setToolTip("将当前页选中的行保存为 CSV，保留表头、单位和原始值");
+    m_export->setToolTip("将当前报告的全部行保存为 CSV，不受分页和筛选影响");
     m_exportFiltered = new QPushButton("导出筛选结果…",this);m_exportFiltered->setObjectName("exportFilteredReport");toolbar->addWidget(m_exportFiltered);
     m_locate=new QPushButton("定位到视图",this);m_locate->setObjectName("locateReportRow");m_locate->hide();toolbar->addWidget(m_locate);
     layout->addLayout(toolbar);
@@ -228,7 +255,15 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     auto* remove=new QPushButton("移除报告",this);remove->setObjectName("removeReport");reportActions->addWidget(remove);
     auto* saveConditions=new QPushButton("保存汇总与条件…",this);saveConditions->setObjectName("saveReportConditions");reportActions->addWidget(saveConditions);
     m_cancelTask=new QPushButton("取消报告任务",this);m_cancelTask->setObjectName("cancelReportTask");reportActions->addWidget(m_cancelTask);
-    m_taskStatus=new QLabel(this);m_taskStatus->setObjectName("reportTaskStatus");reportActions->addWidget(m_taskStatus,1);layout->addLayout(reportActions);
+    layout->addLayout(reportActions);
+    auto* taskFeedback=new QHBoxLayout;
+    m_taskStatus=new QLabel(this);m_taskStatus->setObjectName("reportTaskStatus");m_taskStatus->setWordWrap(true);taskFeedback->addWidget(m_taskStatus,1);
+    m_exportProgress=new QProgressBar(this);m_exportProgress->setObjectName("reportExportProgress");m_exportProgress->setAccessibleName("报告导出进度");m_exportProgress->setRange(0,1000);m_exportProgress->hide();taskFeedback->addWidget(m_exportProgress);
+    m_openExportFolder=new QPushButton("打开所在文件夹",this);m_openExportFolder->setObjectName("openReportExportFolder");m_openExportFolder->hide();taskFeedback->addWidget(m_openExportFolder);layout->addLayout(taskFeedback);
+    connect(m_openExportFolder,&QPushButton::clicked,this,[this]{
+        const auto path=property("reportExportPath").toString();
+        if(!path.isEmpty()&&!QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath())))m_taskStatus->setText("无法打开所在文件夹，请从保存位置查看报告。");
+    });
     auto* failures=new QHBoxLayout;
     m_failedReport=new QComboBox(this);m_failedReport->setObjectName("failedReportOperations");failures->addWidget(m_failedReport,1);
     m_retryReport=new QPushButton("重试所选失败报告",this);m_retryReport->setObjectName("retryFailedReport");failures->addWidget(m_retryReport);layout->addLayout(failures);
@@ -243,7 +278,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     // 证据：out/final-confluence-post-stall/diagnosis/merged/native-wakeup/；输入分块额度与取消门槛不变。
     m_taskTimer=new QTimer(this);m_taskTimer->setTimerType(Qt::CoarseTimer);m_taskTimer->setInterval(20);
     connect(m_taskTimer,&QTimer::timeout,this,[this]{ContinueTask();});
-    connect(m_cancelTask,&QPushButton::clicked,this,[this]{CancelTasks();m_taskStatus->setText("已请求取消，正在回收后台任务；不会加入部分结果。");});
+    connect(m_cancelTask,&QPushButton::clicked,this,[this]{CancelTasks();m_taskStatus->setText("已请求取消，正在回收后台任务…");});
     m_cancelTask->setEnabled(false);
     connect(remove,&QPushButton::clicked,this,[this]{RemoveReport(m_selected.id);});
     connect(associate,&QPushButton::clicked,this,[this]{
@@ -307,21 +342,13 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     connect(m_table->horizontalHeader(),&QHeaderView::sectionClicked,this,[this](int column){
         m_sortOrder=m_sortColumn==column && m_sortOrder==Qt::AscendingOrder?Qt::DescendingOrder:Qt::AscendingOrder;m_sortColumn=column;RefreshRows();
     });
-    connect(m_copy,&QPushButton::clicked,this,[this]{
-        if(!m_pageReady || !m_table->selectionModel() || !m_selected.table)return;
-        auto selected=m_table->selectionModel()->selectedRows();std::sort(selected.begin(),selected.end(),[](const QModelIndex& a,const QModelIndex& b){return a.row()<b.row();});
-        try {
-            QStringList lines;for(const auto& index:selected){const auto row=m_page*200+index.row();QStringList cells;for(auto cell:m_selected.table->Read(m_allRows?row:m_rows[static_cast<std::size_t>(row)]))cells.append(CsvCell(cell));lines.append(cells.join(','));}
-            QApplication::clipboard()->setText(lines.join("\r\n"));
-        } catch(const std::exception& e){SetReadFailure(QString::fromUtf8(e.what()));}
-    });
-    const auto save=[this](bool filtered){
-        if(!m_selected.table)return;const auto path=QFileDialog::getSaveFileName(this,filtered?"导出全部筛选行":"导出完整明细",{},"CSV (*.csv)");if(path.isEmpty())return;
-        try{ExportReportFile(path,filtered);}
-        catch(const std::exception& e){QMessageBox::warning(this,"导出失败",QString::fromUtf8(e.what()));}
-    };
-    connect(m_export,&QPushButton::clicked,this,[save]{save(false);});
-    connect(m_exportFiltered,&QPushButton::clicked,this,[save]{save(true);});
+    connect(m_export,&QPushButton::clicked,this,[this]{SelectExportPath(false);});
+    connect(m_exportSelection,&QPushButton::clicked,this,[this]{SelectExportPath(true);});
+    connect(m_exportFiltered,&QPushButton::clicked,this,[this]{SelectExportPath(false,true);});
+    // 表格上下文只提供与选中行有关的操作，整份报告从工具栏导出。
+    m_exportSelectionAction=new QAction("导出选中行…",m_table);m_exportSelectionAction->setObjectName("exportSelectedReportAction");
+    m_table->addAction(m_exportSelectionAction);m_table->setContextMenuPolicy(Qt::ActionsContextMenu);
+    connect(m_exportSelectionAction,&QAction::triggered,this,[this]{SelectExportPath(true);});
     connect(m_locate,&QPushButton::clicked,this,[this]{
         if(!m_pageReady || !onLocate || !m_table->selectionModel())return;const auto selected=m_table->selectionModel()->selectedRows();
         if(selected.size()!=1){QMessageBox::information(this,"定位","请选择一条可定位记录。");return;}
@@ -331,6 +358,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
         try{onLocate(m_selected,original);}catch(const std::exception& e){QMessageBox::warning(this,"无法定位",QString::fromUtf8(e.what()));}
     });
     split->setStretchFactor(1,1); RefreshPage();
+    connect(m_table->selectionModel(),&QItemSelectionModel::selectionChanged,this,[this]{RefreshExportActions();});
 }
 void ResultReport::SetRecord(const QJsonObject& record)
 {
@@ -447,7 +475,59 @@ void ResultReport::ExportReportFile(const QString& path,bool filtered)
     if(!m_selected.table || (filtered && (!m_rowsReady || !m_pageReady)))throw std::runtime_error("报告或完整筛选结果尚未就绪");
     const auto doc=m_selected;doc.table->PrepareRead();const bool selected=filtered&&!m_allRows;
     const auto rows=selected?m_rows:ReportRows{};
-    StartTask([doc,path,selected,rows](const ReportCheckpoint& check){ExportReport(path,doc,selected?&rows:nullptr,check);return ReportDocument{};},{doc});
+    StartExport(path,rows,selected);
+}
+void ResultReport::ExportSelectedRows(const QString& path)
+{
+    if(!m_selected.table || !m_pageReady || !m_table->selectionModel())throw std::runtime_error("报告当前页尚未就绪");
+    auto selected=m_table->selectionModel()->selectedRows();
+    if(selected.isEmpty())throw std::runtime_error("请先选择需要导出的行");
+    std::sort(selected.begin(),selected.end(),[](const QModelIndex& a,const QModelIndex& b){return a.row()<b.row();});
+    std::vector<ReportRowId> rows;rows.reserve(static_cast<std::size_t>(selected.size()));
+    try {
+        for(const auto& index:selected){const auto row=m_page*200+index.row();rows.push_back(m_allRows?row:m_rows[static_cast<std::size_t>(row)]);}
+    }catch(const std::exception& error){SetReadFailure(QString::fromUtf8(error.what()));throw;}
+    StartExport(path,ReportRows(std::move(rows)),true);
+}
+void ResultReport::SelectExportPath(bool selected,bool filtered)
+{
+    if(m_task || !m_selected.table || (selected && !m_exportSelection->isEnabled()) || (filtered && !m_exportFiltered->isEnabled()))return;
+    // 系统对话框有自己的事件循环；暂保留任务入口，防止原生报告在其中启动。
+    m_comparisonMapping=true;
+    const auto resume=qScopeGuard([this]{m_comparisonMapping=false;if(m_acceptingRequests&&isVisible()&&!m_task&&!m_pendingReports.isEmpty())m_buildTimer->start(0);});
+    const auto title=selected?QString("导出选中行"):filtered?QString("导出筛选结果"):QString("导出全部");
+    const auto path=m_chooseExportPath?m_chooseExportPath(title):QFileDialog::getSaveFileName(this,title,"报告.csv","CSV (*.csv)");
+    if(path.isEmpty())return;
+    try{if(selected)ExportSelectedRows(path);else ExportReportFile(path,filtered);}
+    catch(const std::exception& error){const auto message=QString::fromUtf8(error.what());setProperty("reportTaskError",message);m_taskStatus->setText("导出失败："+message);}
+}
+void ResultReport::StartExport(const QString& path,ReportRows rows,bool restricted)
+{
+    if(path.isEmpty())throw std::invalid_argument("报告保存路径为空");
+    auto state=std::make_shared<ExportState>();state->path=path;state->document=m_selected;
+    state->rowCount=restricted?static_cast<ReportRowId>(rows.size()):m_selected.table->GetCount();
+    const auto doc=m_selected;
+    StartReportsTask([state,doc,rows=std::move(rows),restricted](const ReportCheckpoint& check){
+        QSaveFile output(state->path);output.setDirectWriteFallback(false);
+        if(!output.open(QIODevice::WriteOnly))throw std::runtime_error(("无法打开报告输出文件："+output.errorString()).toStdString());
+        try{WriteReportCsv(output,doc,restricted?&rows:nullptr,check,[state](ReportRowId count){state->rowsWritten.store(count,std::memory_order_relaxed);});}
+        catch(const ReportReadError&){state->readFailed.store(true);throw;}
+        check();auto expected=ExportState::Phase::Writing;
+        if(!state->phase.compare_exchange_strong(expected,ExportState::Phase::Committing))throw std::runtime_error("报告任务已取消");
+        if(!output.commit())throw std::runtime_error(("报告保存失败："+output.errorString()).toStdString());
+        state->committed.store(true);state->phase.store(ExportState::Phase::Committed);
+        return QVector<ReportDocument>{};
+    },{doc},{},state);
+    setProperty("reportExportPath",QString());setProperty("reportExportRows",qlonglong(0));setProperty("reportExportTotal",qlonglong(state->rowCount));
+    setProperty("reportExportStatus","writing");m_openExportFolder->hide();m_exportProgress->setValue(0);m_exportProgress->show();
+    m_taskStatus->setText(QString("正在导出 · 0 / %1 行").arg(QLocale().toString(state->rowCount)));
+}
+void ResultReport::RefreshExportActions()
+{
+    const bool available=m_selected.table && !m_task;
+    const bool selected=available && m_pageReady && m_table->selectionModel() && m_table->selectionModel()->hasSelection();
+    m_export->setEnabled(available);m_exportSelection->setEnabled(selected);m_exportSelectionAction->setEnabled(selected);
+    m_exportFiltered->setEnabled(available && m_rowsReady && m_pageReady);
 }
 void ResultReport::ClearSelection()
 {
@@ -597,38 +677,62 @@ void ResultReport::StartTask(std::function<ReportDocument(const ReportCheckpoint
         auto document=work(check);QVector<ReportDocument> documents;if(document.table)documents.append(std::move(document));return documents;
     },std::move(inputs));
 }
-void ResultReport::StartReportsTask(ReportPreparation work,QVector<ReportDocument> inputs,const QString& operation)
+void ResultReport::StartReportsTask(ReportPreparation work,QVector<ReportDocument> inputs,const QString& operation,std::shared_ptr<ExportState> exportState)
 {
     if(!m_acceptingRequests)throw std::runtime_error("报告窗口正在关闭");
     if(m_task)throw std::runtime_error("请等待当前报告任务完成或取消后重试");
     // 先完成所有可能失败的分配和线程启动，成功后才发布任务占位、暂停生成队列。
     auto candidate=std::make_unique<Task>();candidate->inputs=std::move(inputs);candidate->viewRevision=m_viewRevision;
+    candidate->exportState=exportState;
     candidate->nativeOperation=operation;candidate->request=m_taskRequest+1;
     const auto gate=candidate->gate;const auto flag=candidate->cancelled;const auto counter=candidate->progress;auto* owner=thread();
     try {
         if(m_beforeWorkerStart)m_beforeWorkerStart();
-        candidate->future=std::async(std::launch::async,[work=std::move(work),gate,flag,counter,owner] {
-            {std::unique_lock<std::mutex> lock(gate->mutex);gate->changed.wait(lock,[&]{return gate->ready||flag->load();});
+        candidate->future=std::async(std::launch::async,[work=std::move(work),gate,flag,counter,owner,exportState] {
+            {std::unique_lock<std::mutex> lock(gate->mutex);
+                const auto ready=[&]{return gate->ready||flag->load();};
+                if(exportState){if(!gate->changed.wait_until(lock,exportState->deadline,ready))throw std::runtime_error("报告导出超过 24 小时绝对期限");}
+                else gate->changed.wait(lock,ready);
                 if(gate->failure)std::rethrow_exception(gate->failure);}
-            const ReportCheckpoint check=[flag,counter]{if(flag->load())throw std::runtime_error("报告任务已取消");counter->fetch_add(1,std::memory_order_relaxed);};
-            check();auto documents=work(check);check();for(auto& document:documents)if(document.table)document.table->SetOwnerThread(owner);return documents;
+            const ReportCheckpoint check=[flag,counter,exportState]{
+                if(flag->load())throw std::runtime_error("报告任务已取消");
+                if(exportState && std::chrono::steady_clock::now()>=exportState->deadline)throw std::runtime_error("报告导出超过 24 小时绝对期限");
+                counter->fetch_add(1,std::memory_order_relaxed);
+            };
+            check();auto documents=work(check);if(!exportState || !exportState->committed.load())check();
+            for(auto& document:documents)if(document.table)document.table->SetOwnerThread(owner);return documents;
         });
     }catch(const std::exception& error){
         setProperty("reportTaskBusy",false);setProperty("reportTaskError",QString::fromUtf8(error.what()));m_taskStatus->setText(QString::fromUtf8(error.what()));
+        if(exportState){setProperty("reportExportStatus","failed");setProperty("reportExportPath",QString());m_openExportFolder->hide();m_exportProgress->hide();}
         if(isVisible()&&!m_pendingReports.isEmpty())m_buildTimer->start(0);
         throw;
     }
-    m_taskRequest=candidate->request;m_task=std::move(candidate);m_buildTimer->stop();CancelRows();
+    m_taskRequest=candidate->request;m_task=std::move(candidate);m_buildTimer->stop();
+    if(!exportState || m_rowScan || m_pendingRowScan)CancelRows();
     setProperty("reportTaskBusy",true);setProperty("reportTaskError",QString());setProperty("reportTaskProgress",qulonglong(0));
     m_taskStatus->setText("正在处理报告…");m_cancelTask->setEnabled(true);m_taskTimer->start();
+    RefreshExportActions();
 }
 void ResultReport::ContinueTask()
 {
     if(!m_task)return;
     const auto progress=m_task->progress->load();setProperty("reportTaskProgress",progress);
+    const auto exportState=m_task->exportState;
+    if(exportState){
+        const auto rows=exportState->rowsWritten.load(std::memory_order_relaxed);setProperty("reportExportRows",qlonglong(rows));
+        m_exportProgress->setValue(exportState->rowCount?static_cast<int>(1000.0L*rows/exportState->rowCount):0);
+        const bool committing=exportState->phase.load()==ExportState::Phase::Committing;
+        m_taskStatus->setText(committing?QString("正在提交 CSV 文件…"):exportState->phase.load()==ExportState::Phase::Cancelled?QString("正在取消导出…"):QString("正在导出 · %1 / %2 行").arg(QLocale().toString(rows),QLocale().toString(exportState->rowCount)));
+        if(committing)m_cancelTask->setEnabled(false);
+    }
     if(!m_task->nativeOperation.isEmpty())setProperty("reportGenerationProgress",progress);
+    if(exportState && !m_task->inputsReady && std::chrono::steady_clock::now()>=exportState->deadline){
+        {std::lock_guard<std::mutex> lock(m_task->gate->mutex);m_task->gate->failure=std::make_exception_ptr(std::runtime_error("报告导出超过 24 小时绝对期限"));m_task->gate->ready=true;}
+        m_task->inputsReady=true;m_task->gate->changed.notify_all();
+    }
     // 旧扫描仍由自己的轮询回收；唯一任务在它退出前不执行新的后台工作。
-    if(!m_task->cancelled->load() && m_rowScan)return;
+    if(!m_task->cancelled->load() && m_rowScan && !m_task->inputsReady)return;
     if(!m_task->inputsReady && !m_task->cancelled->load()) {
         std::exception_ptr failure;
         try {
@@ -638,12 +742,12 @@ void ResultReport::ContinueTask()
                 if(!doc.table||doc.table->ContinueBuild()){if(doc.table)doc.table->PrepareRead();++m_task->preparing;}
             }
             if(m_task->preparing<m_task->inputs.size()&&!m_task->cancelled->load())return;
-        }catch(...){failure=std::current_exception();}
+        }catch(...){failure=std::current_exception();if(exportState)exportState->readFailed.store(true);}
         {std::lock_guard<std::mutex> lock(m_task->gate->mutex);m_task->gate->failure=failure;m_task->gate->ready=true;}
         m_task->inputsReady=true;m_task->gate->changed.notify_all();
     }
     if(m_task->future.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)return;
-    const bool cancelled=m_task->cancelled->load() || m_task->request!=m_taskRequest || !m_acceptingRequests;
+    const bool cancelled=!(exportState && exportState->committed.load()) && (m_task->cancelled->load() || m_task->request!=m_taskRequest || !m_acceptingRequests);
     const bool select=m_task->viewRevision==m_viewRevision &&(m_task->nativeOperation.isEmpty()||m_selected.id.isEmpty()||m_follow->isChecked());
     const auto operation=m_task->nativeOperation;
     try {
@@ -654,15 +758,21 @@ void ResultReport::ContinueTask()
             for(auto& document:documents){const auto id=document.id;AddReport(std::move(document),select);if(select&&operation.isEmpty())SelectReport(id);}
             if(select&&!operation.isEmpty()&&!documents.isEmpty())ShowReports(m_sourceFilter,m_resultFilter,m_moduleFilter);
         }
-        m_taskStatus->setText(cancelled?"报告任务已取消":"报告任务完成");
+        if(exportState && exportState->committed.load()){
+            setProperty("reportExportStatus","completed");setProperty("reportExportPath",exportState->path);setProperty("reportExportRows",qlonglong(exportState->rowCount));
+            m_exportProgress->setValue(1000);m_openExportFolder->show();
+            m_taskStatus->setText(QString("已导出 %1 行 · %2").arg(QLocale().toString(exportState->rowCount),QFileInfo(exportState->path).fileName()));
+        }else m_taskStatus->setText(cancelled?"报告任务已取消":"报告任务完成");
     }catch(const std::exception& error){m_task.reset();
         const auto message=QString::fromUtf8(error.what());
         // 取消仅吞掉自身的协作式取消异常；同时发生的真实读写/计算失败仍保留原因。
-        if(!cancelled || message!="报告任务已取消"){setProperty("reportTaskError",message);m_taskStatus->setText(message);
+        if(!cancelled || message!="报告任务已取消"){setProperty("reportTaskError",message);m_taskStatus->setText(exportState?"导出失败："+message:message);
+            if(exportState){setProperty("reportExportStatus","failed");if(exportState->readFailed.load() && m_selected.id==exportState->document.id && m_selected.table==exportState->document.table)SetReadFailure(message);}
             if(!cancelled&&!operation.isEmpty()){m_failedReports[operation]=message;setProperty("reportGenerationError",message);RefreshFailures();}}
-        else m_taskStatus->setText("报告任务已取消");
+        else {m_taskStatus->setText(exportState?"导出已取消，未保存文件；已有文件保持原样。":"报告任务已取消");if(exportState)setProperty("reportExportStatus","cancelled");}
     }
     setProperty("reportGenerationBusy",false);m_taskTimer->stop();setProperty("reportTaskBusy",false);m_cancelTask->setEnabled(false);RefreshFailures();
+    if(exportState)m_exportProgress->hide();RefreshExportActions();
     if(m_acceptingRequests&&isVisible()) {
         if(m_pendingRowScan)m_scanTimer->start(0);else if(!m_rowsReady&&m_selected.table)RefreshRows();
         if(!cancelled&&!m_pendingReports.isEmpty())m_buildTimer->start(0);
@@ -763,7 +873,7 @@ void ResultReport::SetReadFailure(const QString& error)
     m_pageReady=false;
     if(auto* model=dynamic_cast<ReportPageModel*>(m_table->model()))model->SetPage({},{});
     setProperty("reportRowsError",error);m_range->setText("报告读取失败，请重新翻页或选择报告重试："+error);
-    m_copy->setEnabled(false);m_locate->setEnabled(false);m_exportFiltered->setEnabled(false);
+    RefreshExportActions();m_locate->setEnabled(false);
 }
 void ResultReport::RefreshPage()
 {
@@ -774,7 +884,6 @@ void ResultReport::RefreshPage()
     const auto offset=m_page*200,count=GetRowCount();
     m_previous->setEnabled(m_rowsReady && m_page>0);m_first->setEnabled(m_previous->isEnabled());
     m_next->setEnabled(m_rowsReady && count>0 && m_page<(count-1)/200);m_last->setEnabled(m_next->isEnabled());
-    m_export->setEnabled(m_selected.table!=nullptr);
     m_cancelScan->setEnabled(property("reportRowsBusy").toBool());
     m_locate->setVisible((m_selected.module=="Gap" || (m_selected.module=="Surface" && m_selected.id.startsWith("surface:"))) && m_selected.category=="本次会话结果" && bool(onLocate));
     try {
@@ -785,7 +894,7 @@ void ResultReport::RefreshPage()
         model->SetPage(m_selected,std::move(page),std::move(cells));m_pageReady=m_rowsReady;
         setProperty("reportRowsError",QString());
         m_range->setText(QString("总数 %1 · 筛选后 %2 · 显示 %3–%4").arg(m_selected.table?m_selected.table->GetCount():0).arg(count).arg(count?offset+1:0).arg(offset+length));
-        m_copy->setEnabled(m_selected.table && m_pageReady);m_exportFiltered->setEnabled(m_selected.table && m_pageReady);m_locate->setEnabled(m_pageReady);
+        RefreshExportActions();m_locate->setEnabled(m_pageReady);
     } catch(const std::exception& e){SetReadFailure(QString::fromUtf8(e.what()));}
 }
 void ResultReport::CompareSelected()

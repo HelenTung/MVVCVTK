@@ -42,7 +42,7 @@ QByteArray RowBytes(const QStringList& row)
 }
 void WriteBytes(QIODevice& output, const QByteArray& bytes)
 {
-    if (output.write(bytes) != bytes.size()) throw std::runtime_error("报告文件写入失败");
+    if (output.write(bytes) != bytes.size()) throw std::runtime_error(std::string("报告文件写入失败: ") + output.errorString().toStdString());
 }
 QString CsvCell(QString value)
 {
@@ -362,13 +362,30 @@ ReportDocument ReadReportCsv(QIODevice& input, const QString& title, const Repor
         doc.description="旧版运行记录；保留原文件字段，不表示已恢复完整测点或孔隙业务结果。";
     doc.table->PrepareRead(); return doc;
 }
-void WriteReportCsv(QIODevice& output, const ReportDocument& doc, const ReportRows* rows, const ReportCheckpoint& checkpoint)
+void WriteReportCsv(QIODevice& output, const ReportDocument& doc, const ReportRows* rows, const ReportCheckpoint& checkpoint, const ReportProgress& onProgress)
 {
+    constexpr qsizetype chunkSize = 64 * 1024;
+    QByteArray pending;
+    const auto writeChunk = [&] {
+        if (!pending.isEmpty()) {
+            WriteBytes(output, pending);
+            pending.clear();
+        }
+    };
+    const auto writeBytes = [&](const QByteArray& bytes) {
+        if (bytes.size() >= chunkSize) {
+            writeChunk();
+            WriteBytes(output, bytes);
+            return;
+        }
+        pending.append(bytes);
+        if (pending.size() >= chunkSize) writeChunk();
+    };
     const auto write = [&](const QStringList& cells) {
         QStringList escaped; for (const auto& cell : cells) escaped.append(CsvCell(cell));
-        WriteBytes(output, (escaped.join(',') + "\r\n").toUtf8());
+        writeBytes((escaped.join(',') + "\r\n").toUtf8());
     };
-    WriteBytes(output, QByteArray("\xef\xbb\xbf"));
+    writeBytes(QByteArray("\xef\xbb\xbf"));
     // 业务含义与单位属于列定义，留在同一 CSV 表头；不混入说明行或附属元数据。
     QStringList headings; for (const auto& column : doc.columns)
         headings.append(column.numeric && !column.quantity.isEmpty() && !column.unit.isEmpty()
@@ -379,23 +396,54 @@ void WriteReportCsv(QIODevice& output, const ReportDocument& doc, const ReportRo
         headings[doc.identityColumn]+=" [mvvcvtk-result="+doc.identityResult+"]";
     }
     write(headings);
-    if (!doc.table) return;
+    if (!doc.table) {
+        if(checkpoint)checkpoint();
+        writeChunk();
+        if(onProgress)onProgress(0);
+        return;
+    }
     const auto count=doc.table->GetCount();
     if(!checkpoint)doc.table->PrepareRead(); // 后台入口在 owner thread 准备，同步调用在此刷新。
-    const auto read=doc.table->GetIsComplete()?doc.table->CreateReader():[&doc](ReportRowId row){return doc.table->Read(row);};
+    std::function<QStringList(ReportRowId)> read;
+    try {
+        read=doc.table->GetIsComplete()?doc.table->CreateReader():[&doc](ReportRowId row){return doc.table->Read(row);};
+    } catch(const std::exception& e) {
+        throw ReportReadError(e.what());
+    }
+    const auto readRow = [&](ReportRowId row) {
+        try { return read(row); }
+        catch(const std::exception& e) { throw ReportReadError(e.what()); }
+    };
     // 只读原生回调没有落盘追加过程，在完整导出的既有遍历中累计；取消或筛选导出不发布整表摘要。
     const bool hashRows=!rows && bool(doc.table->m_impl->readRow);
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    if (rows) { for (const auto row : *rows) {if(checkpoint)checkpoint();write(read(row));} }
-    else for (ReportRowId row = 0; row < count; ++row) {if(checkpoint)checkpoint();const auto cells=read(row);write(cells);if(hashRows)hash.addData(RowBytes(cells));}
+    ReportRowId serializedRows=0;
+    const auto reportProgress = [&] { if(onProgress && serializedRows%256==0)onProgress(serializedRows); };
+    if (rows) {
+        for (std::size_t index=0;index<rows->size();++index) {
+            if(checkpoint)checkpoint();
+            ReportRowId row;
+            try { row=(*rows)[index]; }
+            catch(const std::exception& e) { throw ReportReadError(e.what()); }
+            const auto cells=readRow(row);write(cells);++serializedRows;reportProgress();
+        }
+    } else for (ReportRowId row = 0; row < count; ++row) {
+        if(checkpoint)checkpoint();
+        const auto cells=readRow(row);write(cells);++serializedRows;reportProgress();
+        if(hashRows)hash.addData(RowBytes(cells));
+    }
+    if(checkpoint)checkpoint();
+    writeChunk();
+    if(onProgress)onProgress(serializedRows);
     if(hashRows){QMutexLocker lock(&doc.table->m_impl->hashMutex);doc.table->m_impl->exportedHash=hash.result();}
 }
 void ExportReport(const QString& path, const ReportDocument& doc, const ReportRows* rows, const ReportCheckpoint& checkpoint)
 {
     QSaveFile output(path);
-    if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error("无法打开报告输出文件");
+    output.setDirectWriteFallback(false);
+    if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error(std::string("无法打开报告输出文件: ") + output.errorString().toStdString());
     WriteReportCsv(output, doc, rows, checkpoint);
     if(checkpoint)checkpoint();
-    if (!output.commit()) throw std::runtime_error("报告保存失败");
+    if (!output.commit()) throw std::runtime_error(std::string("报告保存失败: ") + output.errorString().toStdString());
 }
 }

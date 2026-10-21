@@ -20,6 +20,8 @@ class QLineEdit;
 class QCheckBox;
 class QPlainTextEdit;
 class QTimer;
+class QProgressBar;
+class QAction;
 namespace Manual {
 struct ReportRow final { QString section, field, type, value; };
 QVector<ReportRow> GetReportRows(const QJsonObject& record);
@@ -35,7 +37,9 @@ public:
     bool SelectReport(const QString& id);
     void ShowReports(const QString& source = {}, const QString& result = {}, const QString& module = {});
     void ImportReport(const QString& path);
+    // 在 owner 线程接纳并冻结输入；同步拒绝抛异常，异步终态由 reportTask*/reportExport* 属性和界面反馈。
     void ExportReportFile(const QString& path, bool filtered = false);
+    void ExportSelectedRows(const QString& path);
     void QueueReport(const QJsonObject& record);
     bool GetReportAvailable(const QString& module, const QString& result) const;
     bool GetGenerationPending() const;
@@ -60,6 +64,12 @@ protected:
 private:
     friend class ReportTaskTestAccess;
     std::function<void()> m_beforeWorkerStart;
+    // 自动化可替换路径选择；产品默认仍显示系统保存对话框。
+    std::function<QString(const QString&)> m_chooseExportPath;
+    void SelectExportPath(bool selected, bool filtered = false);
+    void RefreshExportActions();
+    class ExportState;
+    void StartExport(const QString& path, ReportRows rows, bool restricted);
     void CancelRows();
     void Refresh();
     void SelectCurrent();
@@ -72,7 +82,7 @@ private:
     void ClearSelection();
     void ContinueGeneration();
     void StartTask(std::function<ReportDocument(const ReportCheckpoint&)> work, QVector<ReportDocument> inputs = {});
-    void StartReportsTask(ReportPreparation work,QVector<ReportDocument> inputs,const QString& operation = {});
+    void StartReportsTask(ReportPreparation work,QVector<ReportDocument> inputs,const QString& operation = {},std::shared_ptr<ExportState> exportState = {});
     void RefreshFailures();
     void ContinueTask();
     QMap<QString, QJsonObject> m_records;
@@ -93,6 +103,9 @@ private:
     std::uint64_t m_taskRequest=0,m_rowsRequest=0;
     bool m_acceptingRequests=true,m_comparisonMapping=false;
     QLabel* m_taskStatus = nullptr;
+    QProgressBar* m_exportProgress = nullptr;
+    QPushButton* m_openExportFolder = nullptr;
+    QAction* m_exportSelectionAction = nullptr;
     QPushButton* m_cancelTask = nullptr;
     QComboBox* m_failedReport = nullptr;
     QPushButton* m_retryReport = nullptr;
@@ -119,7 +132,7 @@ private:
     int m_sortColumn = -1;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
     QPushButton* m_export = nullptr;
-    QPushButton* m_copy = nullptr;
+    QPushButton* m_exportSelection = nullptr;
     QLabel* m_summary = nullptr;
 };
 }

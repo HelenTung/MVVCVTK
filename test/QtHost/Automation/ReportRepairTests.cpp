@@ -3,22 +3,24 @@
 #include "Support/ResultReport.h"
 #include "Support/ReportComparison.h"
 #include "Support/ReportStorage.h"
+#include "Support/WorkbenchStyle.h"
 #if defined(MANUAL_ALIGNMENT)
 #include "Support/InspectionReport.h"
 #include "Support/AlignmentReportParameters.h"
 #include "Support/JsonInput.h"
 #endif
 #include <QApplication>
-#include <QGuiApplication>
 #include <QBuffer>
+#include <QAction>
+#include <QIODevice>
 #include <QCheckBox>
 #include <QComboBox>
-#include <QClipboard>
 #include <QDir>
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QItemSelectionModel>
@@ -50,12 +52,14 @@ namespace Manual {
 class ReportTaskTestAccess final {
 public:
     static void BeforeStart(ResultReport& view,std::function<void()> hook){view.m_beforeWorkerStart=std::move(hook);}
+    static void ChooseExportPath(ResultReport& view,std::function<QString(const QString&)> choose){view.m_chooseExportPath=std::move(choose);}
     static void Start(ResultReport& view,std::function<ReportDocument(const ReportCheckpoint&)> work){view.StartTask(std::move(work));}
     static bool HasTask(const ResultReport& view){return bool(view.m_task);}
     static QTimer* GetBuildTimer(ResultReport& view){return view.m_buildTimer;}
     static bool HasScan(const ResultReport& view){return bool(view.m_rowScan);}
     static bool HasPendingScan(const ResultReport& view){return bool(view.m_pendingRowScan);}
     static void Generate(ResultReport& view){view.ContinueGeneration();}
+    static void ContinueTask(ResultReport& view){view.ContinueTask();}
     static void Compare(ResultReport& view){view.CompareSelected();}
     static ReportRows Rows(const ResultReport& view){return view.m_rows;}
     static void SetRows(ResultReport& view,ReportRows rows){view.m_rows=std::move(rows);}
@@ -67,41 +71,6 @@ template<class F> void Wait(F pending) {
     QElapsedTimer elapsed;elapsed.start();
     do {QCoreApplication::processEvents(QEventLoop::AllEvents,10);}while(pending() && elapsed.elapsed()<reportWaitTimeoutMs);
     Require(!pending(),"report repair test timed out");
-}
-void SetClipboardSeed(const QString& expected) {
-    auto* clipboard=QApplication::clipboard();
-    Require(clipboard!=nullptr,"fixture/environment: clipboard unavailable before the copy failure probe");
-    const auto platform=QGuiApplication::platformName();
-    QElapsedTimer elapsed;elapsed.start();
-    constexpr int writeAttemptLimit=3;
-    int writes=0,actualLength=-1;unsigned long openError=0;bool waitingLogged=false;
-    while(elapsed.elapsed()<reportWaitTimeoutMs && writes<writeAttemptLimit) {
-        bool available=true;
-#ifdef Q_OS_WIN
-        // 后台桌面仍共享窗口站的剪贴板；先等占用解除，不把系统锁竞争算成复制失败。
-        if(platform=="windows") {
-            available=OpenClipboard(nullptr)!=0;openError=available?0:GetLastError();
-            if(available)Require(CloseClipboard()!=0,"fixture/environment: clipboard availability check could not release clipboard");
-        }
-#endif
-        if(available) {
-            ++writes;clipboard->setText(expected);
-            QCoreApplication::processEvents(QEventLoop::AllEvents,10);
-            const auto actual=clipboard->text();actualLength=actual.size();
-            if(actual==expected) {
-                std::cout<<"Reports: clipboard seed confirmed platform="<<platform.toStdString()
-                    <<" writes="<<writes<<" elapsedMs="<<elapsed.elapsed()<<std::endl;
-                return;
-            }
-            std::cerr<<"Reports: clipboard seed readback mismatch writes="<<writes<<" actualLength="<<actualLength<<std::endl;
-        } else if(!waitingLogged) {
-            std::cout<<"Reports: clipboard seed waiting nativeOpenError="<<openError<<std::endl;waitingLogged=true;
-        }
-        // 复用报告等待的绝对期限；计时器只调度重试，精确读回始终是唯一成功判据。
-        QEventLoop retry;QTimer::singleShot(10,&retry,&QEventLoop::quit);retry.exec();
-    }
-    throw std::runtime_error(QString("fixture/environment: clipboard seed could not be confirmed before the copy failure probe; platform=%1 writes=%2 actualLength=%3 nativeOpenError=%4 elapsedMs=%5")
-        .arg(platform).arg(writes).arg(actualLength).arg(openError).arg(elapsed.elapsed()).toStdString());
 }
 ReportDocument Read(QByteArray bytes) {
     QBuffer input(&bytes);input.open(QIODevice::ReadOnly);return ReadReportCsv(input,"外部报告");
@@ -544,7 +513,7 @@ void CheckPageReadFailures() {
     auto index=std::make_shared<FaultingRows>();index->original=ReportTaskTestAccess::Rows(view);ReportTaskTestAccess::SetRows(view,ReportRows(index));
     view.findChild<QPushButton*>("reportLast")->click();
     Require(table->model()->rowCount()==0&&!view.property("reportRowsError").toString().isEmpty(),"failed page showed stale or partial data");
-    for(const auto* action:{"copyReportCsv","locateReportRow","exportFilteredReport"})Require(!view.findChild<QPushButton*>(action)->isEnabled(),"failed page retained an action using invalid row mapping");
+    for(const auto* action:{"exportSelectedReport","locateReportRow","exportFilteredReport"})Require(!view.findChild<QPushButton*>(action)->isEnabled(),"failed page retained an action using invalid row mapping");
     bool rejected=false;try{view.ExportReportFile(directory.filePath("invalid.csv"),true);}catch(const std::runtime_error&){rejected=true;}
     Require(rejected&&!QFile::exists(directory.filePath("invalid.csv"))&&located==-1&&view.GetSelectedReport().table==doc.table,"page failure changed formal report or allowed filtered export");
     index->fail=false;
@@ -556,16 +525,22 @@ void CheckPageReadFailures() {
     Require(table->model()->data(table->model()->index(0,0)).toString()=="point-200","body read retry mixed page identities");
     table->selectionModel()->select(table->model()->index(0,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
     table->selectionModel()->select(table->model()->index(1,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
-    SetClipboardSeed("previous clipboard");
-    auto* copy=view.findChild<QPushButton*>("copyReportCsv");
-    Require(copy && copy->isEnabled() && table->selectionModel()->selectedRows().size()==2
+    const auto failurePath=directory.filePath("failure.csv");
+    ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return failurePath;});
+    auto* exportSelected=view.findChild<QPushButton*>("exportSelectedReport");
+    Require(exportSelected && exportSelected->isEnabled() && table->selectionModel()->selectedRows().size()==2
         && table->model()->data(table->model()->index(0,0)).toString()=="point-200"
-        && table->model()->data(table->model()->index(1,0)).toString()=="point-201","copy failure probe did not retain the two selected rows on the second page");
-    const auto copyReads=reads.load();failRow=201;copy->click();
-    Require(reads-copyReads==2 && view.property("reportRowsError").toString()=="正文短读","copy failure probe did not read both selected rows and reach injected row 201");
-    Require(QApplication::clipboard()->text()=="previous clipboard"&&table->model()->rowCount()==0&&!view.findChild<QPushButton*>("locateReportRow")->isEnabled(),"copy failure published partial clipboard content or left a usable stale page");
-    Require(!copy->isEnabled()&&!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"copy failure left actions enabled on the invalidated page");
-    std::cout<<"PASS: copy failure probe reached row 201 after exactly 2 selected-row reads; clipboard preserved and page actions invalidated"<<std::endl;
+        && table->model()->data(table->model()->index(1,0)).toString()=="point-201","selected export probe did not retain the two selected rows on the second page");
+    const auto exportReads=reads.load();failRow=201;exportSelected->click();
+    Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(reads-exportReads==2 && view.property("reportRowsError").toString()=="正文短读","selected export did not read both selected rows and reach injected row 201");
+    const auto taskError=view.property("reportTaskError").toString();
+    Require(taskError=="正文短读" && view.findChild<QLabel*>("reportTaskStatus")->text().contains(taskError),"selected export read failure reason is not visible");
+    Require(!QFile::exists(failurePath)&&table->model()->rowCount()==0&&!view.findChild<QPushButton*>("locateReportRow")->isEnabled(),"failed selected export committed a partial file or left a usable stale page");
+    Require(!exportSelected->isEnabled()&&!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"failed selected export left actions enabled on the invalidated page");
+    QDir residue(directory.path());Require(residue.entryList({"*failure.csv*"},QDir::Files|QDir::Hidden).isEmpty(),"failed selected export left a QSaveFile temporary artifact");
+    Require(!view.findChild<QPushButton*>("copyReportCsv")&&!table->findChild<QAction*>("copyReportCsvAction"),"clipboard copy action remains available");
+    std::cout<<"PASS: selected export failure reached row 201 after exactly 2 selected-row reads; target absent and page invalidated"<<std::endl;
     failRow=-1;view.SelectReport(doc.id);Require(view.property("reportRowsError").toString().isEmpty()&&table->model()->rowCount()==200,"reselecting a recovered report did not restore its page");
 }
 void CheckSlowScanCancellation() {
@@ -588,7 +563,7 @@ void CheckSlowScanCancellation() {
     // 看门狗只避免错误实现在测试里死等；判据是 UI 操作先返回，再由测试释放慢读。
     auto watchdog=std::async(std::launch::async,[&]{const bool responsive=completed.wait_for(std::chrono::seconds(5))==std::future_status::ready;gate->Open();return responsive;});
     view.findChild<QPushButton*>("cancelReportRows")->click();
-    Require(!view.property("reportRowsBusy").toBool()&&!view.findChild<QPushButton*>("copyReportCsv")->isEnabled(),"cancelled scan still exposes partial results");
+    Require(!view.property("reportRowsBusy").toBool()&&!view.findChild<QPushButton*>("exportSelectedReport")->isEnabled(),"cancelled scan still exposes partial results");
     search->setText("point-1");search->setText("point-2");search->setText("point-499");
     Require(gate->starts==1,"query replacement started an additional worker while the old scan was blocked");
     returned.set_value();Require(watchdog.get(),"ordinary cancellation or query replacement waited for the blocked reader");
@@ -676,8 +651,141 @@ void CheckInspectionPreparation() {
 }
 #endif
 }
+class ShortWriteDevice final : public QIODevice {
+public:
+    explicit ShortWriteDevice(qint64 limit):m_limit(limit){open(QIODevice::WriteOnly);}
+    QByteArray bytes;
+protected:
+    qint64 readData(char*,qint64) override{return -1;}
+    qint64 writeData(const char* data,qint64 size) override {
+        if(bytes.size()>=m_limit){setErrorString("injected short write");return -1;}
+        const auto accepted=std::min(size,m_limit-bytes.size());bytes.append(data,static_cast<int>(accepted));return accepted;
+    }
+private:qint64 m_limit;
+};
+void CheckFileExports() {
+    QTemporaryDir directory;Require(directory.isValid(),"export temp directory unavailable");
+    auto doc=Document("file-export","原始数量",4);doc.identityResult=QString(32,'a')+":1";
+    doc.columns={{"object_id",{},{},true},{"surface_object_volume_mm3","原始数量","mm3",true},{"boundary_status",{},{},false}};doc.identityColumn=0;
+    doc.table=std::make_shared<ReportTable>();
+    const QStringList exactId{"9007199254740993","id,\"quoted\"\n中文","", "last"};
+    const QStringList exactValue{"1,2","3\"4\n5","","0"};const QStringList exactStatus{"Interior","BoundaryUncertain","Missing","Interior"};
+    for(int i=0;i<exactId.size();++i)doc.table->Append({exactId[i],exactValue[i],exactStatus[i]});
+    ResultReport view;view.AddReport(doc);view.SelectReport(doc.id);
+    auto* table=view.findChild<QTableView*>("reportTable");Require(table&&table->model()->rowCount()==4,"export fixture page did not load");
+    Require(!view.findChild<QPushButton*>("copyReportCsv")&&table->actions().size()==1
+        &&table->actions().first()->objectName()=="exportSelectedReportAction","report context menu retained clipboard or whole-report actions");
+    const auto allPath=directory.filePath("all.csv");ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return allPath;});
+    view.findChild<QPushButton*>("exportReportCsv")->click();Require(view.property("reportTaskBusy").toBool(),"all-row export did not admit asynchronously");Wait([&]{return view.property("reportTaskBusy").toBool();});
+    QFile allFile(allPath);Require(allFile.open(QIODevice::ReadOnly),"all-row export target unreadable");const auto allBytes=allFile.readAll();
+    Require(allBytes.startsWith(QByteArray("\xef\xbb\xbf"))&&allBytes.contains("\r\n")
+        &&allBytes.contains(("mvvcvtk-result="+doc.identityResult).toUtf8()),"export lost UTF-8 BOM, CRLF or result identity header annotation");
+    QBuffer allBuffer;allBuffer.setData(allBytes);Require(allBuffer.open(QIODevice::ReadOnly),"all-row export buffer open failed");const auto all=ReadReportCsv(allBuffer,"all export");
+    Require(all.columns.size()==3&&all.columns[0].name=="object_id"&&all.identityResult==doc.identityResult&&all.columns[1].name=="surface_object_volume_mm3"
+        &&all.columns[1].quantity=="原始数量"&&all.columns[1].unit=="mm3"&&all.columns[2].name=="boundary_status","export header lost ID annotation, original quantity/unit or status column");
+    Require(all.table->GetCount()==4,"all-row export count/order changed");
+    for(ReportRowId row=0;row<4;++row){const auto actual=all.table->Read(row);Require(actual.size()==3&&actual[0]==exactId[static_cast<int>(row)]&&actual[1]==exactValue[static_cast<int>(row)]&&actual[2]==exactStatus[static_cast<int>(row)],"all-row export changed exact cell value, quoting, row order, missing value or status");}
+    table->selectRow(1);table->selectionModel()->select(table->model()->index(3,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
+    const auto selectedPath=directory.filePath("selected.csv");ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return selectedPath;});
+    view.findChild<QPushButton*>("exportSelectedReport")->click();Wait([&]{return view.property("reportTaskBusy").toBool();});
+    QFile selectedFile(selectedPath);Require(selectedFile.open(QIODevice::ReadOnly),"selected-row export target unreadable");QBuffer selectedBuffer;selectedBuffer.setData(selectedFile.readAll());selectedBuffer.open(QIODevice::ReadOnly);
+    const auto selected=ReadReportCsv(selectedBuffer,"selected export");Require(selected.table->GetCount()==2,"selected export row count changed");
+    Require(selected.table->Read(0)==QStringList{exactId[1],exactValue[1],exactStatus[1]}&&selected.table->Read(1)==QStringList{exactId[3],exactValue[3],exactStatus[3]},"selected export changed selected row order or exact values");
+    ReportTaskTestAccess::ChooseExportPath(view,[](const QString&){return QString();});view.findChild<QPushButton*>("exportReportCsv")->click();
+    Require(!view.property("reportTaskBusy").toBool()&&view.property("reportExportStatus").toString()!="writing","cancelled save dialog started an export task");
+    ShortWriteDevice shortWrite(19);bool writeFailed=false;try{WriteReportCsv(shortWrite,doc);}catch(const std::runtime_error& e){writeFailed=std::string(e.what()).find("write")!=std::string::npos||std::string(e.what()).find("写")!=std::string::npos;}
+    Require(writeFailed&&!shortWrite.bytes.isEmpty(),"WriteReportCsv did not report a short/failed QIODevice write");
+    const auto badPath=directory.filePath("existing-directory");Require(QDir().mkpath(badPath),"failed-target directory fixture could not be created");
+    ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return badPath;});view.findChild<QPushButton*>("exportReportCsv")->click();
+    Wait([&]{return view.property("reportTaskBusy").toBool();});
+    Require(!view.property("reportTaskBusy").toBool()&&!view.property("reportTaskError").toString().isEmpty(),"directory output path did not expose a write failure");
+    QDir badResidue(badPath);Require(badResidue.entryList(QDir::Files|QDir::Hidden|QDir::NoDotAndDotDot).isEmpty(),"failed directory export left a temporary file");
+#ifdef Q_OS_WIN
+    const auto lockedPath=directory.filePath("locked.csv");{QFile original(lockedPath);Require(original.open(QIODevice::WriteOnly)&&original.write("original-bytes")==14,"locked target seed write failed");}
+    HANDLE locked=CreateFileW(reinterpret_cast<LPCWSTR>(lockedPath.utf16()),GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    Require(locked!=INVALID_HANDLE_VALUE,"cannot acquire no-delete-share handle for commit-failure fixture");
+    struct HandleGuard{HANDLE h;~HandleGuard(){if(h!=INVALID_HANDLE_VALUE)CloseHandle(h);}} handle{locked};
+    ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return lockedPath;});view.findChild<QPushButton*>("exportReportCsv")->click();Wait([&]{return view.property("reportTaskBusy").toBool();});
+    QFile stillOriginal(lockedPath);Require(stillOriginal.open(QIODevice::ReadOnly)&&stillOriginal.readAll()=="original-bytes","commit failure changed locked target bytes");
+    Require(view.property("reportExportStatus").toString()=="failed"&&view.property("reportTaskError").toString().startsWith("报告保存失败")
+        &&view.property("reportExportRows").toLongLong()==4,"locked target did not reach and report QSaveFile commit failure");
+    QDir directoryCheck(directory.path());Require(directoryCheck.entryList({"*locked.csv*"},QDir::Files|QDir::Hidden)==QStringList{"locked.csv"},"commit failure left QSaveFile temporary artifact");
+#endif
+    struct ExportGate final {
+        std::promise<void> release;std::shared_future<void> future=release.get_future().share();std::atomic<bool> entered{false},opened{false};
+        void Open(){if(!opened.exchange(true))release.set_value();}
+    };
+    struct ReleaseExportGate final {std::shared_ptr<ExportGate> gate;~ReleaseExportGate(){gate->Open();}};
+    for(const bool existing:{false,true}) {
+        ResultReport cancelView;const auto gate=std::make_shared<ExportGate>();ReleaseExportGate release{gate};
+        auto cancelDoc=Document("cancel-export","quantity",0);
+        cancelDoc.table=std::make_shared<ReportTable>(1000,[gate](ReportRowId row){if(row==300){gate->entered=true;if(gate->future.wait_for(std::chrono::milliseconds(reportWaitTimeoutMs))!=std::future_status::ready)throw std::runtime_error("export cancellation fixture guard");}return QStringList{QString::number(row),QString::number(row+1)};});
+        cancelView.AddReport(cancelDoc);cancelView.SelectReport(cancelDoc.id);
+        const auto name=existing?QString("cancel-existing.csv"):QString("cancel-new.csv");const auto cancelPath=directory.filePath(name);
+        if(existing){QFile original(cancelPath);Require(original.open(QIODevice::WriteOnly)&&original.write("preserve-me")==11,"cancel target seed write failed");}
+        ReportTaskTestAccess::ChooseExportPath(cancelView,[&](const QString&){return cancelPath;});cancelView.findChild<QPushButton*>("exportReportCsv")->click();
+        Wait([&]{return !gate->entered.load();});
+        std::promise<void> cancelReturned;auto cancelReturnedFuture=cancelReturned.get_future();
+        auto watchdog=std::async(std::launch::async,[&]{const bool responsive=cancelReturnedFuture.wait_for(std::chrono::seconds(5))==std::future_status::ready;gate->Open();return responsive;});
+        cancelView.findChild<QPushButton*>("cancelReportTask")->click();cancelReturned.set_value();Require(watchdog.get(),"cancel button blocked waiting for the export worker");
+        Wait([&]{return cancelView.property("reportTaskBusy").toBool();});
+        if(existing){QFile preserved(cancelPath);Require(preserved.open(QIODevice::ReadOnly)&&preserved.readAll()=="preserve-me","cancelled export changed an existing target");}
+        else Require(!QFile::exists(cancelPath),"cancelled export published a partial target");
+        Require(cancelView.property("reportExportStatus").toString()=="cancelled"&&cancelView.property("reportTaskError").toString().isEmpty(),"cooperative cancellation was reported as a worker error");
+        const auto expected=existing?QStringList{name}:QStringList{};QDir cancelResidue(directory.path());
+        Require(cancelResidue.entryList({"*"+name+"*"},QDir::Files|QDir::Hidden)==expected,"cancelled export left a QSaveFile temporary artifact");
+    }
+    {
+        ResultReport lateView;const auto gate=std::make_shared<ExportGate>();ReleaseExportGate release{gate};
+        auto late=Document("late-cancel-export","quantity",0);auto* owner=QThread::currentThread();
+        late.table=std::make_shared<ReportTable>(4,[gate,owner](ReportRowId row){
+            if(row==0&&QThread::currentThread()!=owner){gate->entered=true;if(gate->future.wait_for(std::chrono::milliseconds(reportWaitTimeoutMs))!=std::future_status::ready)throw std::runtime_error("late cancellation fixture guard");}
+            return QStringList{QString::number(row),QString::number(row+1)};
+        });
+        lateView.AddReport(late);const auto path=directory.filePath("committed-before-owner.csv");lateView.ExportReportFile(path);
+        ReportTaskTestAccess::ContinueTask(lateView);Wait([&]{return !gate->entered.load();});gate->Open();
+        // 此区间不派发 owner 事件：文件存在证明 commit 已发生，任务占位尚未回收。
+        QElapsedTimer guard;guard.start();while(!QFile::exists(path)&&guard.elapsed()<reportWaitTimeoutMs)QThread::yieldCurrentThread();
+        Require(QFile::exists(path)&&ReportTaskTestAccess::HasTask(lateView),"late cancellation fixture did not hold owner completion after commit");
+        lateView.CancelTasks();Wait([&]{return lateView.property("reportTaskBusy").toBool();});
+        Require(lateView.property("reportExportStatus").toString()=="completed"&&lateView.property("reportTaskError").toString().isEmpty()
+            &&lateView.property("reportExportPath").toString()==path,"late cancellation misreported a committed file as cancelled");
+        QFile input(path);Require(input.open(QIODevice::ReadOnly),"late-cancel committed file unreadable");const auto copy=ReadReportCsv(input,"late cancellation");
+        Require(copy.table->GetCount()==4,"late cancellation altered the committed file");
+        for(ReportRowId row=0;row<4;++row)Require(copy.table->Read(row)==QStringList{QString::number(row),QString::number(row+1)},"late cancellation changed a committed cell");
+    }
+    const auto stressRows=[](){const auto text=qEnvironmentVariable("MVVCVTK_REPORT_STRESS_ROWS");if(text.isEmpty())return ReportRowId(200003);bool ok=false;const auto value=text.toLongLong(&ok);Require(ok&&value>0&&value<=(std::numeric_limits<ReportRowId>::max()-7)/3,"invalid report export stress row count");return value;}();
+    ResultReport stress;auto large=Document("large-export","stress quantity",0);large.columns={{"row_id",{},{},false},{"value",{}, {},false}};
+    auto* owner=QThread::currentThread();struct ReadMetrics final {std::atomic<bool> wrongThread{false};std::atomic<ReportRowId> reads{0};};const auto metrics=std::make_shared<ReadMetrics>();
+    large.table=std::make_shared<ReportTable>(stressRows,[metrics,owner](ReportRowId row){if(QThread::currentThread()==owner)metrics->wrongThread=true;++metrics->reads;return QStringList{QString::number(row),QString::number(row*3+7)};});
+    stress.AddReport(large);stress.SelectReport(large.id);
+    const auto stressPath=directory.filePath("stress.csv");ReportTaskTestAccess::ChooseExportPath(stress,[&](const QString&){return stressPath;});
+    QString evidence=qEnvironmentVariable("MVVCVTK_REPORT_EXPORT_EVIDENCE");
+    if(!evidence.isEmpty()){
+        Require(QDir().mkpath(evidence),"export evidence directory cannot be created");stress.resize(1280,780);stress.setStyleSheet(GetWorkbenchStyle());stress.show();QCoreApplication::processEvents();
+        const auto shot=QDir(evidence).filePath("report-export-before.png");Require(!QFileInfo::exists(shot)&&stress.grab().save(shot),"cannot save report export before screenshot");
+    }
+    metrics->reads=0;metrics->wrongThread=false;
+    auto* pulse=new QTimer(&stress);pulse->setInterval(20);pulse->setTimerType(Qt::CoarseTimer);QVector<qint64> gaps;QElapsedTimer pulseClock;pulseClock.start();
+    QObject::connect(pulse,&QTimer::timeout,&stress,[&]{gaps.append(pulseClock.restart());});pulse->start();
+    QElapsedTimer admission;admission.start();stress.findChild<QPushButton*>("exportReportCsv")->click();const auto admissionMs=admission.elapsed();
+    Require(stress.property("reportTaskBusy").toBool(),"large export failed asynchronous admission");
+    bool writingShot=false;
+    QElapsedTimer run;run.start();while(stress.property("reportTaskBusy").toBool()&&run.elapsed()<120000){QCoreApplication::processEvents(QEventLoop::AllEvents,10);if(!writingShot&&!evidence.isEmpty()&&stress.property("reportExportStatus").toString()=="writing"){
+        const auto shot=QDir(evidence).filePath("report-export-writing.png");Require(!QFileInfo::exists(shot)&&stress.grab().save(shot),"cannot save report export writing screenshot");writingShot=true;}}
+    Require(!stress.property("reportTaskBusy").toBool()&&stress.property("reportExportStatus").toString()=="completed","large export did not commit successfully");pulse->stop();
+    const auto exportMs=admissionMs+run.elapsed();
+    QFile stressFile(stressPath);Require(stressFile.open(QIODevice::ReadOnly),"large export file unreadable");QBuffer stressBuffer;stressBuffer.setData(stressFile.readAll());stressBuffer.open(QIODevice::ReadOnly);const auto stressCopy=ReadReportCsv(stressBuffer,"large export");
+    Require(stressCopy.table->GetCount()==stressRows&&metrics->reads==stressRows&&!metrics->wrongThread.load()&&!gaps.isEmpty(),"large export row count, owner heartbeat or worker read-thread identity incorrect");
+    for(ReportRowId row=0;row<stressRows;++row){const auto cells=stressCopy.table->Read(row);Require(cells==QStringList{QString::number(row),QString::number(row*3+7)},"large CSV row failed independent exact-value formula check");}
+    std::sort(gaps.begin(),gaps.end());const auto percentile=[&](double p){return gaps.isEmpty()?qint64(0):gaps[static_cast<int>(p*(gaps.size()-1))];};
+    qint64 over100=0,over1000=0,maxGap=0;for(const auto gap:gaps){if(gap>100)++over100;if(gap>1000)++over1000;maxGap=std::max(maxGap,gap);}
+    std::cout<<"REPORT_EXPORT_STRESS rows="<<stressRows<<" admissionMs="<<admissionMs<<" totalMs="<<exportMs<<" ownerEvents="<<gaps.size()<<" maxMs="<<maxGap<<" p95Ms="<<percentile(.95)<<" over100ms="<<over100<<" over1s="<<over1000<<" workerReadThread=true"<<std::endl;
+    if(!evidence.isEmpty()){const auto shot=QDir(evidence).filePath("report-export-complete.png");Require(!QFileInfo::exists(shot)&&stress.grab().save(shot),"cannot save report export completion screenshot");}
+    if(stress.isVisible())stress.close();
+}
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();CheckFileExports();
 #if defined(MANUAL_ALIGNMENT)
     CheckFrozenAlignmentParameters();CheckInspectionPreparation();
 #endif

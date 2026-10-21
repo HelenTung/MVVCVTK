@@ -29,6 +29,7 @@
 #include <QDockWidget>
 #include <QComboBox>
 #include <QApplication>
+#include <QAction>
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
@@ -385,7 +386,7 @@ void CheckMixedSortAndCancellation() {
     search->setText("row-");bool cancelledWhileBusy=false;
     QTimer::singleShot(0,&view,[&]{cancelledWhileBusy=view.property("reportRowsBusy").toBool();view.findChild<QPushButton*>("cancelReportRows")->click();});WaitRows(view);
     Require(cancelledWhileBusy && view.GetFilteredRows().empty(),"cancelled scan published partial or late results");
-    Require(!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled() && !view.findChild<QPushButton*>("copyReportCsv")->isEnabled(),"cancelled scan is presented as an exportable complete result");
+    Require(!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled() && !view.findChild<QPushButton*>("exportSelectedReport")->isEnabled(),"cancelled scan is presented as an exportable complete result");
     search->setText("row-4");view.SelectReport(ties.id);QCoreApplication::processEvents();
     Require(view.GetSelectedReport().id==ties.id && view.GetFilteredRows().size()==8,"old report scan overwrote a new selection");
     ReportDocument virtualRows;virtualRows.id="64-bit-native";virtualRows.title="64 位原生页";virtualRows.category="本次会话结果";
@@ -663,7 +664,11 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         Require(item&&!item->isHidden(),"exact native report is visible in the report tree");tree->scrollToItem(item);tree->setCurrentItem(item);QCoreApplication::processEvents();
         Require(view->GetSelectedReport().id==doc.id,"report tree selection opens the requested frozen document");
         WaitRows(*view,timeoutMs);
-        Require(view->findChild<QPushButton*>("copyReportCsv")->isEnabled() && view->findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"report preview uses complete rows rather than a cancelled or failed partial scan");
+        auto* reportTable=view->findChild<QTableView*>("reportTable");
+        if(reportTable->selectionModel()->selectedRows().isEmpty() && reportTable->model()->rowCount()>0)reportTable->selectRow(0);
+        Require(view->findChild<QPushButton*>("exportSelectedReport")->isEnabled()==(reportTable->model()->rowCount()>0) && view->findChild<QPushButton*>("exportReportCsv")->isEnabled()
+            && view->findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"report preview actions do not reflect the complete page and full report");
+        Require(!view->findChild<QPushButton*>("copyReportCsv")&&!reportTable->findChild<QAction*>("copyReportCsvAction"),"clipboard copy action remains available");
         Require(view->GetSelectedReport().table->GetCount()==doc.table->GetCount(),"native business full row count");
         if(module=="Alignment" && action=="EvaluateVoxelVolume" && record["parameters"].toObject()["requireEnclosedSelection"].toBool()) {
             const auto row=doc.table->Read(0);double observed=0;

@@ -6,6 +6,7 @@
 #include <memory>
 #include <functional>
 #include <cstddef>
+#include <stdexcept>
 #include "Data/DataPayloads.h"
 class QIODevice;
 class QThread;
@@ -13,6 +14,11 @@ namespace Manual {
 using ReportRowId = qint64;
 using ReportRows = MeshReadArray<ReportRowId>;
 using ReportCheckpoint = std::function<void()>;
+class ReportReadError final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+using ReportProgress = std::function<void(ReportRowId)>;
 struct ReportDocument;
 ReportRows GetReportRowRange(ReportRowId count);
 // 仅保存表格；不拥有 Session、体数据或原生结果快照。
@@ -35,7 +41,7 @@ public:
     // 独立文件游标；调用方持有 table，且仅在物化完成后创建读取器。
     std::function<QStringList(ReportRowId)> CreateReader() const;
 private:
-    friend void WriteReportCsv(QIODevice&, const ReportDocument&, const ReportRows*, const ReportCheckpoint&);
+    friend void WriteReportCsv(QIODevice&, const ReportDocument&, const ReportRows*, const ReportCheckpoint&, const ReportProgress&);
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
@@ -65,7 +71,8 @@ struct ReportDocument final {
 };
 using ReportPreparation = std::function<QVector<ReportDocument>(const ReportCheckpoint&)>;
 ReportDocument ReadReportCsv(QIODevice& input, const QString& title, const ReportCheckpoint& checkpoint = {});
-void WriteReportCsv(QIODevice& output, const ReportDocument& document, const ReportRows* rows = nullptr, const ReportCheckpoint& checkpoint = {});
+// 进度回调在调用线程同步执行，每 256 行及结束时报告已序列化行数（包括空表的 0）；允许抛出。后台调用者应只写原子进度，不访问窗口。
+void WriteReportCsv(QIODevice& output, const ReportDocument& document, const ReportRows* rows = nullptr, const ReportCheckpoint& checkpoint = {}, const ReportProgress& onProgress = {});
 void ExportReport(const QString& path, const ReportDocument& document, const ReportRows* rows = nullptr, const ReportCheckpoint& checkpoint = {});
 QString GetReportCell(const QStringList& row, int column);
 bool GetReportNumber(const QString& text, double& value);
