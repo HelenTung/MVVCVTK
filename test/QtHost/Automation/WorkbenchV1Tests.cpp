@@ -224,6 +224,33 @@ void CheckWorkbenchV1(TestWindow& window)
     QKeyEvent numericEdit(QEvent::KeyPress,Qt::Key_2,Qt::NoModifier,"2.75");QApplication::sendEvent(numberInput,&numericEdit);
     Require(number.GetValue().toDouble()==2.75 && numberEdits==1 && editedNumber==2.75,"keyboard input and its edit callback see the new parameter exactly once");
     number.SetValue(originalNumber);Require(number.GetValue().toDouble()==originalNumber && numberEdits==1,"programmatic numeric replacement preserves precision without an edit");
+    {
+        struct RestoreLocale final {QLocale locale;~RestoreLocale(){QLocale::setDefault(locale);}} restoreLocale{QLocale()};
+        QLocale::setDefault(QLocale(QLocale::German,QLocale::Germany));
+        number.SetValue(originalNumber);numberInput=number.findChild<QLineEdit*>("value");QApplication::sendEvent(numberInput,&focusOut);
+        Require(numberInput->text().contains(',')&&number.GetValue().toDouble()==originalNumber,
+            "switching to a comma decimal locale preserves the exact stored parameter");
+        number.onEdited=[&]{++numberEdits;};
+        QApplication::sendEvent(numberInput,&focusIn);numberInput->selectAll();
+        QKeyEvent commaEdit(QEvent::KeyPress,Qt::Key_2,Qt::NoModifier,"2,75");QApplication::sendEvent(numberInput,&commaEdit);
+        Require(number.GetValue().toDouble()==2.75&&numberEdits==2,"comma decimal keyboard input is accepted once in the current locale");
+        const auto preciseText=QString::number(originalNumber,'g',17).replace('.',',');
+        numberInput->setText(preciseText);QApplication::sendEvent(numberInput,&focusOut);
+        Require(number.GetValue().toDouble()==originalNumber&&numberEdits==2,"localized full precision survives rounded presentation without another edit");
+        QApplication::sendEvent(numberInput,&focusIn);
+        Require(numberInput->text()==preciseText,"refocusing restores the complete localized numeric input");
+        numberInput->setText("1.234");Require(number.GetValue().toDouble()==1.234,"C decimal takes precedence over the localized thousands separator");
+        numberInput->setText("2.75e-3");Require(number.GetValue().toDouble()==0.00275,"C scientific notation remains valid in a comma decimal locale");
+        numberInput->setText("2,75e-3");Require(number.GetValue().toDouble()==0.00275,"localized scientific notation is parsed without display rounding");
+        const auto rejectGrouped=[&](const QString& text) {
+            numberInput->setText(text);bool rejected=false;
+            try{(void)number.GetValue();}catch(const std::invalid_argument&){rejected=true;}
+            Require(rejected,"grouped or malformed localized numbers cannot silently change the parameter magnitude");
+        };
+        rejectGrouped("1.234,5");rejectGrouped("1,234,5");
+        QLocale::setDefault(QLocale(QLocale::English,QLocale::UnitedStates));rejectGrouped("1,234");
+        number.SetValue(originalNumber);
+    }
     ParameterEditor defaultNumber("Wall","Start","maxDistance",QJsonValue(),QJsonValue());
     defaultNumber.SetDefaultValue(originalNumber);Require(defaultNumber.GetValue().isNull(),"a numeric default does not specify an optional parameter");
     defaultNumber.findChild<QCheckBox*>("specified")->click();Require(defaultNumber.GetValue().toDouble()==originalNumber,"specifying a numeric default retains its original precision");
@@ -347,12 +374,19 @@ void CheckWorkbenchV1(TestWindow& window)
     Require(intervals==0,"old histogram interval selection cannot edit a new ROI preview");
     QCoreApplication::sendEvent(plot,&intervalPress);QCoreApplication::sendEvent(plot,&release);
     Require(intervals==1,"unchanged histogram source still accepts one interval selection");
-    const auto intervalCount=intervals;
     const auto invalidatedDrag=[&](const QString& label,const std::function<void()>& invalidate){
-        statistics.SetHistogram(histogram);statistics.SetMarkers(histogram["markers"].toArray());statistics.SetInteractionModes({"编辑 ISO","另一用途"});modes->setCurrentIndex(1);QCoreApplication::processEvents();
-        statistics.onMarker=[&](const QString&,double){++edits;};statistics.onInterval=[&](double,double){++intervals;};
-        QCoreApplication::sendEvent(plot,&press);QCoreApplication::sendEvent(plot,&move);invalidate();QCoreApplication::sendEvent(plot,&release);
-        Require(edits==1 && intervals==intervalCount,label.toUtf8().constData());
+        for(const bool markerDrag:{true,false}) {
+            statistics.SetHistogram(histogram);statistics.SetMarkers(histogram["markers"].toArray());statistics.SetInteractionModes({"编辑 ISO","另一用途"});modes->setCurrentIndex(1);QCoreApplication::processEvents();
+            statistics.SetInteractionContext("pending-"+label);
+            const auto markerCount=edits,intervalCount=intervals;
+            statistics.onMarker=[&](const QString&,double){++edits;};statistics.onInterval=[&](double,double){++intervals;};
+            QCoreApplication::sendEvent(plot,markerDrag?&press:&intervalPress);QCoreApplication::sendEvent(plot,&move);invalidate();
+            // Cancel 会清空 callback；恢复观察者，确保断言验证的是手势失效。
+            statistics.onMarker=[&](const QString&,double){++edits;};statistics.onInterval=[&](double,double){++intervals;};
+            QCoreApplication::sendEvent(plot,&release);
+            const auto message=label+(markerDrag?" (marker drag)":" (interval drag)");
+            Require(edits==markerCount && intervals==intervalCount,message.toUtf8().constData());
+        }
     };
     invalidatedDrag("context changes discard a pending marker and interval gesture",[&]{statistics.SetInteractionContext("changed");});
     invalidatedDrag("mode changes discard a pending marker and interval gesture",[&]{modes->setCurrentIndex(2);modes->setCurrentIndex(1);});
@@ -360,7 +394,11 @@ void CheckWorkbenchV1(TestWindow& window)
     invalidatedDrag("hide and show discard a pending marker and interval gesture",[&]{statistics.hide();statistics.show();});
     invalidatedDrag("range reset discards a pending marker and interval gesture",[&]{statistics.findChild<QToolButton*>("resetHistogramRange")->click();});
     invalidatedDrag("focus out discards a pending marker and interval gesture",[&]{QFocusEvent lost(QEvent::FocusOut,Qt::OtherFocusReason);QApplication::sendEvent(&statistics,&lost);});
-    invalidatedDrag("removing marker editability discards a pending marker and interval gesture",[&]{statistics.SetMarkers({QJsonObject{{"key","iso"},{"label","ISO"},{"value",50},{"editable",false}}});});
+    statistics.SetHistogram(histogram);statistics.SetMarkers(histogram["markers"].toArray());modes->setCurrentIndex(1);
+    statistics.onMarker=[&](const QString&,double){++edits;};
+    QCoreApplication::sendEvent(plot,&press);QCoreApplication::sendEvent(plot,&move);
+    statistics.SetMarkers({QJsonObject{{"key","iso"},{"label","ISO"},{"value",50},{"editable",false}}});
+    QCoreApplication::sendEvent(plot,&release);Require(edits==1&&intervals==1,"removing marker editability discards its pending marker drag");
     statistics.SetHistogram(histogram);statistics.SetMarkers(histogram["markers"].toArray());statistics.SetInteractionModes({"编辑 ISO","另一用途"});modes->setCurrentIndex(1);statistics.SetInteractionContext("keyboard");
     statistics.onMarker=[&](const QString&,double value){latest=value;++edits;};statistics.onInterval=[&](double,double){++intervals;};
     QKeyEvent right(QEvent::KeyPress,Qt::Key_Right,Qt::NoModifier);QApplication::sendEvent(plot,&right);Require(edits==1,"Right only previews a marker candidate");

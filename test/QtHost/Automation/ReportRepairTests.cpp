@@ -52,6 +52,7 @@ public:
     static void BeforeStart(ResultReport& view,std::function<void()> hook){view.m_beforeWorkerStart=std::move(hook);}
     static void Start(ResultReport& view,std::function<ReportDocument(const ReportCheckpoint&)> work){view.StartTask(std::move(work));}
     static bool HasTask(const ResultReport& view){return bool(view.m_task);}
+    static QTimer* GetBuildTimer(ResultReport& view){return view.m_buildTimer;}
     static bool HasScan(const ResultReport& view){return bool(view.m_rowScan);}
     static bool HasPendingScan(const ResultReport& view){return bool(view.m_pendingRowScan);}
     static void Generate(ResultReport& view){view.ContinueGeneration();}
@@ -237,7 +238,7 @@ void CheckWorkerStartupAndRecovery() {
     view.ImportReport(path);Wait([&]{return view.property("reportTaskBusy").toBool();});Require(view.property("reportTaskError").toString().isEmpty(),"worker failure prevented a subsequent request");
 
 }
-void CheckReopenedGeneration() {
+void CheckReopenedGeneration(bool closeWindow) {
     ResultReport view;const auto document=Document("reopened-native");int attempts=0;
     auto release=std::make_shared<std::promise<void>>();const auto ready=release->get_future().share();
     auto entered=std::make_shared<std::atomic<bool>>(false);
@@ -250,12 +251,20 @@ void CheckReopenedGeneration() {
         };
     };
     view.QueueReport({{"operationId","reopen-native"},{"module","Surface"},{"result",QJsonObject{{"generation","reopen-generation"}}}});view.show();
-    Wait([&]{return !entered->load();});view.close();view.show();
+    Wait([&]{return !entered->load();});
+    if(closeWindow)view.close();else view.hide();
+    view.show();
     // 确定重开后的生成轮询先于旧 worker 完成，不依靠线程调度碰运气。
     ReportTaskTestAccess::Generate(view);
     Require(ReportTaskTestAccess::HasTask(view)&&attempts==1,"reopening launched another native worker before cancellation completed");
+    const auto* timer=ReportTaskTestAccess::GetBuildTimer(view);
+    Require(timer->isActive()&&timer->timerType()==Qt::CoarseTimer&&timer->interval()==20,
+        "reopening must wait for canceled report work with an active Coarse 20ms timer");
     release->set_value();Wait([&]{return !view.GetReportIds().contains(document.id);});
     Require(attempts==2&&!view.property("reportTaskError").toString().size(),"reopening lost the pending native report queue");
+    Wait([&]{return view.GetGenerationPending();});
+    Require(view.GetReportIds().size()==1,"reopening must publish the pending native report exactly once");
+    std::cout<<"PASS: report "<<(closeWindow?"close":"hide")<<" / reopen waits with Coarse 20ms and publishes once after cancellation"<<std::endl;
 }
 void CheckComparisonGenerationAdmission() {
     for(int outcome=0;outcome<3;++outcome) {
@@ -668,7 +677,7 @@ void CheckInspectionPreparation() {
 #endif
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration();CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();
 #if defined(MANUAL_ALIGNMENT)
     CheckFrozenAlignmentParameters();CheckInspectionPreparation();
 #endif
