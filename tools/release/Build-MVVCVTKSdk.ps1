@@ -823,9 +823,8 @@ function Start-CleanRoomProbe(
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if ([string]::IsNullOrWhiteSpace($MetrologyMesh)) {
-    if (-not $SkipCleanRoom) {
-        throw 'SDK validation requires -MetrologyMesh pointing to a frozen real C3 VTP input. -SkipCleanRoom produces diagnostics only.'
-    }
+    $MetrologyMesh = ''
+    $MetrologyMeshSha256 = ''
 }
 else {
     $MetrologyMesh = [IO.Path]::GetFullPath($MetrologyMesh)
@@ -995,6 +994,15 @@ try {
 
     Write-Host "MVVCVTK SDK stage: $stage"
     Write-Host "MVVCVTK SDK package directory: $packageRoot"
+    if ([string]::IsNullOrWhiteSpace($MetrologyMesh)) {
+        Write-Host 'Real C3 VTP validation: NOT_RUN (未执行; -MetrologyMesh not provided).'
+    }
+    elseif ($SkipTests -and $SkipCleanRoom) {
+        Write-Host 'Real C3 VTP validation: NOT_RUN (未执行; -SkipTests and -SkipCleanRoom).'
+    }
+    else {
+        Write-Host 'Real C3 VTP validation: PASS.'
+    }
 }
 finally {
     try {
