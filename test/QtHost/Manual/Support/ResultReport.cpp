@@ -6,6 +6,8 @@
 #include <QAbstractTableModel>
 #include <QTableView>
 #include <QItemSelectionModel>
+#include <QKeyEvent>
+#include <QKeySequence>
 #include <QTreeWidget>
 #include <QLineEdit>
 #include <QCheckBox>
@@ -348,6 +350,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     // 表格上下文只提供与选中行有关的操作，整份报告从工具栏导出。
     m_exportSelectionAction=new QAction("导出选中行…",m_table);m_exportSelectionAction->setObjectName("exportSelectedReportAction");
     m_table->addAction(m_exportSelectionAction);m_table->setContextMenuPolicy(Qt::ActionsContextMenu);
+    m_table->installEventFilter(this);m_table->viewport()->installEventFilter(this);
     connect(m_exportSelectionAction,&QAction::triggered,this,[this]{SelectExportPath(true);});
     connect(m_locate,&QPushButton::clicked,this,[this]{
         if(!m_pageReady || !onLocate || !m_table->selectionModel())return;const auto selected=m_table->selectionModel()->selectedRows();
@@ -373,6 +376,13 @@ void ResultReport::SetRecord(const QJsonObject& record)
     AddReport(std::move(doc));
 }
 QJsonObject ResultReport::GetSelectedRecord() const { return m_records.value(m_selected.id.startsWith("operation:")?m_selected.id.mid(10):QString()); }
+bool ResultReport::eventFilter(QObject* object,QEvent* event)
+{
+    // Qt 5.14 的 item view 自带 Copy 快捷键，会直接写剪贴板；报告表格统一从文件导出。
+    if((object==m_table || object==m_table->viewport()) && (event->type()==QEvent::KeyPress || event->type()==QEvent::ShortcutOverride)
+        &&static_cast<QKeyEvent*>(event)->matches(QKeySequence::Copy)) {event->accept();return true;}
+    return QWidget::eventFilter(object,event);
+}
 void ResultReport::showEvent(QShowEvent* event) { m_acceptingRequests=true;QWidget::showEvent(event); if(!m_rowsReady && m_selected.table)RefreshRows();else Refresh(); if(!m_pendingReports.isEmpty())m_buildTimer->start(0); }
 void ResultReport::hideEvent(QHideEvent* event) { CancelTasks(); QWidget::hideEvent(event); }
 void ResultReport::closeEvent(QCloseEvent* event) {m_acceptingRequests=false;CancelTasks();QWidget::closeEvent(event);}

@@ -58,6 +58,7 @@ public:
     std::function<ReportPreparation(const QJsonObject&,const QSet<QString>&)> onPrepareReports;
     std::function<QMap<QString,QString>()> getSources;
 protected:
+    bool eventFilter(QObject* object,QEvent* event) override;
     void showEvent(QShowEvent* event) override;
     void hideEvent(QHideEvent* event) override;
     void closeEvent(QCloseEvent* event) override;

@@ -24,6 +24,8 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QItemSelectionModel>
+#include <QIdentityProxyModel>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
@@ -696,6 +698,23 @@ void CheckFileExports() {
     QFile selectedFile(selectedPath);Require(selectedFile.open(QIODevice::ReadOnly),"selected-row export target unreadable");QBuffer selectedBuffer;selectedBuffer.setData(selectedFile.readAll());selectedBuffer.open(QIODevice::ReadOnly);
     const auto selected=ReadReportCsv(selectedBuffer,"selected export");Require(selected.table->GetCount()==2,"selected export row count changed");
     Require(SameCells(selected.table->Read(0),QStringList{exactId[1],exactValue[1],exactStatus[1]})&&SameCells(selected.table->Read(1),QStringList{exactId[3],exactValue[3],exactStatus[3]}),"selected export changed selected row order or exact values");
+    {
+        ResultReport keyboard;keyboard.AddReport(doc);auto* grid=keyboard.findChild<QTableView*>("reportTable");
+        class ReadProbe final : public QIdentityProxyModel {
+        public:
+            mutable int displayReads=0;
+            QVariant data(const QModelIndex& index,int role) const override {if(role==Qt::DisplayRole)++displayReads;return QIdentityProxyModel::data(index,role);}
+        } probe;
+        probe.setSourceModel(grid->model());grid->setModel(&probe);grid->setCurrentIndex(probe.index(0,0));
+        for(const auto key:{Qt::Key_C,Qt::Key_Insert})for(const auto type:{QEvent::ShortcutOverride,QEvent::KeyPress}){
+            probe.displayReads=0;QKeyEvent event(type,key,Qt::ControlModifier);QCoreApplication::sendEvent(grid,&event);
+            // Qt 默认 Copy 会读当前单元格后写系统剪贴板；零读取证明在此之前已截断，测试不访问剪贴板。
+            Require(event.isAccepted()&&probe.displayReads==0,"report retained the Qt item-view clipboard shortcut");
+        }
+        QKeyEvent down(QEvent::KeyPress,Qt::Key_Down,Qt::NoModifier);QCoreApplication::sendEvent(grid,&down);
+        Require(grid->currentIndex().row()==1,"blocking Copy disabled ordinary table keyboard navigation");
+        grid->setModel(probe.sourceModel());
+    }
     ReportTaskTestAccess::ChooseExportPath(view,[](const QString&){return QString();});view.findChild<QPushButton*>("exportReportCsv")->click();
     Require(!view.property("reportTaskBusy").toBool()&&view.property("reportExportStatus").toString()!="writing","cancelled save dialog started an export task");
     ShortWriteDevice shortWrite(19);bool writeFailed=false;try{WriteReportCsv(shortWrite,doc);}catch(const std::runtime_error& e){writeFailed=std::string(e.what()).find("write")!=std::string::npos||std::string(e.what()).find("写")!=std::string::npos;}
