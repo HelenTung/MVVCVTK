@@ -119,9 +119,11 @@ void CheckSemanticRoundtrip() {
         int partialReads=0;auto partial=Document("partial-hash");
         partial.table=std::make_shared<ReportTable>(3,[&](ReportRowId row){++partialReads;return QStringList{QString::number(row),"1"};});
         QByteArray partialBytes;QBuffer partialOutput(&partialBytes);partialOutput.open(QIODevice::WriteOnly);
-        auto rows=GetReportRowRange(1);int checkpoints=0;
-        try{WriteReportCsv(partialOutput,partial,filtered?&rows:nullptr,[&]{if(++checkpoints==2)throw std::runtime_error("cancel");});}
-        catch(const std::runtime_error&){Require(!filtered,"filtered hash fixture unexpectedly failed");}
+        auto rows=GetReportRowRange(1);bool cancelled=false;
+        // 固定在读取第一行后取消整表；筛选单行正常写完，两个分支都不能发布整表哈希。
+        try{WriteReportCsv(partialOutput,partial,filtered?&rows:nullptr,[&]{if(!filtered&&partialReads==1)throw std::runtime_error("cancel");});}
+        catch(const std::runtime_error&){cancelled=true;Require(!filtered,"filtered hash fixture unexpectedly failed");}
+        Require(partialReads==1 && cancelled==!filtered,"partial hash fixture did not retain its exact one-row read and cancellation boundary");
         const auto before=partialReads;
         Require(partial.table->GetContentHash()==callback.table->GetContentHash() && partialReads==before+3,
             "partial or cancelled export published an incomplete full-table hash");
