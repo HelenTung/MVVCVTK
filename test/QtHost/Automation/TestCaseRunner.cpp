@@ -264,30 +264,39 @@ void CheckPopupInteraction()
     Check(earlyChecks>0 && triggers==1 && !delayed.isVisible(),
         "popup interaction retries readiness before dispatching the real action exactly once");
 
-    QMenu outer;QMenu unavailable(&outer);outer.addAction("外层菜单");unavailable.addAction("等待目标");
-    bool expired=false,sawExpectedPopup=false;QElapsedTimer waited;waited.start();
+    // 原生菜单取消可让 exec 提前返回；下面三项需要入口一直阻塞到夹具主动结束。
+    // 先显示 modal 固定就绪前提，再开始原有的交互期限，避免把窗口准备调度当成被测超时。
+    QDialog outer;QDialog unavailable(&outer);outer.setWindowTitle("外层窗口");unavailable.setWindowTitle("等待目标");
+    outer.setModal(true);outer.show();unavailable.setModal(true);unavailable.show();QCoreApplication::processEvents();
+    bool expired=false,sawExpectedPopup=QApplication::activeModalWidget()==&unavailable;
+    Check(sawExpectedPopup&&outer.isVisible()&&unavailable.isVisible(),"nested native modal fixture is ready before its interaction deadline");
+    QElapsedTimer waited;waited.start();
     try {
-        DrivePopupInteraction([&]{outer.popup(QPoint(30,30));unavailable.exec(QPoint(60,60));},
-            [&]{sawExpectedPopup|=QApplication::activePopupWidget()==&unavailable;return false;},
+        DrivePopupInteraction([&]{unavailable.exec();},
+            [&]{sawExpectedPopup|=QApplication::activeModalWidget()==&unavailable;return false;},
             "intentional popup fixture timeout",intervalMs*5);
     }catch(const std::runtime_error& error){expired=std::string(error.what())=="intentional popup fixture timeout";}
     Check(expired && sawExpectedPopup && waited.elapsed()>=intervalMs*5 && !outer.isVisible() && !unavailable.isVisible(),
         "popup fixture timeout closes nested popups and reports an explicit failure");
 
-    QMenu failing;failing.addAction("断言失败");bool preserved=false,attempted=false;
+    QDialog failing;failing.setWindowTitle("断言失败");failing.setModal(true);failing.show();QCoreApplication::processEvents();
+    Check(QApplication::activeModalWidget()==&failing,"native assertion fixture is ready before entering its nested loop");
+    bool preserved=false,attempted=false,nativeLoopReturned=false;
     try {
-        DrivePopupInteraction([&]{failing.exec(QPoint(30,30));},[&]()->bool {
-            if(QApplication::activePopupWidget()!=&failing)return false;
+        DrivePopupInteraction([&]{failing.exec();nativeLoopReturned=true;},[&]()->bool {
+            if(QApplication::activeModalWidget()!=&failing)return false;
             attempted=true;
             throw std::runtime_error("intentional popup assertion");
         },"popup assertion fixture did not complete");
     }catch(const std::runtime_error& error){preserved=std::string(error.what())=="intentional popup assertion";}
-    Check(preserved && attempted && !failing.isVisible(),"popup assertion is rethrown after closing the native nested loop");
+    Check(preserved && attempted && nativeLoopReturned && !failing.isVisible(),"popup assertion is rethrown after closing the native nested loop");
 
-    QMenu unfinished;unfinished.addAction("回调已完成但入口未返回");bool dispatched=false,unfinishedExpired=false;
+    QDialog unfinished;unfinished.setWindowTitle("回调已完成但入口未返回");unfinished.setModal(true);unfinished.show();QCoreApplication::processEvents();
+    Check(QApplication::activeModalWidget()==&unfinished,"native completion fixture is ready before entering its nested loop");
+    bool dispatched=false,unfinishedExpired=false;
     try {
-        DrivePopupInteraction([&]{unfinished.exec(QPoint(30,30));},[&] {
-            if(QApplication::activePopupWidget()!=&unfinished)return false;
+        DrivePopupInteraction([&]{unfinished.exec();},[&] {
+            if(QApplication::activeModalWidget()!=&unfinished)return false;
             dispatched=true;return true;
         },"completed callback left its popup open",intervalMs*5);
     }catch(const std::runtime_error& error){unfinishedExpired=std::string(error.what())=="completed callback left its popup open";}

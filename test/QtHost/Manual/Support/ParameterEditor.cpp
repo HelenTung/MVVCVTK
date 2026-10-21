@@ -51,7 +51,15 @@ public:
         m_exactText = QString::number(value, 'g', 17);
         SetPresentation();
     }
-    double GetNumber(bool* valid) const { return m_exactText.toDouble(valid); }
+    double GetNumber(bool* valid) const
+    {
+        const auto number=m_exactText.toDouble(valid);
+        if(*valid)return number;
+        // C 小数优先；本地格式不接受千分位，避免分隔符歧义改变参数数量级。
+        auto locale=QLocale();
+        locale.setNumberOptions(locale.numberOptions()|QLocale::RejectGroupSeparator);
+        return locale.toDouble(m_exactText,valid);
+    }
 protected:
     void focusInEvent(QFocusEvent* event) override
     {

@@ -237,7 +237,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
         RefreshFailures();ShowReports();
     });
     RefreshFailures();
-    m_buildTimer=new QTimer(this);m_buildTimer->setSingleShot(true);
+    m_buildTimer=new QTimer(this);m_buildTimer->setSingleShot(true);m_buildTimer->setTimerType(Qt::CoarseTimer);
     connect(m_buildTimer,&QTimer::timeout,this,[this]{ContinueGeneration();});
     // Qt 5.14.2 Win32 的短定时器依赖投递事件唤醒；完成/取消收口使用原生 WM_TIMER。
     // 证据：out/final-confluence-post-stall/diagnosis/merged/native-wakeup/；输入分块额度与取消门槛不变。
@@ -525,7 +525,7 @@ void ResultReport::ContinueGeneration()
 {
     if(!m_acceptingRequests||!isVisible()||m_comparisonMapping)return;
     // 重开窗口时旧取消任务可能仍在收尾，保留这次恢复队列的请求。
-    if(m_task){m_buildTimer->start(10);return;}
+    if(m_task){m_buildTimer->start(20);return;}
     try {
         if(m_buildingOperation.isEmpty()) {
             for(auto it=m_pendingReports.cbegin();it!=m_pendingReports.cend();++it) {

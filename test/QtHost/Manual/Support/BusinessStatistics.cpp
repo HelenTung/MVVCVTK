@@ -43,7 +43,7 @@ protected:
     void focusOutEvent(QFocusEvent* event) override {QLineEdit::focusOutEvent(event);SetDisplay();}
 private:
     QString m_exact;
-    void SetDisplay(){bool valid=false;const auto number=GetNumber(&valid);auto locale=QLocale();if(!locale.zeroDigit().isDigit())locale=QLocale::c();setText(hasFocus()?m_exact:valid?locale.toString(number,'g',6):m_exact);}
+    void SetDisplay(){bool valid=false;const auto number=GetNumber(&valid);auto locale=QLocale();if(!locale.zeroDigit().isDigit())locale=QLocale::c();const auto display=hasFocus()?m_exact:valid?locale.toString(number,'g',6):m_exact;if(text()!=display)setText(display);}
 };
 QJsonObject HistogramData(const std::vector<double>& counts,double low,double high,
     const QString& title,const QString& description,const QString& xUnit,const QString& yUnit)
@@ -283,7 +283,16 @@ void BusinessStatistics::SetInteractionModes(const QStringList& modes)
     m_interaction->setCurrentIndex(std::max(0,m_interaction->findText(selected)));
 }
 void BusinessStatistics::SetInteractionContext(const QString& context){if(m_interactionContext==context)return;m_interactionContext=context;CancelInteraction();}
-void BusinessStatistics::CancelInteraction(){m_plot->CancelInteraction();m_markerEditKey.clear();m_markerEditSource={};m_markerValue->clear();for(const auto value:m_data["markers"].toArray()){const auto marker=value.toObject();if(marker["editable"].toBool()){static_cast<MarkerInput*>(m_markerValue)->SetNumber(marker["value"].toDouble());break;}}}
+void BusinessStatistics::CancelInteraction()
+{
+    m_plot->CancelInteraction();m_markerEditKey.clear();m_markerEditSource={};
+    // 重复 Stop/析构只恢复现有标记，避免先清空再回填触发两次数值及可访问性通知。
+    for(const auto value:m_data["markers"].toArray()) {
+        const auto marker=value.toObject();
+        if(marker["editable"].toBool()){static_cast<MarkerInput*>(m_markerValue)->SetNumber(marker["value"].toDouble());return;}
+    }
+    m_markerValue->clear();
+}
 void BusinessStatistics::SelectInteractionMode(const QString& mode){if(m_autoModeSelected)return;const auto index=m_interaction->findText(mode);if(index<0)return;m_autoModeSelected=true;m_interaction->setCurrentIndex(index);}
 QString BusinessStatistics::GetInteractionMode() const{return m_interaction->currentText();}
 void BusinessStatistics::ShowTable(){if(m_tableTab>=0)m_tabs->setCurrentIndex(m_tableTab);}
