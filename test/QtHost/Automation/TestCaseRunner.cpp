@@ -57,6 +57,7 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QMouseEvent>
+#include <QFocusEvent>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
@@ -93,6 +94,7 @@
 #include <vector>
 #include <cmath>
 #include <vtkCommand.h>
+#include <vtkCallbackCommand.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkActor.h>
@@ -249,6 +251,23 @@ bool GetCropFramesReady(const QJsonObject& state)
     return state["framesReady"].toBool() && !state["isBusy"].toBool()
         && state["appliedHead"].isString() && state["renderedHead"].isString()
         && state["appliedHead"] == state["renderedHead"];
+}
+QAction* GetCropConfirmationCommand(ModulePanel* panel)
+{
+    return panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_FinishEditing");
+}
+bool GetCropConfirmationEnabled(ModulePanel* panel)
+{
+    const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+    if(primary && primary->isVisible() && primary->property("businessAction")=="FinishEditing")return primary->isEnabled();
+    const auto* command=GetCropConfirmationCommand(panel);return command && command->isEnabled();
+}
+void DumpCropConfirmation(ModulePanel* panel)
+{
+    const auto* command=GetCropConfirmationCommand(panel);const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+    std::cerr<<"CROP_NOTIFICATION_STATE command="<<(command && command->isEnabled())
+        <<" primary="<<(primary?primary->property("businessAction").toString().toStdString():"missing")
+        <<" primaryEnabled="<<(primary && primary->isEnabled())<<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
 }
 void Check(bool condition, const char* message)
 {
@@ -584,7 +603,6 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
     panel->SetParameterPatch(action, patch);
     // 导航与数据变更的页面状态异步刷新；仍检查真实按钮，不绕过入口直接发请求。
     const bool ready = Wait([&] {
-        panel->Observe();
         const auto* current = panel->findChild<QPushButton*>("action_" + action);
         const auto* menu = panel->findChild<QToolButton*>("moreOperations")->menu();
         const auto* command = menu->findChild<QAction*>("command_" + action);
@@ -1613,6 +1631,35 @@ void SendCropDrag(TestWindow& window, const std::array<double,3>& fraction)
         QMouseEvent move(QEvent::MouseMove,end,Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(widget,&move);QCoreApplication::processEvents();
         QMouseEvent release(QEvent::MouseButtonRelease,end,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(widget,&release);QCoreApplication::processEvents();
 }
+class CropRenderHold final {
+public:
+    explicit CropRenderHold(TestWindow& window) {
+        for(auto* view:window.findChildren<QVTKOpenGLNativeWidget*>())m_windows.emplace_back(vtkGenericOpenGLRenderWindow::SafeDownCast(view->renderWindow()));
+        Check(m_windows.size()==4 && std::all_of(m_windows.begin(),m_windows.end(),[](const auto& view){return view && view->GetReadyForRendering();}),
+            "crop presentation hold starts with four real ready render windows");
+        m_callback=vtkSmartPointer<vtkCallbackCommand>::New();m_callback->SetClientData(this);
+        m_callback->SetCallback([](vtkObject* sender,unsigned long,void* data,void*) {
+            auto& hold=*static_cast<CropRenderHold*>(data);hold.m_prepared.insert(sender);
+            // 首轮真实绘制准备各视图的 shader；在下一轮呈现前，仅暂停测试窗口的 ready 门控。
+            if(hold.m_prepared.size()==hold.m_windows.size()) {
+                hold.m_isHeld=true;for(const auto& view:hold.m_windows)view->SetReadyForRendering(false);
+            }
+        });
+        for(const auto& view:m_windows)m_tags.push_back(view->AddObserver(vtkCommand::EndEvent,m_callback));
+    }
+    ~CropRenderHold(){Resume();}
+    bool GetIsHeld() const {return m_isHeld;}
+    void Resume() {
+        for(std::size_t i=0;i<m_tags.size();++i)m_windows[i]->RemoveObserver(m_tags[i]);
+        m_tags.clear();for(const auto& view:m_windows)view->SetReadyForRendering(true);
+    }
+private:
+    std::vector<vtkSmartPointer<vtkGenericOpenGLRenderWindow>> m_windows;
+    std::vector<unsigned long> m_tags;
+    std::set<vtkObject*> m_prepared;
+    vtkSmartPointer<vtkCallbackCommand> m_callback;
+    bool m_isHeld=false;
+};
 void CheckCropWorkflow(TestWindow& window)
 {
     if (!GetEnabled(window, "Crop")) return;
@@ -1689,11 +1736,49 @@ void CheckCropWorkflow(TestWindow& window)
     for(QTreeWidgetItemIterator it(tree);*it;++it)if((*it)->data(0,Qt::UserRole).toJsonObject()["patches"].toObject()["Node"].toObject()["nodeId"].toString()==otherNode){historyNode=*it;break;}
     Check(historyNode!=nullptr,"crop tree exposes selectable stable nodes");ClickNode(tree,historyNode);
     Check(panel->GetParameters()["nodeId"].toString()==otherNode,"scene selection supplies stable node identity");
+    const auto finishAvailable=[&] {return GetCropConfirmationEnabled(panel);};
+    const auto checkFinishBlocked=[&] {
+        const auto* command=GetCropConfirmationCommand(panel);
+        Check(command && !command->isEnabled() && command->toolTip().contains("等待"),
+            "natural notifications disable crop confirmation with a reason while rendering is suspended");
+        const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+        if(primary && primary->property("businessAction")=="FinishEditing")
+            Check(!primary->isEnabled() && primary->toolTip().contains("等待"),
+                "natural notifications disable the visible crop confirmation primary with a reason");
+    };
+    const bool initiallyAvailable=Wait(finishAvailable,2000);if(!initiallyAvailable)DumpCropConfirmation(panel);
+    Check(initiallyAvailable,"actual crop confirmation is available before suspending rendering");
     const auto selectedHistory=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
+    const auto rendersBeforeHidden=window.GetRenderCount();
     window.SetViewsVisible(false);panel->findChild<QPushButton*>("action_Node")->click();CheckIdle(window);
     Check(!window.GetRecords().GetRecord(selectedHistory)["isTerminal"].toBool(),"hidden crop waits for a presented frame without notification spin");
+    std::cout<<"CROP_NOTIFICATION_HELD applied="<<panel->GetObservedState()["appliedHead"].toString().toStdString()
+        <<" rendered="<<panel->GetObservedState()["renderedHead"].toString().toStdString()<<" requested="<<otherNode.toStdString()
+        <<" framesReady="<<panel->GetObservedState()["framesReady"].toBool()<<" busy="<<panel->GetObservedState()["isBusy"].toBool()
+        <<" rendersBefore="<<rendersBeforeHidden<<" rendersAfter="<<window.GetRenderCount()<<std::endl;
+    Check(window.GetRenderCount()==rendersBeforeHidden,
+        "hidden views suspend actual rendering for the accepted crop history request");
+    checkFinishBlocked();
+    // 恢复只唤醒真实绘制；下面的谓词只读控件，不能替通知链主动 Observe/修改参数/导航。
     window.SetViewsVisible(true);GetComplete(window,selectedHistory,"Succeeded");
+    Check(Wait(finishAvailable,2000),"render completion notifications alone re-enable actual crop confirmation");
     Check(panel->GetObservedState()["appliedHead"].toString()==otherNode&&panel->GetObservedState()["renderedHead"].toString()==otherNode,"selected node and presented node agree");
+    CropRenderHold failedPresentation(window);
+    const auto missingFrame=panel->SendAction("Node",{{"nodeId",currentNode}});
+    const bool appliedWithoutFrame=Wait([&]{const auto state=panel->GetObservedState();return failedPresentation.GetIsHeld()
+        && state["appliedHead"].toString()==currentNode && state["renderedHead"].toString()!=currentNode;},2000);
+    if(!appliedWithoutFrame){std::cerr<<"CROP_PRESENTATION_HELD="<<failedPresentation.GetIsHeld()<<std::endl;DumpCropConfirmation(panel);}
+    Check(appliedWithoutFrame,
+        "the failure fixture reaches an applied history head without presenting it");
+    checkFinishBlocked();
+    // 沿用页面既有15秒呈现期限，真实触发失败；20秒仅为观察保护，不修改业务期限。
+    const auto failedFrame=GetComplete(window,missingFrame,"Failed",20000);
+    Check(failedFrame["result"].toObject()["message"].toString().contains("等待视图完成超时"),
+        "missing real render completion fails through the existing presentation deadline");
+    checkFinishBlocked();
+    failedPresentation.Resume();window.SetViewsVisible(true);
+    Check(Wait(finishAvailable,2000) && GetCropFramesReady(panel->GetObservedState()),
+        "render notifications recover crop confirmation after a real presentation failure without active refresh");
     GetComplete(window,Click(window,"Crop","Previous"),"Succeeded");
     GetComplete(window,Send(window,"Crop","Node",{{"nodeId",currentNode}}),"Succeeded");
     GetComplete(window,ClickNodeAction(window,tree,FindNode(tree,"crop-history"),"ResetPreview"),"Succeeded");
@@ -1748,7 +1833,11 @@ void CheckCropWorkflow(TestWindow& window)
         "repeated publication on cached source views adopts its exact new output through the natural primary");
     GetComplete(window, Click(window, "Crop", "SelectOutput"), "Succeeded");
     Check(GetRefText(window.GetSession()->GetImageDescriptor()->dataRevision) == published["output"].toString(), "select uses exact published crop output");
-    GetComplete(window, Click(window, "Crop", "RestoreSource"), "Succeeded");
+    const auto stoppedCrop=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
+    panel->onStop();GetComplete(window,stoppedCrop,"Succeeded");
+    Check(Wait([&]{const auto* start=panel->findChild<QPushButton*>("action_Start");
+        return start && start->isEnabled() && !panel->GetObservedState()["isBusy"].toBool();},2000),
+        "module Stop notifications leave crop ready to start again without active refresh");
     Check(window.GetSession()->GetImageDescriptor()->dataRevision == original.dataRevision, "restore returns exact crop source");
     GetComplete(window, Click(window, "Crop", "RestoreSource"), "Succeeded");
     window.GetWorkflow().onNavigate("Crop", "Box", {});
@@ -1766,6 +1855,7 @@ void CheckCropMouseInteraction(TestWindow& window,bool cylinderOnly=false)
     Check(view && endpoint && view->renderWindow()->GetInteractor() == endpoint->interactor,
         "manual QVTK mouse input uses the crop interactor");
     const auto settled = [&] { panel->Observe(); return panel->GetObservedState()["framesReady"].toBool(); };
+    bool checkedCancelNotification=false;
     GetComplete(window, Click(window, "Crop", "CreateDocument"), "Succeeded");
     for (const auto* renderMode : {"CompositeIsoSurface", "CompositeVolume"}) {
         GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", renderMode}}), "Succeeded");
@@ -1847,10 +1937,35 @@ void CheckCropMouseInteraction(TestWindow& window,bool cylinderOnly=false)
                     "crop drag renders all views and records history only in removal modes");
                 Check(cursorBefore == window.GetSession()->GetRenderViewState({"primary-3d"})->cursorWorld && cameraBefore == cameraAfter,
                     "crop controls take precedence over reference planes without moving the slices or camera");
+                if(!checkedCancelNotification && !positionOnly) {
+                    const auto retained=panel->GetObservedState();
+                    const auto cancelPoint=handle();endpoint->renderer->SetWorldPoint(cancelPoint[0],cancelPoint[1],cancelPoint[2],1.0);endpoint->renderer->WorldToDisplay();
+                    const auto* projected=endpoint->renderer->GetDisplayPoint();
+                    const QPointF cancelStart(projected[0]*view->width()/size[0],(size[1]-1-projected[1])*view->height()/size[1]);
+                    sendMouse(QEvent::MouseMove,cancelStart,Qt::NoButton,Qt::NoButton);
+                    sendMouse(QEvent::MouseButtonPress,cancelStart,Qt::LeftButton,Qt::LeftButton);
+                    sendMouse(QEvent::MouseMove,cancelStart+QPointF(8,6),Qt::NoButton,Qt::LeftButton);
+                    Check(Wait([&]{return panel->GetObservedState()["isBusy"].toBool();},2000),
+                        "a real crop gesture becomes busy through natural notifications");
+                    const auto* confirmation=GetCropConfirmationCommand(panel);
+                    Check(confirmation && !confirmation->isEnabled() && confirmation->toolTip().contains("等待"),
+                        "natural drag notifications disable crop confirmation with a reason");
+                    QFocusEvent lostFocus(QEvent::FocusOut);QApplication::sendEvent(view,&lostFocus);
+                    sendMouse(QEvent::MouseButtonRelease,cancelStart+QPointF(8,6),Qt::LeftButton,Qt::NoButton);
+                    const bool cancelledReady=Wait([&]{return GetCropFramesReady(panel->GetObservedState()) && GetCropConfirmationEnabled(panel);},2000);
+                    if(!cancelledReady)DumpCropConfirmation(panel);
+                    Check(cancelledReady,
+                        "focus cancellation notifications alone restore crop confirmation without active refresh");
+                    Check(panel->GetObservedState()["appliedHead"]==retained["appliedHead"]
+                        && panel->GetObservedState()["operationCount"]==retained["operationCount"],
+                        "cancelled input preserves the previously committed crop preview");
+                    checkedCancelNotification=true;
+                }
                 }
             }
         }
     }
+    Check(checkedCancelNotification,"crop input cancellation notification regression executes");
     GetComplete(window, Click(window, "Crop", "CloseDocument"), "Succeeded");
     GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", "CompositeIsoSurface"}}), "Succeeded");
     Check(Wait(settled), "closing crop removes its controls before reference-plane input");
@@ -3401,7 +3516,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             auto* crop = window.GetModule("Crop");
             bool checkedUnavailable=false;
             Check(crop && Wait([&] {
-                crop->Observe(); const auto state=crop->GetObservedState();
+                const auto state=crop->GetObservedState();
                 const bool isReady=GetCropFramesReady(state);
                 if(!isReady && !checkedUnavailable) {
                     const auto* action=crop->findChild<QPushButton*>("action_FinishEditing");
