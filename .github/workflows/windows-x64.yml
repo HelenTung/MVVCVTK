@@ -83,7 +83,7 @@ jobs:
           ctest --preset vs2026-release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify and package clean-room SDK
+      - name: Build diagnostic SDK package
         shell: pwsh
         run: |
           $gitShort = git rev-parse --short=12 HEAD
@@ -94,7 +94,7 @@ jobs:
             -DefXRoot $env:MVVCVTK_DEFX_ROOT -SkipTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $artifactRoot = Join-Path $env:RUNNER_TEMP `
-            'MVVCVTK-sdk-${{ github.run_id }}'
+            'MVVCVTK-sdk-diagnostics-${{ github.run_id }}'
           if (Test-Path -LiteralPath $artifactRoot) {
             Remove-Item -LiteralPath $artifactRoot -Recurse -Force
           }
@@ -103,10 +103,10 @@ jobs:
           Copy-Item -LiteralPath "./out/packages/$archive" `
             -Destination $artifactRoot
 
-      - name: Publish SDK artifact
+      - name: Upload diagnostic SDK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MVVCVTK-SDK-${{ github.run_number }}-win-x64
-          path: ${{ runner.temp }}/MVVCVTK-sdk-${{ github.run_id }}
+          name: MVVCVTK-SDK-diagnostics-${{ github.run_number }}-win-x64
+          path: ${{ runner.temp }}/MVVCVTK-sdk-diagnostics-${{ github.run_id }}
           if-no-files-found: error
           retention-days: 14
