@@ -94,6 +94,10 @@ if(MVVCVTK_SURFACE_SESSION_AUDIT_ARGS)
 endif()
 
 # 同一审计入口分别链接原始基线与候选，实现数值、资源及端到端对照。
+# 运行参数见 SurfaceAccelerationAudit.cpp::main：Float32 小端、X-fastest RAW，
+# nx ny nz（均至少 2）、ISO 值和可写输出前缀；文件大小必须恰为 nx*ny*nz*4 字节。
+# 工具固定 spacing=(0.1537,0.1537,0.1537)、原点=(0,0,0)，输入须匹配；可选参数见入口用法。
+# --prepare-formal 仅供候选工具准备正式块存储，不适用于原始参考工具。
 add_executable(mvvcvtk_surface_acceleration_audit SurfaceAccelerationAudit.cpp)
 target_include_directories(mvvcvtk_surface_acceleration_audit PRIVATE
     "${PROJECT_SOURCE_DIR}/MVVCVTK/features/SurfaceDetermination/src")
@@ -106,6 +110,8 @@ set_target_properties(mvvcvtk_surface_acceleration_audit PROPERTIES
 vtk_module_autoinit(TARGETS mvvcvtk_surface_acceleration_audit MODULES ${MVVCVTK_VTK_TARGETS})
 
 # 可选只读参考源必须由已核实提交提取；独立 target/object，不覆盖当前 Feature 实现。
+# 参考审计还需配置 MVVCVTK_SURFACE_REFERENCE_DIR，提供下面四份原始源码；
+# 未设置时不生成参考库和审计工具，设置后缺少任一文件会在配置阶段报错。
 set(MVVCVTK_SURFACE_REFERENCE_DIR "" CACHE PATH "Read-only exact original Surface algorithm sources for measurement audit")
 if(MVVCVTK_SURFACE_REFERENCE_DIR)
     foreach(_source SurfaceDeterminationAlgorithm.cpp SurfaceDeterminationAlgorithm.h SurfaceSeedBuilder.cpp SurfaceSeedBuilder.h)
@@ -127,7 +133,7 @@ if(MVVCVTK_SURFACE_REFERENCE_DIR)
     target_compile_definitions(mvvcvtk_surface_reference_algorithm PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     SetTargetDefaults(mvvcvtk_surface_reference_algorithm)
     set_target_properties(mvvcvtk_surface_reference_algorithm PROPERTIES
-        PROJECT_LABEL SurfaceReferenceAlgorithm FOLDER "MVVCVTK/test/Automation/Reference")
+        PROJECT_LABEL SurfaceReferenceAlgorithm FOLDER "MVVCVTK/test/Support")
     add_executable(mvvcvtk_surface_reference_audit SurfaceAccelerationAudit.cpp)
     target_include_directories(mvvcvtk_surface_reference_audit BEFORE PRIVATE
         "${MVVCVTK_SURFACE_REFERENCE_DIR}"
