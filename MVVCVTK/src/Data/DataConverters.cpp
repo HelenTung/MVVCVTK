@@ -109,12 +109,15 @@ TaskAdmissionResult HistogramConverter::StartAutoIso(const DataRevisionRef& revi
                     task = std::move(request);
                     return TaskAdmissionResult::Accepted;
                 }
-                const std::lock_guard<std::mutex> resultLock(entry->state->mutex);
-                if (entry->state->result && !entry->state->result->isCancelled) {
-                    task = std::shared_ptr<AutoIsoTask>(new AutoIsoTask(std::make_unique<AutoIsoTask::Impl>(entry->state)));
-                    entry->request = task;
-                    return TaskAdmissionResult::Accepted;
+                {
+                    const std::lock_guard<std::mutex> resultLock(entry->state->mutex);
+                    if (entry->state->result && !entry->state->result->isCancelled) {
+                        task = std::shared_ptr<AutoIsoTask>(new AutoIsoTask(std::make_unique<AutoIsoTask::Impl>(entry->state)));
+                        entry->request = task;
+                        return TaskAdmissionResult::Accepted;
+                    }
                 }
+                // 缓存可能是 state 的最后持有者，必须先解锁再删除含互斥量的状态。
                 entry = entries.erase(entry);
                 continue;
             }

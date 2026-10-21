@@ -914,6 +914,59 @@ void TestCancellationAndStop(int& failures)
     Check(stopping.window->renderCount == 0, "stop path never calls Render", failures);
 }
 
+void TestCancelledCacheRetry(int& failures)
+{
+    auto data = std::make_shared<TestData>();
+    if (!Check(SetBimodalSource(*data), "cancelled cache source publication", failures)) return;
+    const auto source = data->GetPrimaryImage();
+    const auto payload = std::dynamic_pointer_cast<const ImageGrid3DPayload>(source->data->payload);
+    if (!Check(bool(payload), "cancelled cache retains the same frozen source", failures)) return;
+
+    for (const bool completeCancelledWork : {false, true}) {
+        HistogramConverter histogram;
+        RenderLaneWork pending;
+        unsigned scheduled = 0;
+        const auto start = [&](RenderLaneWork work) {
+            ++scheduled;
+            pending = std::move(work);
+            return TaskAdmissionResult::Accepted;
+        };
+        std::shared_ptr<AutoIsoTask> task;
+        if (!Check(histogram.StartAutoIso(source->data->self, payload, start, task)
+                == TaskAdmissionResult::Accepted && task && pending.valid(),
+                "cancelled cache first request is admitted", failures)) return;
+        if (completeCancelledWork) {
+            TaskStopSource stop;
+            stop.Stop();
+            pending(stop.GetToken());
+            const auto cancelled = task->GetResult();
+            Check(cancelled && cancelled->isCancelled && !cancelled->isoValue,
+                "stopped peak work publishes a cancelled result", failures);
+        }
+        const std::weak_ptr<AutoIsoTask> abandoned = task;
+        task.reset();
+        pending = RenderLaneWork{};
+        // 不保留 future 或工作闭包，确保缓存是含互斥量状态的最后持有者。
+        Check(abandoned.expired(), "cancelled cache request and queued work release their ownership", failures);
+        if (!Check(histogram.StartAutoIso(source->data->self, payload, start, task)
+                == TaskAdmissionResult::Accepted && task && pending.valid()
+                && scheduled == 2 && histogram.GetPeakBuildCount() == 2,
+                "same-source retry replaces an abandoned or cancelled cache entry", failures)) return;
+        Check(!task->GetResult(), "same-source retry exposes no stale cancelled result", failures);
+        pending(TaskStopToken{});
+        pending = RenderLaneWork{};
+        const auto result = task->GetResult();
+        Check(result && !result->isCancelled && result->isoValue == 500.0,
+            "same-source retry computes the independent bimodal peak", failures);
+        task.reset();
+        Check(histogram.StartAutoIso(source->data->self, payload,
+                [](RenderLaneWork) { return TaskAdmissionResult::InvalidRequest; }, task)
+                == TaskAdmissionResult::Accepted && task && task->GetResult()
+                && task->GetResult()->isoValue == 500.0 && histogram.GetPeakBuildCount() == 2,
+            "completed retry remains cached without scheduling more work", failures);
+    }
+}
+
 void TestPreparationOwnership(int& failures)
 {
     auto data = std::make_shared<TestData>();
@@ -980,6 +1033,7 @@ int GetAutoDisplayDefaultsFailCount()
     TestPureAutoPreservesWindowWidth(failures);
     TestRejectedAutoWindowPreservesIntent(failures);
     TestCancellationAndStop(failures);
+    TestCancelledCacheRetry(failures);
     TestPreparationOwnership(failures);
     return failures;
 }
