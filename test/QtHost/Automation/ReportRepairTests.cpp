@@ -13,6 +13,9 @@
 #include <QBuffer>
 #include <QAction>
 #include <QIODevice>
+#include <QDoubleSpinBox>
+#include <QLocale>
+#include <QProgressBar>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
@@ -811,8 +814,87 @@ void CheckFileExports() {
     if(!evidence.isEmpty()){const auto shot=QDir(evidence).filePath("report-export-complete.png");Require(!QFileInfo::exists(shot)&&stress.grab().save(shot),"cannot save report export completion screenshot");}
     if(stress.isVisible())stress.close();
 }
+void CheckSelectedUnmaterializedExports() {
+    QTemporaryDir directory;Require(directory.isValid(),"selected lazy export temp directory unavailable");
+    for(const bool failUnselected:{false,true}) {
+        auto doc=Document(failUnselected?"selected-lazy-fault":"selected-lazy","Original quantity",0);
+        doc.columns={{"source_id",{},{},false},{"native_measurement","Original quantity","mm3",true}};
+        doc.table=std::make_shared<ReportTable>();std::atomic<ReportRowId> sourceReads{0},unselectedReads{0},row500Reads{0},outOfRangeReads{0};
+        doc.table->SetRows(1000,[&,failUnselected](ReportRowId row){
+            ++sourceReads;if(row<0||row>=1000){++outOfRangeReads;throw std::out_of_range("selected export source row out of range");}
+            if(row>=2)++unselectedReads;if(row==500){++row500Reads;if(failUnselected)throw std::runtime_error("unselected row 500 unreadable");}
+            return QStringList{QString("id-%1").arg(row),QString("value-%1").arg(row*5+1)};
+        });
+        ResultReport view;view.AddReport(doc);Require(view.SelectReport(doc.id),"lazy selected export report selection failed");
+        auto* table=view.findChild<QTableView*>("reportTable");Require(table&&table->model()->rowCount()==200&&!doc.table->GetIsComplete(),"lazy export preview unexpectedly materialized its source");
+        table->selectionModel()->select(table->model()->index(0,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
+        table->selectionModel()->select(table->model()->index(1,0),QItemSelectionModel::Select|QItemSelectionModel::Rows);
+        sourceReads=0;unselectedReads=0;row500Reads=0;outOfRangeReads=0;
+        const auto path=directory.filePath(failUnselected?"selected-lazy-fault.csv":"selected-lazy.csv");
+        ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return path;});view.findChild<QPushButton*>("exportSelectedReport")->click();
+        Wait([&]{return view.property("reportTaskBusy").toBool();});
+        Require(sourceReads==2&&unselectedReads==0&&row500Reads==0&&outOfRangeReads==0,
+            "selected lazy export read rows outside selected source rows");
+        Require(!doc.table->GetIsComplete()&&view.property("reportExportStatus").toString()=="completed"&&view.property("reportTaskError").toString().isEmpty(),
+            "selected lazy export materialized the source or failed its task status");
+        QFile file(path);Require(file.open(QIODevice::ReadOnly),"selected lazy export output unreadable");QBuffer buffer;buffer.setData(file.readAll());Require(buffer.open(QIODevice::ReadOnly),"selected lazy export buffer open failed");
+        const auto exported=ReadReportCsv(buffer,"selected lazy export");Require(exported.table->GetCount()==2&&exported.columns.size()==2
+            &&exported.columns[1].name=="native_measurement"&&exported.columns[1].quantity=="Original quantity"&&exported.columns[1].unit=="mm3",
+            "selected lazy export lost row count or original unit header");
+        Require(SameCells(exported.table->Read(0),QStringList{"id-0","value-1"})&&SameCells(exported.table->Read(1),QStringList{"id-1","value-6"}),
+            "selected lazy export changed exact original row values or order");
+    }
+    auto filtered=Document("filtered-lazy","Filtered quantity",0);filtered.columns={{"name",{},{},false},{"measurement","Filtered quantity","mm3",true}};
+    auto* owner=QThread::currentThread();std::atomic<ReportRowId> filterReads{0},ownerReads{0},unmatchedExportReads{0};
+    filtered.table=std::make_shared<ReportTable>(12,[&](ReportRowId row){if(QThread::currentThread()==owner)++ownerReads;else ++filterReads;const bool match=row==2||row==7||row==11;if(!match)++unmatchedExportReads;return QStringList{match?QString("match-%1").arg(row):QString("skip-%1").arg(row),QString::number(row*2)};});
+    ResultReport filterView;filterView.AddReport(filtered);filterView.SelectReport(filtered.id);filterReads=0;ownerReads=0;filterView.findChild<QLineEdit*>("reportSearch")->setText("match-");
+    Wait([&]{return filterView.property("reportRowsBusy").toBool();});
+    Require(filterView.property("reportRowsError").toString().isEmpty()&&filterView.GetFilteredCount()==3&&filterReads==12,
+        "filtered export fixture did not complete the full-table filter scan");
+    const auto hits=filterView.GetFilteredRows();Require(hits.size()==3&&hits[0]==2&&hits[1]==7&&hits[2]==11,"filter scan did not retain original matching row identities");
+    filterReads=0;ownerReads=0;unmatchedExportReads=0;const auto filteredPath=directory.filePath("filtered-lazy.csv");ReportTaskTestAccess::ChooseExportPath(filterView,[&](const QString&){return filteredPath;});
+    filterView.findChild<QPushButton*>("exportFilteredReport")->click();Wait([&]{return filterView.property("reportTaskBusy").toBool();});
+    Require(filterReads==3&&ownerReads==0&&unmatchedExportReads==0,"filtered export reread unselected source rows after the full filter scan");
+    QFile filteredFile(filteredPath);Require(filteredFile.open(QIODevice::ReadOnly),"filtered lazy output unreadable");QBuffer filteredBuffer;filteredBuffer.setData(filteredFile.readAll());filteredBuffer.open(QIODevice::ReadOnly);
+    const auto filteredCopy=ReadReportCsv(filteredBuffer,"filtered lazy export");Require(filteredCopy.table->GetCount()==3,"filtered lazy export row count changed");
+    for(ReportRowId i=0;i<3;++i){const auto original=hits[static_cast<int>(i)];Require(SameCells(filteredCopy.table->Read(i),QStringList{QString("match-%1").arg(original),QString::number(original*2)}),"filtered lazy export changed hit order or value");}
+}
+void CheckReportNumericLocales() {
+    const QLocale system=QLocale::system(),current=QLocale();const auto zero=current.zeroDigit();
+    std::cout<<"REPORT_LOCALE system="<<system.name().toStdString()<<" default="<<current.name().toStdString()
+        <<" zeroDigitU+"<<QString::number(zero.unicode(),16).toStdString()<<" zeroDigitIsDigit="<<zero.isDigit()<<std::endl;
+    QLocale safe=current;const bool fallback=!safe.zeroDigit().isDigit();if(fallback)safe=QLocale::c();safe.setNumberOptions(QLocale::OmitGroupSeparator);
+    if(fallback)std::cout<<"REPORT_LOCALE_FALLBACK applied=C because system zeroDigit is not a digit"<<std::endl;
+    ResultReport progressView;auto* progress=progressView.findChild<QProgressBar*>("reportExportProgress");
+    Require(progress!=nullptr,"report export progress bar is missing");progress->setRange(0,1000);progress->setValue(500);
+    Require(progress->locale().name()==QLocale::c().name()&&progress->locale().zeroDigit()==QLocale::c().zeroDigit()&&progress->text()=="50%",
+        "export progress bar did not use ASCII-digit C locale text");
+
+    auto baseline=Document("locale-baseline","metric",1),currentDoc=Document("locale-current","metric",1);
+    baseline.title="Baseline";currentDoc.title="Current";
+    ResultReport compareView;compareView.AddReport(baseline);compareView.AddReport(currentDoc);
+    Require(compareView.SelectReport(baseline.id),"locale comparison baseline selection failed");compareView.findChild<QPushButton*>("setReportBaseline")->click();
+    Require(compareView.SelectReport(currentDoc.id),"locale comparison current selection failed");compareView.show();
+    bool popupSeen=false;DrivePopupInteraction([&]{ReportTaskTestAccess::Compare(compareView);},[&]{
+        auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if(!dialog||dialog->parentWidget()!=&compareView||dialog->windowTitle()!="核对比较指标、单位与匹配依据")return false;
+        popupSeen=true;auto* distance=dialog->findChild<QDoubleSpinBox*>("reportDistanceTolerance");auto* tolerance=dialog->findChild<QDoubleSpinBox*>("reportValueTolerance");
+        Require(distance&&tolerance,"comparison numeric tolerance fields are missing or unnamed");
+        const auto localeMatches=[&](QDoubleSpinBox* box){return box->locale().name()==safe.name()&&box->locale().zeroDigit()==safe.zeroDigit();};
+        Require(localeMatches(distance)&&localeMatches(tolerance),"comparison tolerance fields do not follow the ParameterEditor safe-locale fallback");
+        distance->setValue(.01);tolerance->setValue(.125);
+        Require(distance->value()==.01&&tolerance->value()==.125,"setting comparison tolerances lost exact values");
+        Require(distance->text()==safe.toString(.01,'f',9)&&tolerance->text()==safe.toString(.125,'f',9),"comparison tolerance text does not use exact safe-locale nine-decimal formatting");
+        std::cout<<"REPORT_NUMERIC_CONTROLS progress="<<progress->text().toStdString()<<" distance="<<distance->text().toStdString()
+            <<" tolerance="<<tolerance->text().toStdString()<<" safeLocale="<<safe.name().toStdString()<<std::endl;
+        dialog->reject();return true;
+    },"comparison locale popup was not inspected");
+    Require(popupSeen&&!ReportTaskTestAccess::HasTask(compareView)&&!compareView.property("reportTaskBusy").toBool(),"rejected locale comparison admitted a task");
+    Require(QLocale()==current&&QLocale::system().name()==system.name(),"locale regression changed process default or system locale");
+    compareView.hide();
+}
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();CheckFileExports();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();CheckFileExports();CheckSelectedUnmaterializedExports();CheckReportNumericLocales();
 #if defined(MANUAL_ALIGNMENT)
     CheckFrozenAlignmentParameters();CheckInspectionPreparation();
 #endif

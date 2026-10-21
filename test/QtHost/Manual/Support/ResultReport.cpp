@@ -27,6 +27,7 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QProgressBar>
+#include <QLocale>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QHeaderView>
@@ -259,7 +260,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     layout->addLayout(reportActions);
     auto* taskFeedback=new QHBoxLayout;
     m_taskStatus=new QLabel(this);m_taskStatus->setObjectName("reportTaskStatus");m_taskStatus->setWordWrap(true);taskFeedback->addWidget(m_taskStatus,1);
-    m_exportProgress=new QProgressBar(this);m_exportProgress->setObjectName("reportExportProgress");m_exportProgress->setAccessibleName("报告导出进度");m_exportProgress->setRange(0,1000);m_exportProgress->hide();taskFeedback->addWidget(m_exportProgress);
+    m_exportProgress=new QProgressBar(this);m_exportProgress->setObjectName("reportExportProgress");m_exportProgress->setAccessibleName("报告导出进度");m_exportProgress->setLocale(QLocale::c());m_exportProgress->setRange(0,1000);m_exportProgress->hide();taskFeedback->addWidget(m_exportProgress);
     m_openExportFolder=new QPushButton("打开所在文件夹",this);m_openExportFolder->setObjectName("openReportExportFolder");m_openExportFolder->hide();taskFeedback->addWidget(m_openExportFolder);layout->addLayout(taskFeedback);
     connect(m_openExportFolder,&QPushButton::clicked,this,[this]{
         const auto path=property("reportExportPath").toString();
@@ -515,11 +516,19 @@ void ResultReport::StartExport(const QString& path,ReportRows rows,bool restrict
     if(path.isEmpty())throw std::invalid_argument("报告保存路径为空");
     auto state=std::make_shared<ExportState>();state->path=path;state->document=m_selected;
     state->rowCount=restricted?static_cast<ReportRowId>(rows.size()):m_selected.table->GetCount();
-    const auto doc=m_selected;
-    StartReportsTask([state,doc,rows=std::move(rows),restricted](const ReportCheckpoint& check){
+    auto doc=m_selected;
+    bool indexed=restricted;
+    if(restricted && !doc.table->GetIsComplete()){
+        const auto source=doc.table;
+        doc.table=std::make_shared<ReportTable>();
+        // 未物化的来源回调仍在 owner 的有界准备链读取；候选只包含请求的行，不准备未选中的正文。
+        doc.table->SetRows(rows.size(),[source,rows](ReportRowId index){return source->Read(rows[static_cast<std::size_t>(index)]);});
+        indexed=false;
+    }
+    StartReportsTask([state,doc,rows=std::move(rows),indexed](const ReportCheckpoint& check){
         QSaveFile output(state->path);output.setDirectWriteFallback(false);
         if(!output.open(QIODevice::WriteOnly))throw std::runtime_error(("无法打开报告输出文件："+output.errorString()).toStdString());
-        try{WriteReportCsv(output,doc,restricted?&rows:nullptr,check,[state](ReportRowId count){state->rowsWritten.store(count,std::memory_order_relaxed);});}
+        try{WriteReportCsv(output,doc,indexed?&rows:nullptr,check,[state](ReportRowId count){state->rowsWritten.store(count,std::memory_order_relaxed);});}
         catch(const ReportReadError&){state->readFailed.store(true);throw;}
         check();auto expected=ExportState::Phase::Writing;
         if(!state->phase.compare_exchange_strong(expected,ExportState::Phase::Committing))throw std::runtime_error("报告任务已取消");
@@ -949,8 +958,10 @@ void ResultReport::CompareSelected()
     auto* mode=new QComboBox(&dialog);mode->setObjectName("reportMatchMode");mode->addItems({"仅分布比较","稳定业务标识","唯一空间匹配"});form->addRow("匹配方式",mode);
     auto* confirmed=new QCheckBox("已确认编号跨报告稳定，或坐标属于同一坐标系（并已核对坐标单位）",&dialog);confirmed->setObjectName("reportMatchConfirmed");layout->addWidget(confirmed);
     auto* mapping=new QCheckBox("已核对重名列的映射与有效性定义",&dialog);mapping->setVisible(a.mappingRequired || b.mappingRequired);layout->addWidget(mapping);
-    auto* distance=new QDoubleSpinBox(&dialog);distance->setObjectName("reportDistanceTolerance");distance->setDecimals(9);distance->setRange(.000000001,1e12);distance->setValue(.01);form->addRow("空间距离容差 mm",distance);
-    auto* tolerance=new QDoubleSpinBox(&dialog);tolerance->setDecimals(9);tolerance->setRange(0,1e12);form->addRow("数值容差（基准单位）",tolerance);
+    auto numberLocale=QLocale();if(!numberLocale.zeroDigit().isDigit())numberLocale=QLocale::c();
+    numberLocale.setNumberOptions(QLocale::OmitGroupSeparator);
+    auto* distance=new QDoubleSpinBox(&dialog);distance->setObjectName("reportDistanceTolerance");distance->setLocale(numberLocale);distance->setDecimals(9);distance->setRange(.000000001,1e12);distance->setValue(.01);form->addRow("空间距离容差 mm",distance);
+    auto* tolerance=new QDoubleSpinBox(&dialog);tolerance->setObjectName("reportValueTolerance");tolerance->setLocale(numberLocale);tolerance->setDecimals(9);tolerance->setRange(0,1e12);form->addRow("数值容差（基准单位）",tolerance);
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);layout->addWidget(buttons);
     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     if(dialog.exec()!=QDialog::Accepted)return;
