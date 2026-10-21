@@ -326,6 +326,9 @@ ModulePanel* CreateCropTest(TestContext context,std::shared_ptr<CropHostFeature>
         if(!displayProblem.isEmpty())for(const auto* action:{"Start","Box","Plane","Sphere","Cylinder","KeepInside","RemoveInside"})disabled[action]=displayProblem;
         const bool busy=flow->pending||state.isPublishing||state.history.pendingRequestCount||state.history.isDragging;
         if(busy||!framesReady)for(const auto* action:{"Start","Previous","Next","Node","ResetPreview","FinishEditing","PruneSubtree","PruneDescendants","PruneOutsidePaths","BuildResult","SaveRoi"})disabled[action]="请等待当前操作与视图完成。";
+        // 新历史可先提交、后呈现；此时旧视图的就绪位不能让确认按钮提前可点。
+        if(state.history.appliedHead!=state.history.renderedHead)
+            disabled["FinishEditing"]="请等待当前裁剪预览在所有视图中更新完成。";
         if(!history.documentId)for(const auto* action:{"Box","Plane","Sphere","Cylinder","Previous","Next","Node","BuildResult","SaveRoi","CloseDocument","RestoreSource"})disabled[action]="请先创建裁剪文档。";
         if(!GetDataRevisionRefValid(state.outputRevision) && !GetDataRevisionRefValid(flow->viewedOutput))disabled["SelectOutput"]="当前文档没有已发布结果。";
         if(!flow->isConfirmed)disabled["BuildResult"]="请先确认当前裁剪预览；切换节点或来源后须重新确认。";

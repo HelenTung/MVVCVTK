@@ -243,6 +243,13 @@ bool Wait(const std::function<bool()>& done, int timeoutMs = 0)
         // 观察回调可能在退出事件循环时又触发视图更新；未到期限则继续等真正就绪。
     }
 }
+bool GetCropFramesReady(const QJsonObject& state)
+{
+    // 相同输入仍可能显示旧历史头；视图就绪位不能替代本次裁剪帧的身份。
+    return state["framesReady"].toBool() && !state["isBusy"].toBool()
+        && state["appliedHead"].isString() && state["renderedHead"].isString()
+        && state["appliedHead"] == state["renderedHead"];
+}
 void Check(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
@@ -577,6 +584,7 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
     panel->SetParameterPatch(action, patch);
     // 导航与数据变更的页面状态异步刷新；仍检查真实按钮，不绕过入口直接发请求。
     const bool ready = Wait([&] {
+        panel->Observe();
         const auto* current = panel->findChild<QPushButton*>("action_" + action);
         const auto* menu = panel->findChild<QToolButton*>("moreOperations")->menu();
         const auto* command = menu->findChild<QAction*>("command_" + action);
@@ -1608,6 +1616,14 @@ void SendCropDrag(TestWindow& window, const std::array<double,3>& fraction)
 void CheckCropWorkflow(TestWindow& window)
 {
     if (!GetEnabled(window, "Crop")) return;
+    QJsonObject projected{{"framesReady",true},{"isBusy",false},{"appliedHead","17"},{"renderedHead","0"}};
+    Check(!GetCropFramesReady(projected),"a ready view of the previous crop head cannot admit the next history operation");
+    projected["renderedHead"]="17";
+    Check(GetCropFramesReady(projected),"the idle crop operation becomes ready after its exact history head is presented");
+    projected["isBusy"]=true;
+    Check(!GetCropFramesReady(projected),"a busy crop remains unavailable even after the history heads match");
+    projected["isBusy"]=false;projected["framesReady"]=false;
+    Check(!GetCropFramesReady(projected),"matching history heads cannot replace unfinished view work");
     window.SetViewsVisible(true);
     auto* panel = window.GetModule("Crop");
     Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "all four crop views settle through events");
@@ -3383,7 +3399,22 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         }
         if (step["waitForCropFrames"].toBool()) {
             auto* crop = window.GetModule("Crop");
-            Check(crop && Wait([&] { crop->Observe(); return crop->GetObservedState()["framesReady"].toBool(); },
+            bool checkedUnavailable=false;
+            Check(crop && Wait([&] {
+                crop->Observe(); const auto state=crop->GetObservedState();
+                const bool isReady=GetCropFramesReady(state);
+                if(!isReady && !checkedUnavailable) {
+                    const auto* action=crop->findChild<QPushButton*>("action_FinishEditing");
+                    Check(action && !action->isEnabled() && !action->toolTip().isEmpty(),
+                        "unfinished crop presentation disables the actual FinishEditing command with a reason");
+                    const auto* primary=crop->findChild<QPushButton*>("businessPrimary");
+                    if(primary && primary->isVisible() && primary->property("businessAction")=="FinishEditing")
+                        Check(!primary->isEnabled() && !primary->toolTip().isEmpty(),
+                            "unfinished crop presentation disables the visible confirmation primary with a reason");
+                    checkedUnavailable=true;
+                }
+                return isReady;
+            },
                 static_cast<int>(timeout)), "crop business frames are ready before the next operation");
         }
         const auto checkpointPath = step["performanceCheckpoint"].toString();
