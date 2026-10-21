@@ -11,6 +11,8 @@
 #include <vtkObjectFactory.h>
 #include <vtkShaderProgram.h>
 #include <vtkVolumeProperty.h>
+#include <vtkVolumeInputHelper.h>
+#include <vtkVolumeTexture.h>
 #include <vtkWeakPointer.h>
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
@@ -100,6 +102,19 @@ public:
     void ReleaseGraphicsResources(vtkWindow* window) override {
         if (m_owner) { m_owner->m_gpuInputTime = 0; m_owner->m_isGpuAdmissionPending = true; }
         this->Superclass::ReleaseGraphicsResources(window);
+    }
+
+    void ClearInputResources(vtkWindow* window)
+    {
+        if (m_owner) {
+            m_owner->m_gpuInputTime = 0;
+            m_owner->m_isGpuAdmissionPending = true;
+        }
+        for (auto& input : this->AssembledInputs) {
+            if (input.second.Texture) {
+                input.second.ReleaseGraphicsResources(window);
+            }
+        }
     }
 
     bool SetEffectVolume(vtkVolume* volume)
@@ -1302,7 +1317,16 @@ bool VolumeStrategy::ClearGpuInput()
         // 持有的 volume/mask texture，再等待删除提交完成，随后才能采样余量。
         renderWindow->MakeCurrent();
         renderWindow->WaitForCompletion();
-        m_mapper->ReleaseGraphicsResources(renderWindow);
+        auto* context = vtkOpenGLRenderWindow::SafeDownCast(renderWindow);
+        // 同一有效上下文的无掩码输入只汰换纹理和传递表，保留可复用的绘制资源。
+        // 完整 mapper 释放会让 VTK 在 PreLoadData 后再次初始化并上传同一输入；
+        // 旧输入带掩码或上下文失效时仍沿用完整释放，保留原来的准入与恢复顺序。
+        const bool canReuseGraphics = !m_isGpuAdmissionPending && context
+            && m_gpuContext.GetPointer() == context
+            && m_gpuContextTime == context->GetContextCreationTime()
+            && !m_mapper->GetMaskInput();
+        if (canReuseGraphics) m_mapper->ClearInputResources(renderWindow);
+        else m_mapper->ReleaseGraphicsResources(renderWindow);
         renderWindow->WaitForCompletion();
         ++m_gpuReleaseCount;
         return true;
