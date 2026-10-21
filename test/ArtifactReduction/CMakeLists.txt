@@ -3,7 +3,7 @@ target_include_directories(mvvcvtk_tomopy_reference PRIVATE "${CMAKE_CURRENT_SOU
 target_compile_options(mvvcvtk_tomopy_reference PRIVATE /W3 /utf-8 /wd4244 /wd4305)
 set_target_properties(mvvcvtk_tomopy_reference PROPERTIES PROJECT_LABEL TomoPyReference C_STANDARD 11
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-    FOLDER "MVVCVTK/test/Automation/Reference")
+    FOLDER "MVVCVTK/test/Support")
 
 add_library(mvvcvtk_artifact_header_probe OBJECT ArtifactReductionHeaderProbe.cpp ArtifactCandidateReadProbe.cpp)
 target_link_libraries(mvvcvtk_artifact_header_probe PRIVATE MVVCVTK::ArtifactReduction)
