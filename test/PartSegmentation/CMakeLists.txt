@@ -45,6 +45,12 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
+# 同一测试程序另含手动性能模式：PartSegmentationTests edit-profile，不注册为 CTest。
+# 固定合成 128^3 标签体、32 个笔刷点和 2.0 mm 半径，连续执行 4 次；无需 RAW、额外参数或专用环境变量。
+# 手动运行时须能从 PATH 等 DLL 搜索位置找到锁定的 VTK runtime。
+# 控制台输出 EDIT_PROFILE（阶段耗时、体素访问数、所需字节数）；成功返回 0，任次编辑无标签或失败返回 1。
+# 省略 suite 参数时默认 all（不含 edit-profile），未知 suite 返回 1，不按缺数据跳过。
+# 本模式仅用于合成数据性能对照，不代表真实 CT 或 Host 全链验收。
 foreach(_mvvcvtk_part_suite IN ITEMS algorithm catalog lifecycle scope-lifecycle lineage display scale edit surface-product)
     add_test(
         NAME "PartSegmentation.${_mvvcvtk_part_suite}"
