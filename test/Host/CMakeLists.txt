@@ -51,6 +51,16 @@ add_test(NAME Host.AutoDisplayDefaults COMMAND mvvcvtk_host_runtime_tests defaul
 SetTestRuntime(Host.AutoDisplayDefaults mvvcvtk_host_runtime_tests)
 
 # 显式真实数据审计；仅依赖 Host，不随 Part Feature 开关消失，不安装。
+# 运行：HostLoadAudit raw sourceSide [Low|High|Ultra] [--range-audit] [--quality-audit]
+#       [--geometry spacingMm originX originY originZ] [--output directory]
+#       [--view-size pixels] [--frames count] [--timeout-seconds count]。
+# raw 须为无文件头的 float32 立方 RAW，sourceSide 为 2..8192，文件恰为 sourceSide^3 * 4 字节。
+# 默认 Ultra、等距 spacingMm=0.1537、LPS 原点 (0,0,0)；--geometry 接受正有限间距和三个有限原点分量。
+# 默认两个审计开关关闭、视图边长 256 像素（>0）、稳态帧数 0（>=0）、加载等待上限 300 秒（>0）。
+# --output 可选，指定时创建目录并输出 report.json 和四视图 PNG；省略时仅输出控制台结果。
+# 需要可用的 Windows OpenGL；手动运行时须能从 PATH 等 DLL 搜索位置找到锁定的 VTK runtime。
+# 工具不读取专用数据环境变量；缺必需参数、RAW 不存在/尺寸不符或审计失败时输出 [FAIL] 并返回 1，成功返回 0。
+# 不注册为缺数据即跳过的常规 CTest，运行时须显式提供真实数据。
 add_executable(host_load_audit HostLoadAudit.cpp)
 target_link_libraries(host_load_audit PRIVATE MVVCVTK::Host ${MVVCVTK_VTK_TARGETS} VTK::IOImage Psapi dxgi)
 SetTargetDefaults(host_load_audit)
