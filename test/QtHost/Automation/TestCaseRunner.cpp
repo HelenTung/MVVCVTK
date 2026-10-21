@@ -274,6 +274,20 @@ void Check(bool condition, const char* message)
     if (!condition) throw std::runtime_error(message);
     std::cout << "PASS: " << message << std::endl;
 }
+void CheckCropPendingConfirmation(ModulePanel* panel,const QJsonObject& state)
+{
+    // 正式 ROI 可在工具未激活时确认；可见主按钮的约束不能依赖 isActive。
+    const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+    if(primary && primary->isVisible() && primary->property("businessAction")=="FinishEditing")
+        Check(!primary->isEnabled() && !primary->toolTip().isEmpty(),
+            "unfinished crop presentation disables the visible confirmation primary with a reason");
+    // 后台面板的隐藏投影不代表当前可操作入口；活动页再核对真实菜单动作。
+    if(panel->isVisible() && state["isActive"].toBool()) {
+        const auto* action=GetCropConfirmationCommand(panel);
+        Check(action && action->isVisible() && !action->isEnabled() && !action->toolTip().isEmpty(),
+            "unfinished active crop presentation disables the actual FinishEditing menu command with a reason");
+    }
+}
 void CheckPopupInteraction()
 {
     constexpr int intervalMs=20;
@@ -2471,6 +2485,32 @@ void CheckSharedRoi(TestWindow& window)
     const auto historyNodes=crop->GetObservedState().value("nodes");
     Check(crop->GetObservedState()["appliedHead"]!=root,"history fixture selects a non-root crop node");
     GetComplete(window,Send(window,"Crop","PrepareRoi",{{"inputRoi",GetRefText(ref)}}),"ParametersCopied");
+    // 首次确认已结束交互工具；再次选择正式 ROI 后，确认入口仍应受待呈现帧约束。
+    const auto originalOpacity=window.GetSession()->GetRenderViewState({"primary-3d"})->material.opacity;
+    window.SetViewsVisible(false);
+    GetComplete(window,Send(window,"View","Set",{{"viewId","primary-3d"},{"opacity",originalOpacity>0.5?originalOpacity-0.125:originalOpacity+0.125}}),"Succeeded");
+    window.GetWorkflow().onNavigate("Crop","PrepareRoi",{});window.SetViewsVisible(false);
+    auto* roiConfirmation=crop->findChild<QPushButton*>("businessPrimary");
+    const bool inactivePending=Wait([&]{const auto state=crop->GetObservedState();return !state["isActive"].toBool()
+        && !state["framesReady"].toBool() && roiConfirmation->isVisible()
+        && roiConfirmation->property("businessAction")=="FinishEditing";},2000);
+    if(!inactivePending)DumpCropConfirmation(crop);
+    Check(inactivePending,"formal ROI exposes a visible confirmation primary while inactive with real view work pending");
+    const auto inactiveState=crop->GetObservedState();
+    CheckCropPendingConfirmation(crop,inactiveState);
+    bool brokenPrimaryRejected=false;
+    {
+        struct RestoreEnabled {QPushButton* button;bool enabled;~RestoreEnabled(){button->setEnabled(enabled);}} restore{roiConfirmation,roiConfirmation->isEnabled()};
+        roiConfirmation->setEnabled(true);
+        try {CheckCropPendingConfirmation(crop,inactiveState);}
+        catch(const std::runtime_error& error){brokenPrimaryRejected=std::string(error.what())=="unfinished crop presentation disables the visible confirmation primary with a reason";}
+    }
+    Check(brokenPrimaryRejected,"pending confirmation checks reject an enabled visible ROI primary even when crop is inactive");
+    window.SetViewsVisible(true);
+    Check(Wait([&]{return GetCropFramesReady(crop->GetObservedState()) && roiConfirmation->isEnabled();},2000),
+        "render notifications restore the inactive ROI confirmation primary without active refresh");
+    GetComplete(window,Send(window,"View","Set",{{"viewId","primary-3d"},{"opacity",originalOpacity}}),"Succeeded");
+    window.GetWorkflow().onNavigate("Crop","PrepareRoi",{});
     Check(Wait(framesReady),"formal ROI root selection reaches the displayed preview");
     Check(crop->GetObservedState()["documentId"]==document && crop->GetObservedState()["operationCount"]==historyOperations && crop->GetObservedState()["nodes"]==historyNodes
         && crop->GetObservedState()["appliedHead"]==root,"formal ROI selection preserves the document and history while selecting the build root");
@@ -3514,22 +3554,10 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         }
         if (step["waitForCropFrames"].toBool()) {
             auto* crop = window.GetModule("Crop");
-            bool checkedUnavailable=false;
             Check(crop && Wait([&] {
                 const auto state=crop->GetObservedState();
                 const bool isReady=GetCropFramesReady(state);
-                // 切换数据后，非编辑文档仍有历史；后台观察会更新状态，隐藏控件保留上次页面投影。
-                // 仅活动裁剪页存在可操作的确认入口，就绪及历史帧身份继续按原条件等待。
-                if(!isReady && !checkedUnavailable && crop->isVisible() && state["isActive"].toBool()) {
-                    const auto* action=GetCropConfirmationCommand(crop);
-                    Check(action && action->isVisible() && !action->isEnabled() && !action->toolTip().isEmpty(),
-                        "unfinished active crop presentation disables the actual FinishEditing menu command with a reason");
-                    const auto* primary=crop->findChild<QPushButton*>("businessPrimary");
-                    if(primary && primary->isVisible() && primary->property("businessAction")=="FinishEditing")
-                        Check(!primary->isEnabled() && !primary->toolTip().isEmpty(),
-                            "unfinished crop presentation disables the visible confirmation primary with a reason");
-                    checkedUnavailable=true;
-                }
+                if(!isReady)CheckCropPendingConfirmation(crop,state);
                 return isReady;
             },
                 static_cast<int>(timeout)), "crop business frames are ready before the next operation");
