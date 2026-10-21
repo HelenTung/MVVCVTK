@@ -158,8 +158,31 @@ void CheckModulePanelText(ModulePanel& panel)
     const auto footerMessage=QString("command footer gap %1 px, height %2, occupied %3, allowed %4").arg(gap).arg(footer->height()).arg(occupied).arg(allowed);
     Require(gap<=allowed,footerMessage.toStdString().c_str());
 }
+void CheckStatisticsCancel()
+{
+    BusinessStatistics statistics;
+    const double marker=12.345678901234567;
+    statistics.SetMarkers({QJsonObject{{"key","iso"},{"label","ISO"},{"value",marker},{"editable",true}}});
+    statistics.SetInteractionModes({"编辑 ISO"});statistics.findChild<QComboBox*>("histogramInteraction")->setCurrentIndex(1);
+    statistics.Cancel();auto* input=statistics.findChild<QLineEdit*>("histogramMarkerValue");const auto restored=input->text();
+    int changes=0;const auto connection=QObject::connect(input,&QLineEdit::textChanged,input,[&]{++changes;});
+    statistics.Cancel();statistics.Cancel();
+    Require(changes==0&&input->text()==restored,"repeated Cancel preserves the marker without redundant textChanged");
+    input->selectAll();QKeyEvent edit(QEvent::KeyPress,Qt::Key_9,Qt::NoModifier,"98.25");QApplication::sendEvent(input,&edit);
+    Require(input->text()!=restored,"cancel regression starts with an uncommitted numeric edit");
+    changes=0;statistics.Cancel();
+    Require(input->text()==restored&&changes==1,"Cancel restores an uncommitted marker edit with one textChanged");
+    statistics.Cancel();Require(changes==1,"canceling an already restored marker makes no further textChanged");
+    QFocusEvent focusIn(QEvent::FocusIn,Qt::TabFocusReason);QApplication::sendEvent(input,&focusIn);
+    Require(input->text()==QString::number(marker,'g',17),"Cancel retains the full precision behind the restored marker display");
+    statistics.SetMarkers({});changes=0;statistics.Cancel();
+    Require(input->text().isEmpty()&&changes==1,"Cancel clears the numeric field when no editable marker remains");
+    statistics.Cancel();Require(changes==1,"repeated Cancel keeps an empty marker field unchanged");
+    QObject::disconnect(connection);
+}
 void CheckWorkbenchV1(TestWindow& window)
 {
+    CheckStatisticsCancel();
     {
         QTemporaryDir directory;Require(directory.isValid(),"startup Stop regression has isolated layout settings");const auto saved=qApp->property("workbenchLayoutPath");qApp->setProperty("workbenchLayoutPath",directory.filePath("startup.ini"));
         {TestWindow initializing;initializing.BuildSession();Require(!initializing.GetIsReady()&&initializing.GetSession(),"phased initialization returns after the owner Session stage");Require(initializing.StopSession(),"Stop can finish between initialization phases");QCoreApplication::processEvents();Require(!initializing.GetIsReady(),"queued initialization cannot resume after Stop");}
