@@ -28,6 +28,7 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QPixmap>
 #include <QTableView>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -67,6 +68,8 @@ public:
 namespace {
 constexpr int reportWaitTimeoutMs=30000;
 void Require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+// Qt 5.14 的 QList 等号在当前 MSVC 中引用已移除的 stdext；逐格比较保持同一精确判据。
+bool SameCells(const QStringList& a,const QStringList& b){return a.size()==b.size()&&std::equal(a.cbegin(),a.cend(),b.cbegin());}
 template<class F> void Wait(F pending) {
     QElapsedTimer elapsed;elapsed.start();
     do {QCoreApplication::processEvents(QEventLoop::AllEvents,10);}while(pending() && elapsed.elapsed()<reportWaitTimeoutMs);
@@ -690,7 +693,7 @@ void CheckFileExports() {
     view.findChild<QPushButton*>("exportSelectedReport")->click();Wait([&]{return view.property("reportTaskBusy").toBool();});
     QFile selectedFile(selectedPath);Require(selectedFile.open(QIODevice::ReadOnly),"selected-row export target unreadable");QBuffer selectedBuffer;selectedBuffer.setData(selectedFile.readAll());selectedBuffer.open(QIODevice::ReadOnly);
     const auto selected=ReadReportCsv(selectedBuffer,"selected export");Require(selected.table->GetCount()==2,"selected export row count changed");
-    Require(selected.table->Read(0)==QStringList{exactId[1],exactValue[1],exactStatus[1]}&&selected.table->Read(1)==QStringList{exactId[3],exactValue[3],exactStatus[3]},"selected export changed selected row order or exact values");
+    Require(SameCells(selected.table->Read(0),QStringList{exactId[1],exactValue[1],exactStatus[1]})&&SameCells(selected.table->Read(1),QStringList{exactId[3],exactValue[3],exactStatus[3]}),"selected export changed selected row order or exact values");
     ReportTaskTestAccess::ChooseExportPath(view,[](const QString&){return QString();});view.findChild<QPushButton*>("exportReportCsv")->click();
     Require(!view.property("reportTaskBusy").toBool()&&view.property("reportExportStatus").toString()!="writing","cancelled save dialog started an export task");
     ShortWriteDevice shortWrite(19);bool writeFailed=false;try{WriteReportCsv(shortWrite,doc);}catch(const std::runtime_error& e){writeFailed=std::string(e.what()).find("write")!=std::string::npos||std::string(e.what()).find("写")!=std::string::npos;}
@@ -709,7 +712,7 @@ void CheckFileExports() {
     QFile stillOriginal(lockedPath);Require(stillOriginal.open(QIODevice::ReadOnly)&&stillOriginal.readAll()=="original-bytes","commit failure changed locked target bytes");
     Require(view.property("reportExportStatus").toString()=="failed"&&view.property("reportTaskError").toString().startsWith("报告保存失败")
         &&view.property("reportExportRows").toLongLong()==4,"locked target did not reach and report QSaveFile commit failure");
-    QDir directoryCheck(directory.path());Require(directoryCheck.entryList({"*locked.csv*"},QDir::Files|QDir::Hidden)==QStringList{"locked.csv"},"commit failure left QSaveFile temporary artifact");
+    QDir directoryCheck(directory.path());Require(SameCells(directoryCheck.entryList({"*locked.csv*"},QDir::Files|QDir::Hidden),QStringList{"locked.csv"}),"commit failure left QSaveFile temporary artifact");
 #endif
     struct ExportGate final {
         std::promise<void> release;std::shared_future<void> future=release.get_future().share();std::atomic<bool> entered{false},opened{false};
@@ -733,7 +736,7 @@ void CheckFileExports() {
         else Require(!QFile::exists(cancelPath),"cancelled export published a partial target");
         Require(cancelView.property("reportExportStatus").toString()=="cancelled"&&cancelView.property("reportTaskError").toString().isEmpty(),"cooperative cancellation was reported as a worker error");
         const auto expected=existing?QStringList{name}:QStringList{};QDir cancelResidue(directory.path());
-        Require(cancelResidue.entryList({"*"+name+"*"},QDir::Files|QDir::Hidden)==expected,"cancelled export left a QSaveFile temporary artifact");
+        Require(SameCells(cancelResidue.entryList({"*"+name+"*"},QDir::Files|QDir::Hidden),expected),"cancelled export left a QSaveFile temporary artifact");
     }
     {
         ResultReport lateView;const auto gate=std::make_shared<ExportGate>();ReleaseExportGate release{gate};
@@ -752,7 +755,7 @@ void CheckFileExports() {
             &&lateView.property("reportExportPath").toString()==path,"late cancellation misreported a committed file as cancelled");
         QFile input(path);Require(input.open(QIODevice::ReadOnly),"late-cancel committed file unreadable");const auto copy=ReadReportCsv(input,"late cancellation");
         Require(copy.table->GetCount()==4,"late cancellation altered the committed file");
-        for(ReportRowId row=0;row<4;++row)Require(copy.table->Read(row)==QStringList{QString::number(row),QString::number(row+1)},"late cancellation changed a committed cell");
+        for(ReportRowId row=0;row<4;++row)Require(SameCells(copy.table->Read(row),QStringList{QString::number(row),QString::number(row+1)}),"late cancellation changed a committed cell");
     }
     const auto stressRows=[](){const auto text=qEnvironmentVariable("MVVCVTK_REPORT_STRESS_ROWS");if(text.isEmpty())return ReportRowId(200003);bool ok=false;const auto value=text.toLongLong(&ok);Require(ok&&value>0&&value<=(std::numeric_limits<ReportRowId>::max()-7)/3,"invalid report export stress row count");return value;}();
     ResultReport stress;auto large=Document("large-export","stress quantity",0);large.columns={{"row_id",{},{},false},{"value",{}, {},false}};
@@ -777,7 +780,7 @@ void CheckFileExports() {
     const auto exportMs=admissionMs+run.elapsed();
     QFile stressFile(stressPath);Require(stressFile.open(QIODevice::ReadOnly),"large export file unreadable");QBuffer stressBuffer;stressBuffer.setData(stressFile.readAll());stressBuffer.open(QIODevice::ReadOnly);const auto stressCopy=ReadReportCsv(stressBuffer,"large export");
     Require(stressCopy.table->GetCount()==stressRows&&metrics->reads==stressRows&&!metrics->wrongThread.load()&&!gaps.isEmpty(),"large export row count, owner heartbeat or worker read-thread identity incorrect");
-    for(ReportRowId row=0;row<stressRows;++row){const auto cells=stressCopy.table->Read(row);Require(cells==QStringList{QString::number(row),QString::number(row*3+7)},"large CSV row failed independent exact-value formula check");}
+    for(ReportRowId row=0;row<stressRows;++row){const auto cells=stressCopy.table->Read(row);Require(SameCells(cells,QStringList{QString::number(row),QString::number(row*3+7)}),"large CSV row failed independent exact-value formula check");}
     std::sort(gaps.begin(),gaps.end());const auto percentile=[&](double p){return gaps.isEmpty()?qint64(0):gaps[static_cast<int>(p*(gaps.size()-1))];};
     qint64 over100=0,over1000=0,maxGap=0;for(const auto gap:gaps){if(gap>100)++over100;if(gap>1000)++over1000;maxGap=std::max(maxGap,gap);}
     std::cout<<"REPORT_EXPORT_STRESS rows="<<stressRows<<" admissionMs="<<admissionMs<<" totalMs="<<exportMs<<" ownerEvents="<<gaps.size()<<" maxMs="<<maxGap<<" p95Ms="<<percentile(.95)<<" over100ms="<<over100<<" over1s="<<over1000<<" workerReadThread=true"<<std::endl;
