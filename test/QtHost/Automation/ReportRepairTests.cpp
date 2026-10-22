@@ -1013,6 +1013,8 @@ void CheckBoundedReportStop() {
 void CheckReportStop(TestWindow& window) {
     auto* view=dynamic_cast<ResultReport*>(window.findChild<QWidget*>("resultReport"));
     Require(view!=nullptr,"host report stop fixture has no report owner");
+    window.GetWorkflow().onShowReports({},{});QCoreApplication::processEvents();
+    Require(view->isVisible(),"host report reopen fixture must exercise a visible widget's showEvent");
     Wait([&]{return view->GetGenerationPending();});
     std::promise<void> release;const auto ready=release.get_future().share();
     struct ReleaseOnExit final {std::promise<void>& release;bool opened=false;~ReleaseOnExit(){if(!opened)release.set_value();}} unblock{release};
