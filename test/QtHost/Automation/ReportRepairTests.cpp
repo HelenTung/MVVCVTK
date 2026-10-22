@@ -1,5 +1,6 @@
 #include "ReportWorkflowTests.h"
 #include "TestCaseRunner.h"
+#include "App/TestWindow.h"
 #include "Support/ResultReport.h"
 #include "Support/ReportComparison.h"
 #include "Support/ReportStorage.h"
@@ -970,7 +971,78 @@ void CheckReportNumericLocales() {
     Require(QLocale()==current&&QLocale::system().name()==system.name(),"locale regression changed process default or system locale");
     compareView.hide();
 }
+void CheckBoundedReportStop() {
+    for(const bool scan:{false,true}) {
+    ResultReport view;
+    auto release=std::make_shared<std::promise<void>>();const auto ready=release->get_future().share();
+    auto entered=std::make_shared<std::atomic<bool>>(false);
+    if(scan) {
+        auto doc=Document("stop-scan","metric",0);auto* owner=QThread::currentThread();
+        doc.table=std::make_shared<ReportTable>(500,[entered,ready,owner](ReportRowId row){
+            if(row==0&&QThread::currentThread()!=owner){entered->store(true);
+                if(ready.wait_for(std::chrono::milliseconds(reportWaitTimeoutMs))!=std::future_status::ready)throw std::runtime_error("stop scan fixture guard");}
+            return QStringList{QString::number(row),"1"};
+        });view.AddReport(doc);view.findChild<QLineEdit*>("reportSearch")->setText("1");
+        Wait([&]{return !entered->load();});
+        // 同时保留一个等待旧扫描的 task；停止不能为两个 future 分别等待。
+        ReportTaskTestAccess::Start(view,[](const ReportCheckpoint& check)->ReportDocument{check();return {};});
+    } else {
+    ReportTaskTestAccess::Start(view,[entered,ready](const ReportCheckpoint& check)->ReportDocument {
+        entered->store(true);
+        if(ready.wait_for(std::chrono::milliseconds(reportWaitTimeoutMs))!=std::future_status::ready)throw std::runtime_error("stop fixture release guard");
+        check();return {};
+    });
+    Wait([&]{return !entered->load();});
+    }
+    std::promise<void> returned;auto completed=returned.get_future();
+    auto watchdog=std::async(std::launch::async,[&]{
+        const bool beforeRelease=completed.wait_for(std::chrono::seconds(1))==std::future_status::ready;
+        release->set_value();return beforeRelease;
+    });
+    QElapsedTimer elapsed;elapsed.start();const bool stopped=view.CancelTasks(true);const auto stopMs=elapsed.elapsed();returned.set_value();
+    const bool beforeRelease=watchdog.get();
+    std::cout<<"REPORT_STOP blockedWorker=true scan="<<scan<<" returnedBeforeRelease="<<beforeRelease<<" elapsedMs="<<stopMs<<std::endl;
+    Wait([&]{return ReportTaskTestAccess::HasTask(view)||ReportTaskTestAccess::HasScan(view);});
+    Require(beforeRelease,"final report stop waited for a blocked reader instead of retaining it for retry");
+    Require(!stopped&&view.CancelTasks(true),"pending report stop reported success or could not be retried");
+    view.show();bool rejected=false;
+    try{ReportTaskTestAccess::Start(view,[](const ReportCheckpoint&)->ReportDocument{return {};});}catch(const std::runtime_error&){rejected=true;}
+    Require(rejected,"showing a finally stopped report reopened task admission");
+    }
+}
+void CheckReportStop(TestWindow& window) {
+    auto* view=dynamic_cast<ResultReport*>(window.findChild<QWidget*>("resultReport"));
+    Require(view!=nullptr,"host report stop fixture has no report owner");
+    window.GetWorkflow().onShowReports({},{});QCoreApplication::processEvents();
+    Require(view->isVisible(),"host report reopen fixture must exercise a visible widget's showEvent");
+    Wait([&]{return view->GetGenerationPending();});
+    std::promise<void> release;const auto ready=release.get_future().share();
+    struct ReleaseOnExit final {std::promise<void>& release;bool opened=false;~ReleaseOnExit(){if(!opened)release.set_value();}} unblock{release};
+    auto entered=std::make_shared<std::atomic<bool>>(false);auto source=std::make_shared<const int>(42);std::weak_ptr<const int> lease=source;
+    ReportTaskTestAccess::Start(*view,[entered,ready,source](const ReportCheckpoint& check)->ReportDocument {
+        entered->store(true);
+        if(ready.wait_for(std::chrono::milliseconds(reportWaitTimeoutMs))!=std::future_status::ready)throw std::runtime_error("host stop fixture release guard");
+        check();return {};
+    });source.reset();Wait([&]{return !entered->load();});
+    const auto session=window.GetSession();const auto reports=view->GetReportIds();
+    QElapsedTimer clock;clock.start();
+    Require(!window.StopSession()&&!window.StopSession(),"host stop reported completion while its report reader was blocked");
+    const auto stopMs=clock.elapsed();
+    Require(!window.close()&&window.isVisible(),"host close destroyed or hid the owner of an unfinished report reader");
+    QCoreApplication::processEvents();
+    Require(window.GetSession()==session&&window.GetIsReady()&&view->GetReportIds()==reports&&!lease.expired(),
+        "pending report stop released Host, reports or the reader source");
+    view->hide();window.GetWorkflow().onShowReports({},{});window.GetWorkflow().onShowBusinessReport({},{});
+    Require(!view->isVisible(),"host stopping callbacks reopened its report dock");
+    view->show();bool rejected=false;
+    try{ReportTaskTestAccess::Start(*view,[](const ReportCheckpoint&)->ReportDocument{return {};});}catch(const std::runtime_error&){rejected=true;}
+    Require(rejected,"showing a report during host stop reopened task admission");
+    release.set_value();unblock.opened=true;Wait([&]{return ReportTaskTestAccess::HasTask(*view);});
+    Require(lease.expired()&&view->CancelTasks(true),"completed host report task retained its source or could not stop");
+    std::cout<<"PASS: host report Stop/close return pending before reader release, retain owner and source, and reject reopening; twoStopCallsMs="<<stopMs<<std::endl;
+}
 void CheckReportRepairs() {
+    CheckBoundedReportStop();
     CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();CheckFileExports();CheckExportLifetimes();CheckSelectedUnmaterializedExports();CheckReportNumericLocales();
 #if defined(MANUAL_ALIGNMENT)
     CheckFrozenAlignmentParameters();CheckInspectionPreparation();
