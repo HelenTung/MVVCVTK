@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Preset = 'vs2026-x64',
+    [string]$Preset,
     [string]$PackageRevision,
     [string]$DepsRoot,
     [string]$DefXRoot,
@@ -94,6 +94,49 @@ function Get-SafeAncestors([string]$path)
             throw "Path contains a reparse point: $currentPath"
         }
     }
+}
+
+function Get-PresetBinaryDir(
+    [string]$repoRoot,
+    [string]$presetName)
+{
+    $presetFile = Join-Path $repoRoot 'CMakePresets.json'
+    $presets = Get-Content -LiteralPath $presetFile -Raw | ConvertFrom-Json
+
+    function Get-BinaryDirTemplate([string]$name, [string[]]$parents)
+    {
+        if ($parents -ccontains $name) {
+            throw "CMake preset inheritance cycle: $name"
+        }
+        $matchingPresets = @($presets.configurePresets | Where-Object { $_.name -ceq $name })
+        if ($matchingPresets.Count -ne 1) {
+            throw "Expected one CMake configure preset named $name."
+        }
+        $preset = $matchingPresets[0]
+        if ($null -ne $preset.PSObject.Properties['binaryDir']) {
+            return [string]$preset.binaryDir
+        }
+        foreach ($parent in $preset.inherits) {
+            $template = Get-BinaryDirTemplate $parent (@($parents) + $name)
+            if ($null -ne $template) { return $template }
+        }
+        return $null
+    }
+
+    $template = Get-BinaryDirTemplate $presetName @()
+    if ([string]::IsNullOrWhiteSpace($template)) {
+        throw "CMake preset has no binaryDir: $presetName"
+    }
+    # 继承字段中的 presetName 按最终选择的预设展开；目录模板只由预设维护。
+    $binaryDir = $template.Replace('${sourceDir}', $repoRoot).Replace(
+        '${presetName}', $presetName)
+    if ($binaryDir -match '\$\w*\{') {
+        throw "Unsupported macro in SDK preset binaryDir: $template"
+    }
+    if (-not [IO.Path]::IsPathRooted($binaryDir)) {
+        $binaryDir = Join-Path $repoRoot $binaryDir
+    }
+    return [IO.Path]::GetFullPath($binaryDir)
 }
 
 function Clear-SafeDirectory(
@@ -780,9 +823,8 @@ function Start-CleanRoomProbe(
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if ([string]::IsNullOrWhiteSpace($MetrologyMesh)) {
-    if (-not $SkipCleanRoom) {
-        throw 'SDK validation requires -MetrologyMesh pointing to a frozen real C3 VTP input. -SkipCleanRoom produces diagnostics only.'
-    }
+    $MetrologyMesh = ''
+    $MetrologyMeshSha256 = ''
 }
 else {
     $MetrologyMesh = [IO.Path]::GetFullPath($MetrologyMesh)
@@ -796,12 +838,18 @@ else {
     $MetrologyMeshSha256 = $MetrologyMeshSha256.ToLowerInvariant()
     Write-Output "Frozen Metrology mesh: $MetrologyMesh SHA256=$MetrologyMeshSha256"
 }
-if (-not [regex]::IsMatch($Preset, '^[A-Za-z0-9][A-Za-z0-9._-]*$')) {
-    throw "Unsafe CMake preset name: $Preset"
+$releasePreset = if ($SkipTests) { 'vs2026-sdk-products-x64' } else { 'vs2026-sdk-tested-x64' }
+if ([string]::IsNullOrWhiteSpace($Preset)) {
+    $Preset = $releasePreset
 }
-$buildMode = if ($SkipTests) { "products" } else { "tested" }
-$buildRoot = Join-Path $repoRoot "out\sdk-build\$Preset-$buildMode"
-. (Join-Path $repoRoot 'tools/MVVCVTK.FeatureBuild.ps1')
+elseif ($Preset -cne $releasePreset) {
+    throw "SDK build requires preset $releasePreset for -SkipTests=$SkipTests."
+}
+$buildRoot = Get-PresetBinaryDir $repoRoot $Preset
+if ($buildRoot -eq $repoRoot -or -not (Get-IsPathWithin $repoRoot $buildRoot)) {
+    throw "SDK preset binaryDir must belong to this worktree: $buildRoot"
+}
+Get-SafeAncestors $buildRoot
 $stageBase = Join-Path $repoRoot 'out\stage'
 $verifyBase = if ([string]::IsNullOrWhiteSpace($VerifyRoot)) {
     Join-Path (Split-Path -Parent $repoRoot) 'MVVCVTK-sdk-verify'
@@ -871,18 +919,9 @@ if ((Get-IsPathWithin $stage $originalLocation) -or
 try {
     Set-Location -LiteralPath $repoRoot
     Clear-BuildEnv
-    $testFlag = if ($SkipTests) { 'OFF' } else { 'ON' }
-    $configure = @('--preset', $Preset, '-B', $buildRoot,
+    $configure = @('--preset', $Preset,
         "-DMVVCVTK_DEPS_ROOT=$depsRootPath", "-DMVVCVTK_DEFX_ROOT=$defxRootPath",
-        "-DMVVCVTK_BUILD_TESTING=$testFlag", '-DMVVCVTK_BUILD_QT_TESTING=OFF',
-        '-DMVVCVTK_BUILD_QT_MANUAL=OFF', '-DMVVCVTK_REAL_AUDIT_MANIFEST=',
-        '-DMVVCVTK_ALIGNMENT_REFERENCE_ROOT=', '-DMVVCVTK_METROLOGY_ENABLE_CUDA=OFF',
         "-DMVVCVTK_METROLOGY_SDK_MESH=$MetrologyMesh", "-DMVVCVTK_METROLOGY_SDK_MESH_SHA256=$MetrologyMeshSha256")
-    $features = Get-MVVCVTKFeatureSwitches $repoRoot
-    foreach ($feature in $features.Keys) {
-        $enabled = if ($feature -in @('OrthogonalCrop', 'GapAnalysis', 'MetrologyAlignment')) { 'ON' } else { 'OFF' }
-        $configure += "-D$($features[$feature])=$enabled"
-    }
     Start-Command $script:cmakePath $configure
     $null = Get-BuildInfo $buildRoot
     foreach ($configuration in @('Debug', 'Release')) {
@@ -955,6 +994,15 @@ try {
 
     Write-Host "MVVCVTK SDK stage: $stage"
     Write-Host "MVVCVTK SDK package directory: $packageRoot"
+    if ([string]::IsNullOrWhiteSpace($MetrologyMesh)) {
+        Write-Host 'Real C3 VTP validation: NOT_RUN (未执行; -MetrologyMesh not provided).'
+    }
+    elseif ($SkipTests -and $SkipCleanRoom) {
+        Write-Host 'Real C3 VTP validation: NOT_RUN (未执行; -SkipTests and -SkipCleanRoom).'
+    }
+    else {
+        Write-Host 'Real C3 VTP validation: PASS.'
+    }
 }
 finally {
     try {

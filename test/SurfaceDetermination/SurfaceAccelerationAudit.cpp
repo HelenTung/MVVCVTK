@@ -1,5 +1,8 @@
 #include "SurfaceDeterminationAlgorithm.h"
+#ifndef MVVCVTK_SURFACE_REFERENCE_AUDIT
+// 正式几何依赖候选版本的块存储；原始参考结果仍使用独立的旧容器。
 #include "SurfaceGeometryStorage.h"
+#endif
 #include "SurfaceDeterminationTestSupport.h"
 #include "SurfaceMeasurementSerialization.h"
 #include <Windows.h>
@@ -45,7 +48,12 @@ int main(int argc, char **argv) {
                 if(streamBinary || metricsOnly)return 2;
                 streamBinary=option=="--binary-stdout";metricsOnly=!streamBinary;
             } else if(option=="--prepare-formal") {
+#ifdef MVVCVTK_SURFACE_REFERENCE_AUDIT
+                std::cerr << "--prepare-formal is supported only by SurfaceAccelerationAudit.\n";
+                return 2;
+#else
                 if(prepareFormal)return 2;prepareFormal=true;
+#endif
             } else if(option=="--full-measurements") {
                 if(fullMeasurements)return 2;
                 fullMeasurements=true;
@@ -139,15 +147,19 @@ int main(int argc, char **argv) {
             result=SurfaceDeterminationAlgorithm::BuildSurface(
                 source,params,workingLimit,[]{return false;},{},inputs);
         }
-        std::shared_ptr<const SurfacePreparedGeometry> formal;
+        bool formalPrepared=false;
         double formalMs=0;
+#ifndef MVVCVTK_SURFACE_REFERENCE_AUDIT
+        std::shared_ptr<const SurfacePreparedGeometry> formal;
         if(prepareFormal && result.status==SurfaceResultStatus::Succeeded) {
             const auto formalStart=std::chrono::steady_clock::now();
             formal=PrepareSurfaceGeometry(result,"RAS",params.componentSelection==SurfaceComponentSelection::All && !params.analysisRoi,[]{return false;});
             formalMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-formalStart).count();
             if(!formal || !formal->mesh || !formal->mesh->GetValid() || formal->mesh->GetPointValues().size()!=result.points.size()*3
                 || formal->mesh->GetTriangleIndices().size()!=result.triangleIndices.size())throw std::runtime_error("Formal block storage did not preserve the complete result.");
+            formalPrepared=true;
         }
+#endif
         const auto elapsed =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         PROCESS_MEMORY_COUNTERS_EX after{};
@@ -242,7 +254,7 @@ int main(int argc, char **argv) {
              << ",\"componentParallelMs\":" << result.componentParallelMs
 
 #endif
-             << ",\"formalPrepared\":" << (formal?"true":"false") << ",\"formalPreparationMs\":" << formalMs
+             << ",\"formalPrepared\":" << (formalPrepared?"true":"false") << ",\"formalPreparationMs\":" << formalMs
              << ",\"beforePrivateBytes\":" << before.PrivateUsage
              << ",\"peakPrivateBytes\":" << after.PeakPagefileUsage
              << ",\"retainedPrivateBytes\":" << after.PrivateUsage
