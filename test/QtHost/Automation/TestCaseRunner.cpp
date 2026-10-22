@@ -19,6 +19,7 @@
 #include "Support/SceneNodes.h"
 #include "Support/CatalogNodes.h"
 #include "Support/ResultReport.h"
+#include "Support/ReferenceDataSource.h"
 #include "ReportWorkflowTests.h"
 #include "Support/WorkbenchStyle.h"
 #include <QTabWidget>
@@ -38,6 +39,7 @@
 #include <QEventLoop>
 #include <QAbstractEventDispatcher>
 #include <QFile>
+#include <QSaveFile>
 #include <QDir>
 #include <QFileInfo>
 #include <QFileDialog>
@@ -48,9 +50,14 @@
 #include <QImage>
 #include <QSet>
 #include <QTimer>
+#include <QThread>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QMouseEvent>
+#include <QFocusEvent>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
@@ -63,8 +70,22 @@
 #include <QLabel>
 #include <QMenu>
 #include <QContextMenuEvent>
+#include <QPointer>
+#include <QElapsedTimer>
+#include <QList>
+#include <QProxyStyle>
+#include <QStyleOptionComboBox>
+#include <exception>
+#include <stdexcept>
+#include <QAbstractItemModel>
+#include <QKeyEvent>
+#include <QSettings>
 #include <iostream>
 #include <functional>
+#include <optional>
+#include <chrono>
+#include <future>
+#include <atomic>
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -73,6 +94,7 @@
 #include <vector>
 #include <cmath>
 #include <vtkCommand.h>
+#include <vtkCallbackCommand.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkActor.h>
@@ -96,8 +118,112 @@
 #include <vtkPropPicker.h>
 #include <vtkVolume.h>
 #include <QVTKOpenGLNativeWidget.h>
+#include <QDockWidget>
+#include <QToolBar>
+#include <QTabBar>
 namespace Manual {
+void DrivePopupInteraction(const std::function<void()>& open,const std::function<bool()>& complete,
+    const char* failureMessage,int timeoutMs)
+{
+    constexpr int pollMs=20;
+    if(timeoutMs<pollMs)throw std::invalid_argument("弹窗夹具期限不能短于原生轮询周期");
+    const auto closePopups=[] {
+        QList<QPointer<QWidget>> widgets;
+        for(auto* widget:QApplication::topLevelWidgets())widgets.append(widget);
+        for(const auto& widget:widgets)if(widget && widget->isVisible()
+            && (widget->windowType()==Qt::Popup || widget->isModal())) {
+            if(auto* dialog=qobject_cast<QDialog*>(widget.data()))dialog->reject();
+            else widget->close();
+        }
+    };
+    bool completed=false,expired=false;std::exception_ptr failure;
+    QElapsedTimer elapsed;elapsed.start();
+    QTimer retry,deadline;
+    // Qt5 Win32 中单次 queued 回调可在同步弹窗入口重入时先于 QMenu 出现而被消费。
+    // 原生 Coarse/20ms 持续等目标；独立期限还能结束交互回调进入的嵌套弹窗。
+    // 5s 默认值沿用本文件既有文件选择器夹具期限，不改变业务或渲染的期限。
+    retry.setTimerType(Qt::CoarseTimer);retry.setInterval(pollMs);
+    deadline.setTimerType(Qt::CoarseTimer);deadline.setSingleShot(true);
+    const auto stop=[&]{retry.stop();deadline.stop();};
+    const auto expire=[&]{expired=true;retry.stop();closePopups();};
+    QObject::connect(&deadline,&QTimer::timeout,&deadline,[&] {
+        const auto remaining=timeoutMs-elapsed.elapsed();
+        if(remaining>0){deadline.start(static_cast<int>(std::max<qint64>(pollMs,remaining)));return;}
+        expire();
+    });
+    QObject::connect(&retry,&QTimer::timeout,&retry,[&] {
+        if(elapsed.elapsed()>=timeoutMs){expire();return;}
+        // 回调返回成功后，同步 open 仍可能停在原生嵌套循环，期限保留到它真正返回。
+        try {if(complete()){completed=true;retry.stop();}}
+        catch(...){failure=std::current_exception();retry.stop();closePopups();}
+    });
+    retry.start();deadline.start(timeoutMs);
+    try {open();}
+    catch(...){stop();closePopups();throw;}
+    stop();
+    if(failure)std::rethrow_exception(failure);
+    if(expired || !completed || elapsed.elapsed()>=timeoutMs){closePopups();throw std::runtime_error(failureMessage);}
+}
 namespace {
+QPixmap GrabWindow(TestWindow& window)
+{
+    QElapsedTimer clock;clock.start();const auto result=window.grab();window.SetSynchronousSpan("Automation.Capture",clock.nsecsElapsed());return result;
+}
+bool GetComboEnabled(QComboBox* combo,int index) { return combo->model()->flags(combo->model()->index(index,0)).testFlag(Qt::ItemIsEnabled); }
+void SelectComboIndex(QComboBox* combo,int index)
+{
+    constexpr int pollMs=20,timeoutMs=5000;
+    auto* view=combo->view();auto* popup=view->window();
+    const bool alreadyOpen=!popup->isHidden() || QApplication::activePopupWidget()==popup;
+    if(combo->currentIndex()==index && !alreadyOpen)return;
+    QElapsedTimer elapsed;elapsed.start();
+    const auto waitFor=[&](const std::function<bool()>& ready,const char* message) {
+        while(!ready() && elapsed.elapsed()<timeoutMs) {
+            QEventLoop loop;QTimer observer;observer.setTimerType(Qt::CoarseTimer);observer.setInterval(pollMs);
+            QObject::connect(&observer,&QTimer::timeout,&loop,[&]{if(ready() || elapsed.elapsed()>=timeoutMs)loop.quit();});
+            observer.start();loop.exec();
+        }
+        if(elapsed.elapsed()>=timeoutMs || !ready()) {
+            combo->hidePopup();popup->close();throw std::runtime_error(message);
+        }
+    };
+    const auto waitUntilClosed=[&] {
+        waitFor([&]{return popup->isHidden() && !view->isVisible() && QApplication::activePopupWidget()!=popup;},
+            "原生下拉列表未在夹具期限内关闭");
+    };
+    if(alreadyOpen) {
+        waitFor([&]{return popup->isVisible() && view->isVisible() && QApplication::activePopupWidget()==popup;},
+            "已有下拉列表未在夹具期限内就绪");
+        if(combo->currentIndex()==index || !combo->isVisible()) {
+            QKeyEvent cancel(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(view,&cancel);
+            waitUntilClosed();
+            if(combo->currentIndex()==index)return;
+        }
+    }
+    if(combo->isVisible()){
+        // 展开后移动高亮，Enter 才选定；关闭列表时逐项按 Down 会实际打开每个中间表单。
+        // Qt5 的展开动画会延后真正的 popup；未激活就按 Enter，动画结束可能重现旧列表。
+        // 证据见任务报告“下拉列表动画与残留弹窗”；原生 Coarse/20ms 同时避免 Win32 短 timer 唤醒缺口。
+        if(popup->isHidden()) {
+            QKeyEvent open(QEvent::KeyPress,Qt::Key_Down,Qt::AltModifier);QApplication::sendEvent(combo,&open);
+        }
+        waitFor([&]{return popup->isVisible() && view->isVisible() && QApplication::activePopupWidget()==popup;},
+            "原生下拉列表未在夹具期限内就绪");
+        QKeyEvent first(QEvent::KeyPress,Qt::Key_Home,Qt::NoModifier);QApplication::sendEvent(view,&first);
+        for(int attempt=0;view->currentIndex().row()!=index&&attempt<=combo->count();++attempt){
+            QKeyEvent next(QEvent::KeyPress,view->currentIndex().row()<index?Qt::Key_Down:Qt::Key_Up,Qt::NoModifier);QApplication::sendEvent(view,&next);
+        }
+        QKeyEvent enter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier);QApplication::sendEvent(view,&enter);
+        const bool selected=combo->currentIndex()==index;
+        if(!selected){combo->hidePopup();popup->close();}
+        waitUntilClosed();
+        if(!selected)throw std::runtime_error("原生下拉列表未选中目标条目");
+        return;
+    }
+    QKeyEvent home(QEvent::KeyPress,Qt::Key_Home,Qt::NoModifier);QApplication::sendEvent(combo,&home);
+    for(int i=0;i<index;++i){QKeyEvent next(QEvent::KeyPress,Qt::Key_Down,Qt::NoModifier);QApplication::sendEvent(combo,&next);}
+}
+
 bool Wait(const std::function<bool()>& done, int timeoutMs = 0)
 {
     QElapsedTimer elapsed;elapsed.start();
@@ -119,10 +245,147 @@ bool Wait(const std::function<bool()>& done, int timeoutMs = 0)
         // 观察回调可能在退出事件循环时又触发视图更新；未到期限则继续等真正就绪。
     }
 }
+bool GetCropFramesReady(const QJsonObject& state)
+{
+    // 相同输入仍可能显示旧历史头；视图就绪位不能替代本次裁剪帧的身份。
+    return state["framesReady"].toBool() && !state["isBusy"].toBool()
+        && state["appliedHead"].isString() && state["renderedHead"].isString()
+        && state["appliedHead"] == state["renderedHead"];
+}
+QAction* GetCropConfirmationCommand(ModulePanel* panel)
+{
+    return panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_FinishEditing");
+}
+bool GetCropConfirmationEnabled(ModulePanel* panel)
+{
+    const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+    if(primary && primary->isVisible() && primary->property("businessAction")=="FinishEditing")return primary->isEnabled();
+    const auto* command=GetCropConfirmationCommand(panel);return command && command->isEnabled();
+}
+void DumpCropConfirmation(ModulePanel* panel)
+{
+    const auto* command=GetCropConfirmationCommand(panel);const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+    std::cerr<<"CROP_NOTIFICATION_STATE command="<<(command && command->isEnabled())
+        <<" primary="<<(primary?primary->property("businessAction").toString().toStdString():"missing")
+        <<" primaryEnabled="<<(primary && primary->isEnabled())<<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
+}
 void Check(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
     std::cout << "PASS: " << message << std::endl;
+}
+void CheckCropPendingConfirmation(ModulePanel* panel,const QJsonObject& state)
+{
+    // 正式 ROI 可在工具未激活时确认；可见主按钮的约束不能依赖 isActive。
+    const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+    if(primary && primary->isVisible() && primary->property("businessAction")=="FinishEditing")
+        Check(!primary->isEnabled() && !primary->toolTip().isEmpty(),
+            "unfinished crop presentation disables the visible confirmation primary with a reason");
+    // 后台面板的隐藏投影不代表当前可操作入口；活动页再核对真实菜单动作。
+    if(panel->isVisible() && state["isActive"].toBool()) {
+        const auto* action=GetCropConfirmationCommand(panel);
+        Check(action && action->isVisible() && !action->isEnabled() && !action->toolTip().isEmpty(),
+            "unfinished active crop presentation disables the actual FinishEditing menu command with a reason");
+    }
+}
+void CheckPopupInteraction()
+{
+    constexpr int intervalMs=20;
+    QMenu delayed;auto* action=delayed.addAction("目标动作");int triggers=0,earlyChecks=0;
+    QObject::connect(action,&QAction::triggered,&delayed,[&]{++triggers;});
+    DrivePopupInteraction([&] {
+        QEventLoop beforePopup;QTimer pause;pause.setTimerType(Qt::CoarseTimer);pause.setSingleShot(true);
+        QObject::connect(&pause,&QTimer::timeout,&beforePopup,&QEventLoop::quit);
+        pause.start(intervalMs*3);beforePopup.exec();delayed.exec(QPoint(30,30));
+    },[&] {
+        if(QApplication::activePopupWidget()!=&delayed){++earlyChecks;return false;}
+        action->trigger();delayed.close();return true;
+    },"delayed popup fixture did not complete");
+    Check(earlyChecks>0 && triggers==1 && !delayed.isVisible(),
+        "popup interaction retries readiness before dispatching the real action exactly once");
+
+    // 原生菜单取消可让 exec 提前返回；下面三项需要入口一直阻塞到夹具主动结束。
+    // 先显示 modal 固定就绪前提，再开始原有的交互期限，避免把窗口准备调度当成被测超时。
+    QDialog outer;QDialog unavailable(&outer);outer.setWindowTitle("外层窗口");unavailable.setWindowTitle("等待目标");
+    outer.setModal(true);outer.show();unavailable.setModal(true);unavailable.show();QCoreApplication::processEvents();
+    bool expired=false,sawExpectedPopup=QApplication::activeModalWidget()==&unavailable;
+    Check(sawExpectedPopup&&outer.isVisible()&&unavailable.isVisible(),"nested native modal fixture is ready before its interaction deadline");
+    QElapsedTimer waited;waited.start();
+    try {
+        DrivePopupInteraction([&]{unavailable.exec();},
+            [&]{sawExpectedPopup|=QApplication::activeModalWidget()==&unavailable;return false;},
+            "intentional popup fixture timeout",intervalMs*5);
+    }catch(const std::runtime_error& error){expired=std::string(error.what())=="intentional popup fixture timeout";}
+    Check(expired && sawExpectedPopup && waited.elapsed()>=intervalMs*5 && !outer.isVisible() && !unavailable.isVisible(),
+        "popup fixture timeout closes nested popups and reports an explicit failure");
+
+    QDialog failing;failing.setWindowTitle("断言失败");failing.setModal(true);failing.show();QCoreApplication::processEvents();
+    Check(QApplication::activeModalWidget()==&failing,"native assertion fixture is ready before entering its nested loop");
+    bool preserved=false,attempted=false,nativeLoopReturned=false;
+    try {
+        DrivePopupInteraction([&]{failing.exec();nativeLoopReturned=true;},[&]()->bool {
+            if(QApplication::activeModalWidget()!=&failing)return false;
+            attempted=true;
+            throw std::runtime_error("intentional popup assertion");
+        },"popup assertion fixture did not complete");
+    }catch(const std::runtime_error& error){preserved=std::string(error.what())=="intentional popup assertion";}
+    Check(preserved && attempted && nativeLoopReturned && !failing.isVisible(),"popup assertion is rethrown after closing the native nested loop");
+
+    QDialog unfinished;unfinished.setWindowTitle("回调已完成但入口未返回");unfinished.setModal(true);unfinished.show();QCoreApplication::processEvents();
+    Check(QApplication::activeModalWidget()==&unfinished,"native completion fixture is ready before entering its nested loop");
+    bool dispatched=false,unfinishedExpired=false;
+    try {
+        DrivePopupInteraction([&]{unfinished.exec();},[&] {
+            if(QApplication::activeModalWidget()!=&unfinished)return false;
+            dispatched=true;return true;
+        },"completed callback left its popup open",intervalMs*5);
+    }catch(const std::runtime_error& error){unfinishedExpired=std::string(error.what())=="completed callback left its popup open";}
+    Check(dispatched && unfinishedExpired && !unfinished.isVisible(),
+        "popup deadline remains armed after completion until the synchronous entry returns");
+
+    struct RestoreEffects {
+        bool general=QApplication::isEffectEnabled(Qt::UI_General),combo=QApplication::isEffectEnabled(Qt::UI_AnimateCombo);
+        ~RestoreEffects(){QApplication::setEffectEnabled(Qt::UI_General,general);QApplication::setEffectEnabled(Qt::UI_AnimateCombo,combo);}
+    } restoreEffects;
+    QApplication::setEffectEnabled(Qt::UI_General,true);QApplication::setEffectEnabled(Qt::UI_AnimateCombo,true);
+    class AnimatedComboStyle final:public QProxyStyle {
+        int styleHint(QStyle::StyleHint hint,const QStyleOption* option,const QWidget* widget,QStyleHintReturn* data)const override {
+            return hint==QStyle::SH_ComboBox_Popup?0:QProxyStyle::styleHint(hint,option,widget,data);
+        }
+    };
+    class DelayedCombo final:public QComboBox {
+    public:
+        explicit DelayedCombo(int delayMs) {
+            opening.setTimerType(Qt::CoarseTimer);opening.setSingleShot(true);opening.setInterval(delayMs);
+            QObject::connect(&opening,&QTimer::timeout,this,[this]{++openings;QComboBox::showPopup();});
+        }
+        void showPopup()override{opening.start();returnedBeforeVisible=QApplication::activePopupWidget()!=view()->window();}
+        QTimer opening;bool returnedBeforeVisible=false;int openings=0;
+    } combo(intervalMs*3);
+    auto* style=new AnimatedComboStyle;style->setParent(&combo);combo.setStyle(style);
+    combo.addItems({"第一项","第二项","第三项"});combo.resize(240,32);combo.show();QCoreApplication::processEvents();
+    int activations=0;QObject::connect(&combo,QOverload<int>::of(&QComboBox::activated),&combo,[&](int){++activations;});
+    QStyleOptionComboBox option;option.initFrom(&combo);
+    Check(QApplication::isEffectEnabled(Qt::UI_AnimateCombo) && !combo.testAttribute(Qt::WA_DontShowOnScreen)
+        && !combo.style()->styleHint(QStyle::SH_ComboBox_Popup,&option,&combo),"native combo animation is enabled for the popup fixture");
+    SelectComboIndex(&combo,2);
+    Check(combo.returnedBeforeVisible && combo.openings==1 && combo.currentIndex()==2 && activations==1
+        && combo.view()->window()->isHidden() && QApplication::activePopupWidget()!=combo.view()->window(),
+        "delayed animated combo selects once and closes before navigation continues");
+    combo.QComboBox::showPopup();SelectComboIndex(&combo,2);
+    Check(combo.currentIndex()==2 && activations==1 && combo.view()->window()->isHidden(),
+        "same-index selection closes its existing popup without activating another operation");
+
+    QMenu blocked;blocked.addAction("保持原菜单动作");bool sawResidual=false,residualExpired=false;
+    QTimer residue;residue.setTimerType(Qt::CoarseTimer);residue.setSingleShot(true);residue.setInterval(intervalMs);
+    QObject::connect(&residue,&QTimer::timeout,&combo,[&]{combo.QComboBox::showPopup();});
+    try {
+        DrivePopupInteraction([&]{residue.start();blocked.exec(QPoint(30,30));},[&] {
+            sawResidual|=QApplication::activePopupWidget()==combo.view()->window();return false;
+        },"unrelated combo popup cannot satisfy a menu interaction",intervalMs*25);
+    }catch(const std::runtime_error& error){residualExpired=std::string(error.what())=="unrelated combo popup cannot satisfy a menu interaction";}
+    Check(sawResidual && residualExpired && !blocked.isVisible() && combo.view()->window()->isHidden()
+        && combo.currentIndex()==2 && activations==1,"unrelated residual combo is rejected and closed without dispatching a menu action");
 }
 QJsonObject GetCaptureScene(const HostSceneViewState& scene)
 {
@@ -229,7 +492,7 @@ void SaveBusinessCapture(TestWindow& window, const QString& folder, const QJsonO
             images.emplace_back(name,std::move(frame));
         }
         Check(images.size()==4,"business capture contains one 3D and three 2D views");
-        const auto context=window.grab();Check(!context.isNull(),"business window context is captured in memory");
+        const auto context=GrabWindow(window);Check(!context.isNull(),"business window context is captured in memory");
         const auto after=GetBusinessCaptureState(window,step);
         if(!after||*before!=*after)return false; // 整组丢弃，等待现有公共状态稳定后重拍。
 
@@ -296,11 +559,17 @@ bool GetEnabled(TestWindow& window, const QString& module)
     if (!enabled) std::cout << "NOT BUILT: " << module.toStdString() << std::endl;
     return enabled;
 }
+QPoint GetNodePoint(QTreeWidget* tree,QTreeWidgetItem* item)
+{
+    const auto row=tree->visualItemRect(item);
+    return QRect(tree->columnViewportPosition(0),row.top(),tree->columnWidth(0),row.height()).intersected(tree->viewport()->rect()).center();
+}
 void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers modifiers = Qt::NoModifier)
 {
     const auto key = item->data(0, Qt::UserRole).toJsonObject()["id"].toString();
-    if(auto* statistics=tree->window()->findChild<QToolButton*>("showBusinessStatistics"))statistics->setChecked(true);
-    if(auto* results=tree->window()->findChild<QTabWidget*>("workbenchResultTabs"))results->setCurrentIndex(1);
+    auto* main=qobject_cast<QMainWindow*>(tree->window());if(!main)main=tree->parentWidget()->findChild<QMainWindow*>();
+    for(auto* parent=tree->parentWidget();parent;parent=parent->parentWidget())if(auto* host=qobject_cast<QMainWindow*>(parent)){main=host;break;}
+    if(main){if(auto* scene=main->findChild<QDockWidget*>("sceneDock")){scene->show();scene->raise();}if(auto* filter=main->findChild<QComboBox*>("sceneView"))filter->setCurrentIndex(1);}
     for (auto* page = tree->parentWidget(); page; page = page->parentWidget()) {
         auto* tabs = qobject_cast<QTabWidget*>(page->parentWidget() ? page->parentWidget()->parentWidget() : nullptr);
         if (tabs && tabs->indexOf(page) >= 0) { tabs->setCurrentWidget(page); break; }
@@ -311,14 +580,36 @@ void ClickNode(QTreeWidget* tree, QTreeWidgetItem* item, Qt::KeyboardModifiers m
     Check(item != nullptr, "scene selection resolves stable ID after pending updates");
     for (auto* parent = item->parent(); parent; parent = parent->parent()) parent->setExpanded(true);
     tree->scrollToItem(item); tree->doItemsLayout();
-    const auto point = tree->visualItemRect(item).center();
+    const auto point = GetNodePoint(tree,item);
+    Check(tree->itemAt(point)==item,"scene selection clicks the visible object-name cell");
     QMouseEvent press(QEvent::MouseButtonPress, point, Qt::LeftButton, Qt::LeftButton, modifiers);
     QMouseEvent release(QEvent::MouseButtonRelease, point, Qt::LeftButton, Qt::NoButton, modifiers);
     QApplication::sendEvent(tree->viewport(), &press); QApplication::sendEvent(tree->viewport(), &release);
 }
+void NavigateTool(TestWindow& window,const QString& module,const QString& action={})
+{
+    auto* panel=window.GetModule(module);Check(panel,"navigation names a compiled module");
+    if(window.findChild<QDockWidget*>("parameterDock")->isHidden())window.findChild<QAction*>("toggleParameterDock")->trigger();
+    const int stage=QStringList{"Data","View","Rotation","Artifact"}.contains(module)?0:module=="Surface"?1:QStringList{"Roi","Crop"}.contains(module)?2:3;
+    auto* stages=window.findChild<QTabBar*>("workflowSteps");Check(stages&&stages->isVisible()&&stages->isTabEnabled(stage),"the new workflow stage is visible and enabled");
+    const auto point=stages->tabRect(stage).center();
+    QMouseEvent press(QEvent::MouseButtonPress,point,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier),release(QEvent::MouseButtonRelease,point,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+    QApplication::sendEvent(stages,&press);QApplication::sendEvent(stages,&release);QCoreApplication::processEvents();
+    if(!panel->isVisible()){
+        auto* tools=window.findChild<QToolBar*>("contextToolbar");QAction* entry=nullptr;
+        for(auto* candidate:tools->actions())if(candidate->data().toString()==module)entry=candidate;
+        auto* button=entry?qobject_cast<QToolButton*>(tools->widgetForAction(entry)):nullptr;
+        Check(button&&button->isVisible()&&button->isEnabled(),"the new contextual module button is visible and enabled");button->click();QCoreApplication::processEvents();
+    }
+    Check(panel->isVisible(),"actual workflow and contextual buttons reveal the requested module");
+    if(!action.isEmpty()){
+        auto* choices=panel->findChild<QComboBox*>("parameterTabs");const auto index=choices->findData(action);
+        if(index>=0){Check(choices->isVisible()&&GetComboEnabled(choices,index),"the single operation selector exposes the requested form");SelectComboIndex(choices,index);QCoreApplication::processEvents();}
+    }
+}
 std::uint64_t Click(TestWindow& window, const QString& module, const QString& action, const QJsonObject& patch = {}, int timeoutMs = 2000)
 {
-    auto* panel = window.GetModule(module); window.GetWorkflow().onNavigate(module, action, {});
+    auto* panel = window.GetModule(module); NavigateTool(window,module,action);
     // 普通模块从会话命令上下文执行；ROI 保存保留当前草稿和对象选择。
     if(module!="Roi") {
         auto* tree=panel->GetCatalogTree();ClickNode(tree,tree->topLevelItem(0));
@@ -399,7 +690,7 @@ void CheckFourViewGeometry(TestWindow& window)
 {
     const auto views = window.findChildren<QVTKOpenGLNativeWidget*>(); const auto original = window.size();
     auto* layoutChoice = window.findChild<QComboBox*>("viewLayout");
-    layoutChoice->setCurrentIndex(layoutChoice->findData("FourViews"));QCoreApplication::processEvents();
+    window.findChild<QAction*>("viewLayout_FourViews")->trigger();QCoreApplication::processEvents();
     const auto sameSize = [&] {
         if (views.size() != 4) return false;
         int minWidth = views.front()->width(), maxWidth = minWidth, minHeight = views.front()->height(), maxHeight = minHeight;
@@ -412,14 +703,17 @@ void CheckFourViewGeometry(TestWindow& window)
             && std::all_of(views.begin(),views.end(),[](const auto* view){return view->width()>=view->minimumWidth() && view->height()>=view->minimumHeight();});
     };
     Check(window.minimumSize()!=window.maximumSize(),"manual window has a resizable default size");
-    Check(Wait(sameSize,3000),"four-view layout has equal image regions inside the current window");
+    const bool equal=Wait(sameSize,3000);
+    if(!equal)for(const auto* view:views)std::cerr<<"Viewport geometry "<<view->objectName().toStdString()<<'='<<view->width()<<'x'<<view->height()<<std::endl;
+    Check(equal,"four-view layout has equal image regions inside the current window");
     const auto windows = window.GetSession()->GetRenderViewStates();
     auto* primary = window.findChild<QVTKOpenGLNativeWidget*>("primary3D");
     const auto primarySize = primary->size();
     auto* renderWindow = primary->renderWindow();
     layoutChoice->setCurrentIndex(layoutChoice->findData("ThreeDOnly")); QCoreApplication::processEvents();
-    Check(Wait([&] { return primary->width() > primarySize.width() && primary->height() > primarySize.height(); },3000),
-        "3D-only layout expands the existing primary viewport");
+    const bool expanded=Wait([&] { return primary->width() > primarySize.width() && primary->height() > primarySize.height(); },3000);
+    if(!expanded)std::cerr<<"3D geometry before="<<primarySize.width()<<"x"<<primarySize.height()<<" actual="<<primary->width()<<"x"<<primary->height()<<std::endl;
+    Check(expanded,"3D-only layout expands the existing primary viewport");
     for (const auto* view : views) if (view != primary) Check(!view->isVisible(), "slice viewports are hidden in 3D-only layout");
     Check(primary->renderWindow() == renderWindow && window.GetSession()->GetRenderViewStates().size() == windows.size(),
         "layout switching preserves the original render windows and host view identities");
@@ -435,30 +729,33 @@ void CheckFourViewGeometry(TestWindow& window)
 }
 void CheckUiAndRecords(TestWindow& window)
 {
-    auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
-    auto* tabs = window.findChild<QTabBar*>("featureTabs");
+    window.findChild<QToolButton*>("toggleObjectColumn")->setChecked(true);
+    window.findChild<QToolButton*>("toggleParameterColumn")->setChecked(true);
+    QCoreApplication::processEvents();
+    auto* workspaces = window.findChild<QComboBox*>("workspaceTabs");
+    auto* tabs = window.findChild<QComboBox*>("featureTabs");
     auto* pages = window.findChild<QStackedWidget*>("parameterPages");
     auto* browsers = window.findChild<QStackedWidget*>("browserStack");
-    Check(workspaces && workspaces->count() == 3 && tabs && tabs->shape() == QTabBar::RoundedNorth,
+    Check(workspaces && workspaces->count()==4 && tabs && window.findChild<QTabBar*>("workflowSteps")->isVisible(),
         "task workspaces organize horizontal module navigation");
     QSet<QString> moduleIds;
-    QStringList remembered{"", "", ""};
+    QStringList remembered{"","","",""};
     {
-        const QStringList groups[]{ {"Data","View","Rotation"},{"Roi","Crop","Artifact","Part","Surface"},{"Alignment","Wall","Gap"} };
-        for(int group=0;group<3;++group) {
+        const QStringList groups[]{{"Data","View","Rotation","Artifact"},{"Surface"},{"Roi","Crop"},{"Part","Alignment","Wall","Gap"}};
+        for(int group=0;group<4;++group) {
             const bool hasModules=std::any_of(groups[group].begin(),groups[group].end(),[&](const QString& id){return GetEnabled(window,id);});
-            Check(workspaces->isTabEnabled(group)==hasModules,"workspace availability follows its compiled business modules");
+            Check(GetComboEnabled(workspaces,group)==hasModules,"workspace availability follows its compiled business modules");
             if(!hasModules)continue;
             workspaces->setCurrentIndex(group);
             for (int i = 0; i < tabs->count(); ++i) {
                 tabs->setCurrentIndex(i);
-                const auto id = tabs->tabData(i).toString(); moduleIds.insert(id);
+                const auto id = tabs->itemData(i).toString(); moduleIds.insert(id);
                 auto* module = window.GetModule(id);
                 Check(groups[group].contains(id) && module && !module->GetActions().isEmpty(),"group navigation shows only compiled business pages");
                 Check(pages->currentWidget() == module && browsers->currentWidget() == module->GetBrowser(),
                     "module identity keeps its parameter page and source browser synchronized");
             }
-            remembered[group]=tabs->tabData(tabs->currentIndex()).toString();
+            remembered[group]=tabs->itemData(tabs->currentIndex()).toString();
         }
     }
     int enabled=0;for(const auto* id:{"Data","View","Rotation","Roi","Crop","Artifact","Part","Surface","Alignment","Wall","Gap"})if(GetEnabled(window,id))++enabled;
@@ -466,27 +763,33 @@ void CheckUiAndRecords(TestWindow& window)
     if(GetEnabled(window,"Part"))Check(moduleIds.contains("Part")
         && window.GetModule("PartEdit") == window.GetModule("Part"), "segmentation and editing share one compiled page");
     for (int group = 0; group < workspaces->count(); ++group) {
-        if(!workspaces->isTabEnabled(group))continue;
+        if(!GetComboEnabled(workspaces,group))continue;
         workspaces->setCurrentIndex(group);
-        Check(tabs->tabData(tabs->currentIndex()).toString() == remembered[group], "each workspace remembers its last selected module");
+        Check(tabs->itemData(tabs->currentIndex()).toString() == remembered[group], "each workspace remembers its last selected module");
     }
     window.GetWorkflow().onNavigate("Data", "Load", {});
-    Check(workspaces->currentIndex() == 0 && tabs->tabData(tabs->currentIndex()) == "Data", "cross-workspace navigation returns to input");
-    auto* diagnostics = window.findChild<QToolButton*>("toggleDiagnostics");
-    auto* details = window.findChild<QWidget*>("diagnosticDetails");
-    Check(diagnostics && details && details->isHidden() && window.findChild<QLabel*>("latestMessage")->isVisible(),
-        "latest feedback stays visible while detailed diagnostics are collapsed");
+    Check(workspaces->currentIndex() == 0 && tabs->itemData(tabs->currentIndex()) == "Data", "cross-workspace navigation returns to input");
+    Check(window.GetModule("Data")->GetFeedback().isEmpty(),"navigation instructions stay in help and the log without reserving fixed feedback height");
+    auto* diagnostics=window.findChild<QAction*>("showDiagnostics");
+    auto* details=window.findChild<QWidget*>("diagnosticDetails");
+    auto* showResults=window.findChild<QToolButton*>("showBusinessStatistics");
+    auto* help=window.GetModule("Data")->findChild<QToolButton*>("showOperationHelp");help->setChecked(true);
+    Check(diagnostics && details && details->isHidden() && !window.findChild<QWidget*>("diagnosticBar")
+        && window.GetModule("Data")->findChild<QLabel*>("businessNext")->isVisible()
+        && !window.GetModule("Data")->findChild<QLabel*>("businessNext")->text().isEmpty(),
+        "module guidance is available through the visible help control without a bottom message strip");
+    help->setChecked(false);
     const auto compactSize=window.size();
-    diagnostics->click();Check(Wait([&]{return details->isVisible() && window.size()==compactSize;},3000),"diagnostics expand within the unchanged outer window");
-    window.grab().save("diagnostics-expanded.png");diagnostics->click();Check(Wait([&]{return !details->isVisible() && window.size()==compactSize;},3000),"closing diagnostics keeps the prior outer size");
-    auto* objectToggle=window.findChild<QToolButton*>("toggleObjectColumn");auto* objects=window.findChild<QWidget*>("objectColumn");objectToggle->click();Check(objects->isHidden(),"object sidebar can be collapsed");objectToggle->click();Check(objects->isVisible(),"object sidebar can be restored");
+    diagnostics->trigger();Check(Wait([&]{return details->isVisible() && window.size()==compactSize;},3000),"diagnostics expand within the unchanged outer window");
+    GrabWindow(window).save("diagnostics-expanded.png");showResults->setChecked(false);Check(Wait([&]{return !details->isVisible() && window.size()==compactSize;},3000),"closing diagnostics keeps the prior outer size");
+    auto* objectToggle=window.findChild<QToolButton*>("toggleObjectColumn");auto* objects=window.findChild<QDockWidget*>("sceneDock");objectToggle->click();Check(objects->isHidden(),"object sidebar can be collapsed");objectToggle->click();Check(objects->isVisible(),"object sidebar can be restored");
     const auto resized=compactSize+QSize(40,20);window.resize(resized);
     Check(Wait([&]{return window.size()==resized;},3000),"user can resize the main window beyond its default size");
-    window.resize(compactSize);QCoreApplication::processEvents();window.grab().save("workbench-default.png");
+    window.resize(compactSize);QCoreApplication::processEvents();GrabWindow(window).save("workbench-default.png");
     window.showMaximized();Check(Wait([&]{return window.isMaximized();},3000),"main window can be maximized");QCoreApplication::processEvents();
-    diagnostics->click();
+    diagnostics->trigger();
     Check(Wait([&]{return window.isMaximized() && details->isVisible();},3000),"diagnostics keep a maximized window maximized");
-    diagnostics->click();Check(Wait([&]{return window.isMaximized();},3000),"closing diagnostics restores the previous maximized state");
+    showResults->setChecked(false);Check(Wait([&]{return window.isMaximized();},3000),"closing diagnostics restores the previous maximized state");
     window.showNormal();window.resize(compactSize);QCoreApplication::processEvents();
     Check(window.findChild<QToolButton*>("testTools")->menu()->findChild<QAction*>("performanceCapture")
         && !window.findChild<QPushButton*>("stopCalculation")->isEnabled(), "diagnostic tools are grouped and idle stop is disabled");
@@ -531,16 +834,17 @@ void CheckUiAndRecords(TestWindow& window)
         auto* page = window.GetModule(name); if (page->GetActions().isEmpty()) continue;
         const QString initial = QString(name) == "Artifact" ? "Ring" : QString(name) == "Surface" ? "GlobalAutomatic" : "Start";
         window.GetWorkflow().onNavigate(name, initial, {});
-        auto* groups = page->findChild<QTabBar*>("parameterTabs"); const auto before = window.GetRecords().GetRecords()["records"].toArray().size();
-        for (int i=0; i<groups->count(); ++i) if (groups->isTabEnabled(i)) {
-            Check(groups->tabData(i) != "Stop" && groups->tabData(i) != "Cancel" && groups->tabData(i) != "Clear", "parameter tabs exclude stop, cancel and clear commands");
+        auto* groups = page->findChild<QComboBox*>("parameterTabs"); const auto before = window.GetRecords().GetRecords()["records"].toArray().size();
+        for (int i=0; i<groups->count(); ++i) if (GetComboEnabled(groups,i)) {
+            Check(groups->itemData(i) != "Stop" && groups->itemData(i) != "Cancel" && groups->itemData(i) != "Clear", "parameter tabs exclude stop, cancel and clear commands");
             groups->setCurrentIndex(i);
         }
         Check(window.GetRecords().GetRecords()["records"].toArray().size() == before, "parameter group navigation never submits an operation");
         page->SelectAction(initial);
         const auto stop = page->GetActions().contains("Stop") ? QString("Stop") : QString("Cancel");
         page->SelectAction(stop);
-        Check(page->GetParameterEditor(initial)->isVisible() && page->findChild<QPushButton*>("action_" + stop)->isVisible(),
+        Check(page->GetParameterEditor(initial)->isVisible() && window.findChild<QPushButton*>("stopCalculation")->isVisible()
+            && page->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_"+stop),
             "stop remains a direct button without replacing the active algorithm parameters");
     }
     auto* view = window.GetModule("View");
@@ -901,19 +1205,20 @@ std::uint64_t ClickNodeAction(TestWindow& window, QTreeWidget* tree, QTreeWidget
     // 工作台的来源/历史已位于视图区；先结束“隐藏视图也可提交输入”的独立场景。
     window.SetViewsVisible(true);
     item=FindNode(tree,nodeId);Check(item!=nullptr,"scene context target survives business-page navigation");
-    ClickNode(tree, item); tree->scrollToItem(tree->currentItem()); tree->doItemsLayout();
+    ClickNode(tree, item); item=FindNode(tree,nodeId);tree->scrollToItem(item);tree->doItemsLayout();
     Check(tree->isVisible(),"scene context menu uses a visible history tree");
-    const auto point = tree->visualItemRect(tree->currentItem()).center();
+    const auto point = GetNodePoint(tree,item);
+    Check(tree->itemAt(point)==item,"scene context menu targets the exact requested object-name cell");
     const auto clicked = std::make_shared<bool>(false);
     const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
-    QMetaObject::invokeMethod(&window, [clicked, action] {
+    QContextMenuEvent event(QContextMenuEvent::Mouse, point, tree->viewport()->mapToGlobal(point));
+    DrivePopupInteraction([&]{QApplication::sendEvent(tree->viewport(), &event);},[clicked, action,owner] {
         auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
-        if (!menu) return;
+        if (!menu || menu->objectName()!="sceneNodeMenu" || menu->parentWidget()!=owner) return false;
         for (auto* entry : menu->actions()) if (entry->objectName() == "node_" + action) { *clicked = true; entry->trigger(); break; }
         menu->close();
-    }, Qt::QueuedConnection);
-    QContextMenuEvent event(QContextMenuEvent::Mouse, point, tree->viewport()->mapToGlobal(point));
-    QApplication::sendEvent(tree->viewport(), &event);
+        return true;
+    },"scene context menu did not become ready within the fixture deadline");
     if(!*clicked) {
         const auto* hit=tree->itemAt(point);
         std::cerr<<"Scene menu diagnostic: visible="<<tree->isVisible()<<" viewport="<<tree->viewport()->width()<<'x'<<tree->viewport()->height()
@@ -952,24 +1257,24 @@ void CheckParameterLayout(TestWindow& window)
     auto* scroll = view->findChild<QScrollArea*>("operationScroll");
     Check(scroll && scroll->height() > 96 && view->GetBrowser()->parentWidget() != view,
         "parameters occupy a separate full-height column beside the scene browser");
-    auto* commandArea = view->findChild<QStackedWidget*>("operationCommands");
+    auto* commandArea = view->findChild<QWidget*>("operationCommands");
     auto* execute = view->findChild<QPushButton*>("action_Set");
     auto* primary=view->findChild<QPushButton*>("businessPrimary");
     Check(primary && !scroll->isAncestorOf(primary) && commandArea && commandArea->isAncestorOf(execute),
         "stage primary remains outside the parameter scroll area; advanced command belongs to its form");
-    auto* operationTabs = view->findChild<QTabBar*>("parameterTabs");
+    auto* operationTabs = view->findChild<QComboBox*>("parameterTabs");
     auto* more = view->findChild<QToolButton*>("moreOperations");
-    Check(operationTabs && operationTabs->usesScrollButtons() && operationTabs->count() <= 5 && more && more->menu(),
+    Check(operationTabs && operationTabs->count() <= 5 && operationTabs->minimumContentsLength() > 0 && more && more->menu(),
         "common operations fit a compact row and all additional operations have a discoverable menu");
     const auto originalSize = window.size(); QCoreApplication::processEvents();
     const auto commandBounds = QRect(primary->mapTo(view,QPoint()),primary->size());
     Check(window.size() == originalSize && primary->isVisible() && view->rect().contains(commandBounds),
         "the stage primary fits inside the fixed parameter column");
-    window.grab().save("manual-layout-1280.png");
+    GrabWindow(window).save("manual-layout-1280.png");
     QCoreApplication::processEvents();
     const auto canvasSize = window.findChild<QWidget*>("primary3D")->size();
     window.findChild<QPushButton*>("showResultReport")->click(); QCoreApplication::processEvents();
-    auto* reportWindow = window.findChild<QDialog*>("operationReports");
+    auto* reportWindow = window.findChild<QDockWidget*>("reportDock");
     Check(reportWindow && reportWindow->isVisible() && window.findChild<QWidget*>("primary3D")->size() == canvasSize,
         "result report opens independently without reducing the four-view canvas");
     reportWindow->hide();
@@ -1131,7 +1436,7 @@ void CheckParameterLayout(TestWindow& window)
         QCoreApplication::processEvents();
         window.GetWorkflow().onNavigate("Part", "Split", {});
         Check(Wait([&] { return qAbs(card->mapTo(splitScroll->viewport(), QPoint()).y()) < 30; }, 3000), "edited card can be focused again without resetting rows");
-        window.grab().save("parameter-ui-split.png");
+        GrabWindow(window).save("parameter-ui-split.png");
         QJsonArray longSeeds; for (int index = 0; index < 12; ++index) longSeeds.append(seeds->GetValue().toArray().first());
         seeds->SetValue(longSeeds);
         QCoreApplication::processEvents();
@@ -1142,11 +1447,11 @@ void CheckParameterLayout(TestWindow& window)
         Check(splitCommand->isVisible() && splitCommand->mapTo(window.GetModule("Part"),QPoint()) == commandPosition
             && window.GetModule("Part")->rect().contains(QRect(commandPosition,splitCommand->size())),
             "scrolling a long form leaves the stage primary in its fixed position");
-        window.grab().save("manual-layout-long-form-1280.png");
+        GrabWindow(window).save("manual-layout-long-form-1280.png");
         Check(window.size()==originalSize,"long parameter forms never resize the complete window");QCoreApplication::processEvents();
         seeds->SetValue(original);
     }
-    window.GetWorkflow().onNavigate("Data", "Load", {}); QCoreApplication::processEvents(); window.grab().save("parameter-ui-data.png");
+    window.GetWorkflow().onNavigate("Data", "Load", {}); QCoreApplication::processEvents(); GrabWindow(window).save("parameter-ui-data.png");
 }
 void CheckBooleanControls(TestWindow& window)
 {
@@ -1231,7 +1536,7 @@ void CheckBooleanRequests(TestWindow& window)
     GetComplete(window, Click(window, "View", "Set", {{"mode", "CompositeIsoSurface"}}), "Succeeded");
     panel->SetParameterPatch("Set", {{"mode", QJsonValue()}});
     panel->SetParameterPatch("Visibility", {{"viewScope", "primary-3d"}});
-    window.GetWorkflow().onNavigate("View", "Visibility", {}); QCoreApplication::processEvents(); window.grab().save("applied-state-view.png");
+    window.GetWorkflow().onNavigate("View", "Visibility", {}); QCoreApplication::processEvents(); GrabWindow(window).save("applied-state-view.png");
     GetComplete(window, Click(window, "View", "Visibility", {{"viewScope", "all"}, {"planes", true}, {"crosshair", true}, {"ruler", true}}), "Succeeded");
     panel->SetParameters("Set", original);
 }
@@ -1311,7 +1616,7 @@ void CheckViewCapabilities(TestWindow& window)
         const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
         toolbar->setCurrentIndex(index); toolbar->activated(index); GetComplete(window, id, "Succeeded");
         panel->Observe(); hasField("iso", index == 0); hasField("transfer", index == 1); hasField("quality", true);
-        QCoreApplication::processEvents(); window.grab().save(index ? "view-volume-capabilities.png" : "view-iso-capabilities.png");
+        QCoreApplication::processEvents(); GrabWindow(window).save(index ? "view-volume-capabilities.png" : "view-iso-capabilities.png");
     }
 }
 void SendCropDrag(TestWindow& window, const std::array<double,3>& fraction)
@@ -1340,9 +1645,46 @@ void SendCropDrag(TestWindow& window, const std::array<double,3>& fraction)
         QMouseEvent move(QEvent::MouseMove,end,Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(widget,&move);QCoreApplication::processEvents();
         QMouseEvent release(QEvent::MouseButtonRelease,end,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(widget,&release);QCoreApplication::processEvents();
 }
+class CropRenderHold final {
+public:
+    explicit CropRenderHold(TestWindow& window) {
+        for(auto* view:window.findChildren<QVTKOpenGLNativeWidget*>())m_windows.emplace_back(vtkGenericOpenGLRenderWindow::SafeDownCast(view->renderWindow()));
+        Check(m_windows.size()==4 && std::all_of(m_windows.begin(),m_windows.end(),[](const auto& view){return view && view->GetReadyForRendering();}),
+            "crop presentation hold starts with four real ready render windows");
+        m_callback=vtkSmartPointer<vtkCallbackCommand>::New();m_callback->SetClientData(this);
+        m_callback->SetCallback([](vtkObject* sender,unsigned long,void* data,void*) {
+            auto& hold=*static_cast<CropRenderHold*>(data);hold.m_prepared.insert(sender);
+            // 首轮真实绘制准备各视图的 shader；在下一轮呈现前，仅暂停测试窗口的 ready 门控。
+            if(hold.m_prepared.size()==hold.m_windows.size()) {
+                hold.m_isHeld=true;for(const auto& view:hold.m_windows)view->SetReadyForRendering(false);
+            }
+        });
+        for(const auto& view:m_windows)m_tags.push_back(view->AddObserver(vtkCommand::EndEvent,m_callback));
+    }
+    ~CropRenderHold(){Resume();}
+    bool GetIsHeld() const {return m_isHeld;}
+    void Resume() {
+        for(std::size_t i=0;i<m_tags.size();++i)m_windows[i]->RemoveObserver(m_tags[i]);
+        m_tags.clear();for(const auto& view:m_windows)view->SetReadyForRendering(true);
+    }
+private:
+    std::vector<vtkSmartPointer<vtkGenericOpenGLRenderWindow>> m_windows;
+    std::vector<unsigned long> m_tags;
+    std::set<vtkObject*> m_prepared;
+    vtkSmartPointer<vtkCallbackCommand> m_callback;
+    bool m_isHeld=false;
+};
 void CheckCropWorkflow(TestWindow& window)
 {
     if (!GetEnabled(window, "Crop")) return;
+    QJsonObject projected{{"framesReady",true},{"isBusy",false},{"appliedHead","17"},{"renderedHead","0"}};
+    Check(!GetCropFramesReady(projected),"a ready view of the previous crop head cannot admit the next history operation");
+    projected["renderedHead"]="17";
+    Check(GetCropFramesReady(projected),"the idle crop operation becomes ready after its exact history head is presented");
+    projected["isBusy"]=true;
+    Check(!GetCropFramesReady(projected),"a busy crop remains unavailable even after the history heads match");
+    projected["isBusy"]=false;projected["framesReady"]=false;
+    Check(!GetCropFramesReady(projected),"matching history heads cannot replace unfinished view work");
     window.SetViewsVisible(true);
     auto* panel = window.GetModule("Crop");
     Check(Wait([&] { return panel->GetObservedState()["framesReady"].toBool(); }), "all four crop views settle through events");
@@ -1408,11 +1750,49 @@ void CheckCropWorkflow(TestWindow& window)
     for(QTreeWidgetItemIterator it(tree);*it;++it)if((*it)->data(0,Qt::UserRole).toJsonObject()["patches"].toObject()["Node"].toObject()["nodeId"].toString()==otherNode){historyNode=*it;break;}
     Check(historyNode!=nullptr,"crop tree exposes selectable stable nodes");ClickNode(tree,historyNode);
     Check(panel->GetParameters()["nodeId"].toString()==otherNode,"scene selection supplies stable node identity");
+    const auto finishAvailable=[&] {return GetCropConfirmationEnabled(panel);};
+    const auto checkFinishBlocked=[&] {
+        const auto* command=GetCropConfirmationCommand(panel);
+        Check(command && !command->isEnabled() && command->toolTip().contains("等待"),
+            "natural notifications disable crop confirmation with a reason while rendering is suspended");
+        const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+        if(primary && primary->property("businessAction")=="FinishEditing")
+            Check(!primary->isEnabled() && primary->toolTip().contains("等待"),
+                "natural notifications disable the visible crop confirmation primary with a reason");
+    };
+    const bool initiallyAvailable=Wait(finishAvailable,2000);if(!initiallyAvailable)DumpCropConfirmation(panel);
+    Check(initiallyAvailable,"actual crop confirmation is available before suspending rendering");
     const auto selectedHistory=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
+    const auto rendersBeforeHidden=window.GetRenderCount();
     window.SetViewsVisible(false);panel->findChild<QPushButton*>("action_Node")->click();CheckIdle(window);
     Check(!window.GetRecords().GetRecord(selectedHistory)["isTerminal"].toBool(),"hidden crop waits for a presented frame without notification spin");
+    std::cout<<"CROP_NOTIFICATION_HELD applied="<<panel->GetObservedState()["appliedHead"].toString().toStdString()
+        <<" rendered="<<panel->GetObservedState()["renderedHead"].toString().toStdString()<<" requested="<<otherNode.toStdString()
+        <<" framesReady="<<panel->GetObservedState()["framesReady"].toBool()<<" busy="<<panel->GetObservedState()["isBusy"].toBool()
+        <<" rendersBefore="<<rendersBeforeHidden<<" rendersAfter="<<window.GetRenderCount()<<std::endl;
+    Check(window.GetRenderCount()==rendersBeforeHidden,
+        "hidden views suspend actual rendering for the accepted crop history request");
+    checkFinishBlocked();
+    // 恢复只唤醒真实绘制；下面的谓词只读控件，不能替通知链主动 Observe/修改参数/导航。
     window.SetViewsVisible(true);GetComplete(window,selectedHistory,"Succeeded");
+    Check(Wait(finishAvailable,2000),"render completion notifications alone re-enable actual crop confirmation");
     Check(panel->GetObservedState()["appliedHead"].toString()==otherNode&&panel->GetObservedState()["renderedHead"].toString()==otherNode,"selected node and presented node agree");
+    CropRenderHold failedPresentation(window);
+    const auto missingFrame=panel->SendAction("Node",{{"nodeId",currentNode}});
+    const bool appliedWithoutFrame=Wait([&]{const auto state=panel->GetObservedState();return failedPresentation.GetIsHeld()
+        && state["appliedHead"].toString()==currentNode && state["renderedHead"].toString()!=currentNode;},2000);
+    if(!appliedWithoutFrame){std::cerr<<"CROP_PRESENTATION_HELD="<<failedPresentation.GetIsHeld()<<std::endl;DumpCropConfirmation(panel);}
+    Check(appliedWithoutFrame,
+        "the failure fixture reaches an applied history head without presenting it");
+    checkFinishBlocked();
+    // 沿用页面既有15秒呈现期限，真实触发失败；20秒仅为观察保护，不修改业务期限。
+    const auto failedFrame=GetComplete(window,missingFrame,"Failed",20000);
+    Check(failedFrame["result"].toObject()["message"].toString().contains("等待视图完成超时"),
+        "missing real render completion fails through the existing presentation deadline");
+    checkFinishBlocked();
+    failedPresentation.Resume();window.SetViewsVisible(true);
+    Check(Wait(finishAvailable,2000) && GetCropFramesReady(panel->GetObservedState()),
+        "render notifications recover crop confirmation after a real presentation failure without active refresh");
     GetComplete(window,Click(window,"Crop","Previous"),"Succeeded");
     GetComplete(window,Send(window,"Crop","Node",{{"nodeId",currentNode}}),"Succeeded");
     GetComplete(window,ClickNodeAction(window,tree,FindNode(tree,"crop-history"),"ResetPreview"),"Succeeded");
@@ -1467,11 +1847,15 @@ void CheckCropWorkflow(TestWindow& window)
         "repeated publication on cached source views adopts its exact new output through the natural primary");
     GetComplete(window, Click(window, "Crop", "SelectOutput"), "Succeeded");
     Check(GetRefText(window.GetSession()->GetImageDescriptor()->dataRevision) == published["output"].toString(), "select uses exact published crop output");
-    GetComplete(window, Click(window, "Crop", "RestoreSource"), "Succeeded");
+    const auto stoppedCrop=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
+    panel->onStop();GetComplete(window,stoppedCrop,"Succeeded");
+    Check(Wait([&]{const auto* start=panel->findChild<QPushButton*>("action_Start");
+        return start && start->isEnabled() && !panel->GetObservedState()["isBusy"].toBool();},2000),
+        "module Stop notifications leave crop ready to start again without active refresh");
     Check(window.GetSession()->GetImageDescriptor()->dataRevision == original.dataRevision, "restore returns exact crop source");
     GetComplete(window, Click(window, "Crop", "RestoreSource"), "Succeeded");
     window.GetWorkflow().onNavigate("Crop", "Box", {});
-    QCoreApplication::processEvents(); window.grab().save("scene-ui-crop.png");
+    QCoreApplication::processEvents(); GrabWindow(window).save("scene-ui-crop.png");
     CheckIdle(window);
     GetComplete(window,Click(window,"Crop","CloseDocument"),"Succeeded");
     Check(panel->GetObservedState()["documents"].toArray().isEmpty(),"all explicitly created crop documents close");
@@ -1485,6 +1869,7 @@ void CheckCropMouseInteraction(TestWindow& window,bool cylinderOnly=false)
     Check(view && endpoint && view->renderWindow()->GetInteractor() == endpoint->interactor,
         "manual QVTK mouse input uses the crop interactor");
     const auto settled = [&] { panel->Observe(); return panel->GetObservedState()["framesReady"].toBool(); };
+    bool checkedCancelNotification=false;
     GetComplete(window, Click(window, "Crop", "CreateDocument"), "Succeeded");
     for (const auto* renderMode : {"CompositeIsoSurface", "CompositeVolume"}) {
         GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", renderMode}}), "Succeeded");
@@ -1566,10 +1951,35 @@ void CheckCropMouseInteraction(TestWindow& window,bool cylinderOnly=false)
                     "crop drag renders all views and records history only in removal modes");
                 Check(cursorBefore == window.GetSession()->GetRenderViewState({"primary-3d"})->cursorWorld && cameraBefore == cameraAfter,
                     "crop controls take precedence over reference planes without moving the slices or camera");
+                if(!checkedCancelNotification && !positionOnly) {
+                    const auto retained=panel->GetObservedState();
+                    const auto cancelPoint=handle();endpoint->renderer->SetWorldPoint(cancelPoint[0],cancelPoint[1],cancelPoint[2],1.0);endpoint->renderer->WorldToDisplay();
+                    const auto* projected=endpoint->renderer->GetDisplayPoint();
+                    const QPointF cancelStart(projected[0]*view->width()/size[0],(size[1]-1-projected[1])*view->height()/size[1]);
+                    sendMouse(QEvent::MouseMove,cancelStart,Qt::NoButton,Qt::NoButton);
+                    sendMouse(QEvent::MouseButtonPress,cancelStart,Qt::LeftButton,Qt::LeftButton);
+                    sendMouse(QEvent::MouseMove,cancelStart+QPointF(8,6),Qt::NoButton,Qt::LeftButton);
+                    Check(Wait([&]{return panel->GetObservedState()["isBusy"].toBool();},2000),
+                        "a real crop gesture becomes busy through natural notifications");
+                    const auto* confirmation=GetCropConfirmationCommand(panel);
+                    Check(confirmation && !confirmation->isEnabled() && confirmation->toolTip().contains("等待"),
+                        "natural drag notifications disable crop confirmation with a reason");
+                    QFocusEvent lostFocus(QEvent::FocusOut);QApplication::sendEvent(view,&lostFocus);
+                    sendMouse(QEvent::MouseButtonRelease,cancelStart+QPointF(8,6),Qt::LeftButton,Qt::NoButton);
+                    const bool cancelledReady=Wait([&]{return GetCropFramesReady(panel->GetObservedState()) && GetCropConfirmationEnabled(panel);},2000);
+                    if(!cancelledReady)DumpCropConfirmation(panel);
+                    Check(cancelledReady,
+                        "focus cancellation notifications alone restore crop confirmation without active refresh");
+                    Check(panel->GetObservedState()["appliedHead"]==retained["appliedHead"]
+                        && panel->GetObservedState()["operationCount"]==retained["operationCount"],
+                        "cancelled input preserves the previously committed crop preview");
+                    checkedCancelNotification=true;
+                }
                 }
             }
         }
     }
+    Check(checkedCancelNotification,"crop input cancellation notification regression executes");
     GetComplete(window, Click(window, "Crop", "CloseDocument"), "Succeeded");
     GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"mode", "CompositeIsoSurface"}}), "Succeeded");
     Check(Wait(settled), "closing crop removes its controls before reference-plane input");
@@ -1738,7 +2148,7 @@ void CheckWallWorkflow(TestWindow& window, const QString& directory)
         "wall scene contains the current visible result");
     Check(!FindNode(wall->GetSceneTree(), "published-graph") && FindNode(wall->GetCatalogTree(), "published-graph"),
         "wall scene objects exclude the independent published-result catalog");
-    window.GetWorkflow().onNavigate("Wall", "SetDisplay", {}); QCoreApplication::processEvents(); window.grab().save("wall-manual-ui.png");
+    window.GetWorkflow().onNavigate("Wall", "SetDisplay", {}); QCoreApplication::processEvents(); GrabWindow(window).save("wall-manual-ui.png");
     GetComplete(window, Click(window, "Wall", "Clear"), "Succeeded");
     wall->Observe(); Check(wall->GetObservedState()["activeResult"].toString().isEmpty() && !wall->GetObservedState()["viewedIsActive"].toBool(), "wall clear removes activation while retained historical results remain readable");
 }
@@ -1754,8 +2164,8 @@ void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& dir
     Check(file.write(reinterpret_cast<const char*>(data.data()), static_cast<qint64>(data.size()*sizeof(float))) == static_cast<qint64>(data.size()*sizeof(float)), "switch regression fixture writes"); file.close();
     GetComplete(window, Click(window, "Data", "Load", {{"filePath", path}, {"datasetId", "feature-switch-regression"},
         {"dimensions", QJsonArray{n,n,n}}, {"spacingLPS", QJsonArray{1,1,1}}, {"originLPS", QJsonArray{0,0,0}}, {"sourceDigest", ""}}), "Succeeded");
-    auto* tabs = window.findChild<QTabBar*>("featureTabs");
-    auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
+    auto* tabs = window.findChild<QComboBox*>("featureTabs");
+    auto* workspaces = window.findChild<QComboBox*>("workspaceTabs");
     auto* part = window.GetModule("Part"); auto* form = part->GetParameterEditor("Start");
     const auto threshold = form->GetField("threshold");
     for (int round = 0; round < 3; ++round) {
@@ -1779,11 +2189,171 @@ void CheckFeatureSwitchDuringSegmentation(TestWindow& window, const QString& dir
             "returning to Part displays the completed result exactly once");
     }
     CheckFourViewGeometry(window);
-    QCoreApplication::processEvents(); window.grab().save("four-view-part-ui.png");
+    QCoreApplication::processEvents(); GrabWindow(window).save("four-view-part-ui.png");
     if (GetEnabled(window, "Artifact")) {
-        window.GetWorkflow().onNavigate("Artifact", "Ring", {}); QCoreApplication::processEvents(); window.grab().save("artifact-buttons-ui.png");
+        window.GetWorkflow().onNavigate("Artifact", "Ring", {}); QCoreApplication::processEvents(); GrabWindow(window).save("artifact-buttons-ui.png");
     }
 }
+void CheckReadTaskStop()
+{
+    TestWindow closing;closing.SetViewsVisible(false);closing.show();
+    Check(Wait([&]{return closing.GetIsReady() || !closing.GetFailure().isEmpty();},5000)
+        && closing.GetIsReady(),"read Stop fixture initializes its actual Host session");
+    auto* data=closing.GetModule("Data");
+    std::promise<void> started,resume;auto release=resume.get_future().share();
+    const auto id=closing.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(id,"Observed",[&](const ReadTaskContext& context) {
+        started.set_value();release.wait();context.checkpoint();return QJsonObject{};
+    });
+    const bool reached=started.get_future().wait_for(std::chrono::seconds(5))==std::future_status::ready;
+    const bool stopped=closing.StopSession();
+    const bool pending=!closing.GetRecords().GetRecord(id)["isTerminal"].toBool();
+    resume.set_value();
+    const bool drained=Wait([&]{return closing.StopSession();},5000);
+    QCoreApplication::processEvents();
+    const auto record=closing.GetRecords().GetRecord(id);
+    Check(reached && !stopped && pending && drained && !data->property("readTasksBusy").toBool(),
+        "Stop remains retryable until the read worker and owner completion have drained");
+    Check(record["status"]=="Cancelled" && record["completeCount"].toInt()==1,
+        "Stop delivers the read cancellation once instead of a Stopped record followed by late completion");
+
+    TestWindow expiring;expiring.SetViewsVisible(false);expiring.show();
+    Check(Wait([&]{return expiring.GetIsReady() || !expiring.GetFailure().isEmpty();},5000)
+        && expiring.GetIsReady(),"deadline Stop fixture initializes its actual Host session");
+    auto* expiringData=expiring.GetModule("Data");QTemporaryDir directory;
+    const auto path=directory.filePath("deadline.raw");const QByteArray original("deadline preserves old target");
+    QFile file(path);Check(directory.isValid() && file.open(QIODevice::WriteOnly) && file.write(original)==original.size(),
+        "deadline fixture starts with an existing output");file.close();
+    const auto entries=QDir(directory.path()).entryList(QDir::Files|QDir::Hidden|QDir::System);
+    const auto ticks=std::make_shared<std::atomic<int>>(0);ReadTaskConfig config;
+    // 一毫秒只表示可控时钟的一个推进单位，不是实际执行的性能门限。
+    config.timeout=std::chrono::milliseconds(1);
+    config.getNow=[ticks]{return std::chrono::steady_clock::time_point{}+std::chrono::milliseconds(ticks->load());};
+    std::promise<ReadTaskContext> entered;std::promise<void> finish;auto resumeExpired=finish.get_future().share();
+    const auto expiredId=expiring.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    expiringData->StartReadTask(expiredId,"Observed",[&](const ReadTaskContext& context) {
+        QSaveFile output(path);if(!output.open(QIODevice::WriteOnly) || output.write("candidate",9)!=9)throw std::runtime_error("deadline output fixture failed");
+        entered.set_value(context);resumeExpired.wait();context.checkpoint();
+        context.commit([&]{if(!output.commit())throw std::runtime_error("deadline fixture commit failed");});return QJsonObject{};
+    },{},config);
+    auto enteredFuture=entered.get_future();const bool enteredInTime=enteredFuture.wait_for(std::chrono::seconds(5))==std::future_status::ready;
+    bool deadlineReached=false;
+    if(enteredInTime) {const auto control=enteredFuture.get();ticks->store(1);deadlineReached=control.getCancelled();}
+    const bool premature=expiring.StopSession();
+    const bool stillPending=!expiring.GetRecords().GetRecord(expiredId)["isTerminal"].toBool();
+    finish.set_value();const bool drainedExpired=Wait([&]{return expiring.StopSession();},5000);
+    QCoreApplication::processEvents();const auto expiredRecord=expiring.GetRecords().GetRecord(expiredId);
+    Check(enteredInTime && deadlineReached && !premature && stillPending && drainedExpired,
+        "an expired read keeps Stop retryable until its worker and owner terminal have drained");
+    Check(expiredRecord["status"]=="Failed" && expiredRecord["completeCount"].toInt()==1
+        && expiredRecord["result"].toObject()["failureReason"]=="DeadlineExceeded",
+        "the frozen task deadline completes once with an explicit failure reason");
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==original,"deadline expiry preserves the previous output");file.close();
+    const auto deadlineFiles=QDir(directory.path()).entryList(QDir::Files|QDir::Hidden|QDir::System);
+    Check(deadlineFiles.size()==entries.size() && std::equal(deadlineFiles.cbegin(),deadlineFiles.cend(),entries.cbegin()),
+        "deadline Stop cleans its unpublished temporary output");
+}
+#if defined(MANUAL_ROI)
+void CheckRoiReadTasks(TestWindow& window,DataRevisionRef roi,DataRevisionRef source,const QJsonObject& expected)
+{
+    class ReadFixture final : public HostFeature {
+    public:
+        ReferenceDataSource reader;
+        std::string_view GetFeatureId() const noexcept override {return "roi-read-task-regression";}
+        bool AttachHost(const HostFeatureContext& context) override {return reader.AttachHost(context);}
+        bool DetachHost() override {return reader.DetachHost();}
+        bool OnHostTick() override {return false;}
+    };
+    QTemporaryDir directory;Check(directory.isValid(),"ROI read output fixture exists");
+    const auto path=directory.filePath("mask.raw");const QByteArray original("preserved ROI output");
+    QFile file(path);Check(file.open(QIODevice::WriteOnly) && file.write(original)==original.size(),"ROI read fixture preserves an existing target");file.close();
+    const auto fixture=std::make_shared<ReadFixture>();
+    Check(window.GetSession()->AttachFeature(fixture),"ROI read fixture obtains the actual trusted data port on the owner thread");
+    const auto work=fixture->reader.CreateRoiReadTask(roi,source,path);
+    const auto failedWork=fixture->reader.CreateRoiReadTask(roi,source,path+"/mask.raw");
+    Check(window.GetSession()->DetachFeature(*fixture),"ROI read work is frozen before its adapter detaches");
+    auto* data=window.GetModule("Data");
+    std::promise<void> reading,resume;auto release=resume.get_future().share();bool offOwner=false,heartbeat=false;
+    const auto owner=QThread::currentThread();
+    const auto cancelled=window.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(cancelled,"Observed",[&](const ReadTaskContext& context) {
+        offOwner=QThread::currentThread()!=owner;bool paused=false;auto controlled=context;
+        // 在实际掩码行检查中暂停，取消原因经外层检查点回到协调器。
+        controlled.getCancelled=[&] {if(!paused){paused=true;reading.set_value();release.wait();}return context.getCancelled();};
+        return work(controlled);
+    });
+    const bool reached=reading.get_future().wait_for(std::chrono::seconds(5))==std::future_status::ready;
+    QTimer::singleShot(0,&window,[&]{heartbeat=true;});
+    const bool responsive=Wait([&]{return heartbeat;},5000);
+    const auto accepted=data->CancelReadTasks();resume.set_value();
+    GetComplete(window,cancelled,"Cancelled",5000);
+    Check(reached && responsive && offOwner && accepted==1,"ROI mask cancellation is cooperative while the owner event loop stays responsive");
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==original,"cancelled ROI mask read leaves the existing output intact");file.close();
+    std::promise<void> committing,finish;auto finishCommit=finish.get_future().share();bool ownerComplete=false;
+    const auto commitTicks=std::make_shared<std::atomic<int>>(0);ReadTaskConfig commitConfig;
+    commitConfig.timeout=std::chrono::milliseconds(1);
+    commitConfig.getNow=[commitTicks]{return std::chrono::steady_clock::time_point{}+std::chrono::milliseconds(commitTicks->load());};
+    const auto committed=window.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(committed,"Observed",[&](const ReadTaskContext& context) {
+        auto controlled=context;
+        controlled.commit=[&](const std::function<void()>& publish) {
+            context.commit([&]{committing.set_value();finishCommit.wait();publish();});
+        };
+        return work(controlled);
+    },[&]{ownerComplete=QThread::currentThread()==owner;},commitConfig);
+    const bool began=committing.get_future().wait_for(std::chrono::seconds(5))==std::future_status::ready;
+    commitTicks->store(1);const auto late=data->CancelReadTasks();finish.set_value();
+    const auto result=GetComplete(window,committed,"Observed",5000)["result"].toObject();
+    Check(began && late==0 && ownerComplete && result==expected,"frozen ROI read preserves exact results and ignores late cancellation or expiry after commit begins");
+    const QByteArray allSelected(static_cast<int>(expected["gridCount"].toString().toULongLong()),char(1));
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==allSelected,"whole-source threshold exports exactly one selected byte per source voxel");file.close();
+    const auto failed=window.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(failed,"Observed",failedWork);
+    GetComplete(window,failed,"Failed",5000);
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==allSelected,"ROI output failure does not replace the prior complete mask");file.close();
+
+    const auto deadlineTicks=std::make_shared<std::atomic<int>>(0);ReadTaskConfig deadlineConfig;
+    deadlineConfig.timeout=std::chrono::milliseconds(1);
+    deadlineConfig.getNow=[deadlineTicks]{return std::chrono::steady_clock::time_point{}+std::chrono::milliseconds(deadlineTicks->load());};
+    std::promise<void> atRow,continueRow;auto rowRelease=continueRow.get_future().share();
+    const auto expired=window.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(expired,"Observed",[&](const ReadTaskContext& context) {
+        auto controlled=context;bool paused=false;
+        controlled.getCancelled=[&] {if(!paused){paused=true;atRow.set_value();rowRelease.wait();}return context.getCancelled();};
+        return work(controlled);
+    },{},deadlineConfig);
+    const bool reachedRow=atRow.get_future().wait_for(std::chrono::seconds(5))==std::future_status::ready;
+    deadlineTicks->store(1);continueRow.set_value();const auto expiry=GetComplete(window,expired,"Failed",5000);
+    Check(reachedRow && expiry["result"].toObject()["failureReason"]=="DeadlineExceeded",
+        "ROI row predicate observes the task's frozen absolute deadline");
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==allSelected,"expired ROI read preserves its old output");file.close();
+
+#ifdef Q_OS_WIN
+    struct LockedTarget final {
+        HANDLE value=INVALID_HANDLE_VALUE;
+        ~LockedTarget(){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);}
+    } locked;
+    locked.value=CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()),GENERIC_READ,
+        FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    Check(locked.value!=INVALID_HANDLE_VALUE,"Windows replacement fixture denies delete sharing on the existing target");
+    const auto existingFiles=QDir(directory.path()).entryList(QDir::Files|QDir::Hidden|QDir::System);bool reachedCommit=false;
+    const auto replaceFailed=window.GetRecords().StartRecord("Data","ReadRoi",{},{});
+    data->StartReadTask(replaceFailed,"Observed",[&](const ReadTaskContext& context) {
+        auto controlled=context;
+        controlled.commit=[&](const std::function<void()>& publish) {context.commit([&]{reachedCommit=true;publish();});};
+        return work(controlled);
+    });
+    const auto replacement=GetComplete(window,replaceFailed,"Failed",5000);
+    Check(reachedCommit && replacement["completeCount"].toInt()==1
+        && replacement["result"].toObject()["message"].toString().contains("提交失败"),
+        "Windows denies final ROI replacement only after the complete temporary mask reaches commit");
+    Check(file.open(QIODevice::ReadOnly) && file.readAll()==allSelected,"failed final ROI replacement preserves exact old bytes");file.close();
+    const auto remainingFiles=QDir(directory.path()).entryList(QDir::Files|QDir::Hidden|QDir::System);
+    Check(remainingFiles.size()==existingFiles.size() && std::equal(remainingFiles.cbegin(),remainingFiles.cend(),existingFiles.cbegin()),
+        "failed final ROI replacement removes its temporary file");
+#endif
+}
+#endif
 void CheckSharedRoi(TestWindow& window)
 {
 #if defined(MANUAL_ROI)
@@ -1915,6 +2485,32 @@ void CheckSharedRoi(TestWindow& window)
     const auto historyNodes=crop->GetObservedState().value("nodes");
     Check(crop->GetObservedState()["appliedHead"]!=root,"history fixture selects a non-root crop node");
     GetComplete(window,Send(window,"Crop","PrepareRoi",{{"inputRoi",GetRefText(ref)}}),"ParametersCopied");
+    // 首次确认已结束交互工具；再次选择正式 ROI 后，确认入口仍应受待呈现帧约束。
+    const auto originalOpacity=window.GetSession()->GetRenderViewState({"primary-3d"})->material.opacity;
+    window.SetViewsVisible(false);
+    GetComplete(window,Send(window,"View","Set",{{"viewId","primary-3d"},{"opacity",originalOpacity>0.5?originalOpacity-0.125:originalOpacity+0.125}}),"Succeeded");
+    window.GetWorkflow().onNavigate("Crop","PrepareRoi",{});window.SetViewsVisible(false);
+    auto* roiConfirmation=crop->findChild<QPushButton*>("businessPrimary");
+    const bool inactivePending=Wait([&]{const auto state=crop->GetObservedState();return !state["isActive"].toBool()
+        && !state["framesReady"].toBool() && roiConfirmation->isVisible()
+        && roiConfirmation->property("businessAction")=="FinishEditing";},2000);
+    if(!inactivePending)DumpCropConfirmation(crop);
+    Check(inactivePending,"formal ROI exposes a visible confirmation primary while inactive with real view work pending");
+    const auto inactiveState=crop->GetObservedState();
+    CheckCropPendingConfirmation(crop,inactiveState);
+    bool brokenPrimaryRejected=false;
+    {
+        struct RestoreEnabled {QPushButton* button;bool enabled;~RestoreEnabled(){button->setEnabled(enabled);}} restore{roiConfirmation,roiConfirmation->isEnabled()};
+        roiConfirmation->setEnabled(true);
+        try {CheckCropPendingConfirmation(crop,inactiveState);}
+        catch(const std::runtime_error& error){brokenPrimaryRejected=std::string(error.what())=="unfinished crop presentation disables the visible confirmation primary with a reason";}
+    }
+    Check(brokenPrimaryRejected,"pending confirmation checks reject an enabled visible ROI primary even when crop is inactive");
+    window.SetViewsVisible(true);
+    Check(Wait([&]{return GetCropFramesReady(crop->GetObservedState()) && roiConfirmation->isEnabled();},2000),
+        "render notifications restore the inactive ROI confirmation primary without active refresh");
+    GetComplete(window,Send(window,"View","Set",{{"viewId","primary-3d"},{"opacity",originalOpacity}}),"Succeeded");
+    window.GetWorkflow().onNavigate("Crop","PrepareRoi",{});
     Check(Wait(framesReady),"formal ROI root selection reaches the displayed preview");
     Check(crop->GetObservedState()["documentId"]==document && crop->GetObservedState()["operationCount"]==historyOperations && crop->GetObservedState()["nodes"]==historyNodes
         && crop->GetObservedState()["appliedHead"]==root,"formal ROI selection preserves the document and history while selecting the build root");
@@ -1989,7 +2585,14 @@ void CheckSharedRoi(TestWindow& window)
     GetComplete(window,Click(window,"Roi","Threshold",{{"roi",""},{"outputMode","CreateNew"},
         {"grayRange",GetValues(image->scalarRange)}}),"PreviewReady");
     const auto whole=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
-    const auto beforeClose=GetComplete(window,Send(window,"Data","ReadRoi",{{"roi",whole},{"maskPath",""}}),"Observed")["result"].toObject();
+    const auto readId=Send(window,"Data","ReadRoi",{{"roi",whole},{"maskPath",""}});
+    Check(window.GetModule("Data")->property("readTasksBusy").toBool()
+        && !window.GetRecords().GetRecord(readId)["isTerminal"].toBool(),"Data.ReadRoi returns to the owner before completing its full mask scan");
+    const auto beforeClose=GetComplete(window,readId,"Observed")["result"].toObject();
+    const auto readTimings=window.GetRecords().GetRecord(readId)["readTaskTimings"].toObject();
+    for(const auto* phase:{"freezePreparationMs","workerQueueMs","workerExecutionMs","ownerReceiveMs"})
+        Check(readTimings[phase].isDouble() && std::isfinite(readTimings[phase].toDouble()) && readTimings[phase].toDouble()>=0,
+            "ROI read records a finite nonnegative duration for each measured phase");
     GetComplete(window,Click(window,"Roi","Close",{{"roi",whole},{"outputMode","CreateNew"},
         {"radius",1.0},{"radiusUnit","Voxels"}}),"PreviewReady");
     const auto closed=GetComplete(window,Click(window,"Roi","Commit"),"Succeeded")["result"].toObject()["roi"];
@@ -2001,11 +2604,13 @@ void CheckSharedRoi(TestWindow& window)
         && beforeClose["voxelCount"]==afterClose["voxelCount"]
         && beforeClose["binaryMaskSha256"]==afterClose["binaryMaskSha256"],
         "closing a saved full-source threshold preserves all members when committed through the real ROI buttons");
+    CheckRoiReadTasks(window,GetRef(whole),image->dataRevision,beforeClose);
 #endif
 }
 void StartSelfTest(TestWindow& window)
 {
     QCoreApplication::processEvents();
+    CheckPopupInteraction();
     // 重现就绪观察在退出内层事件循环时回退；不能把暂态回退当成已经超时。
     int phase=0;QTimer first,settled;first.setSingleShot(true);settled.setSingleShot(true);
     QObject::connect(&first,&QTimer::timeout,&first,[&]{phase=1;});
@@ -2022,12 +2627,30 @@ void StartSelfTest(TestWindow& window)
     CheckBooleanControls(window);
     auto* view = window.GetModule("View");
     view->SetParameterPatch("Reset", {{"viewId", "missing"}});
+    window.GetWorkflow().onNavigate("Data","Load",{});
     GetComplete(window, SendUnavailable(window, "View", "Reset"), "Rejected");
-    const auto* log = window.findChild<QPlainTextEdit*>("businessLog");
-    Check(log && log->toPlainText().contains("显示与导航 · 重置视图") && log->toPlainText().contains("操作被拒绝"),
-        "unavailable display commands retain Chinese rejection details for programmatic requests");
-    Check(log->toPlainText().contains(QRegularExpression("\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}\\]")),
-        "business timestamps use readable ASCII digits regardless of system locale");
+    QFile log(window.GetLogPath());Check(log.open(QIODevice::ReadOnly),"session log can be read beside the executable");
+    const auto logText=QString::fromUtf8(log.readAll());
+    Check(QFileInfo(log.fileName()).absolutePath()==QCoreApplication::applicationDirPath(),"session log uses the actual executable directory");
+    Check(logText.contains("显示与导航 · 重置视图") && logText.contains("操作被拒绝"),
+        "unavailable display commands retain Chinese rejection details in the UTF-8 file");
+    Check(logText.contains(QRegularExpression("\\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}\\] \\[显示与导航\\]")),
+        "diagnostic lines carry an unambiguous timestamp and originating module");
+    const auto* operationState=window.findChild<QLabel*>("operationState");
+    Check(operationState->text().contains("拒绝") && operationState->accessibleName().contains("显示与导航")
+        && operationState->accessibleName().contains("拒绝") && operationState->toolTip().contains(operationState->accessibleName().mid(QString("会话状态：").size())),"a background module rejection remains visible with a synchronized complete accessible status");
+    window.GetWorkflow().onNavigate("View","Reset",{});QCoreApplication::processEvents();
+    Check(view->findChild<QLabel*>("moduleFeedback")->isVisible() && view->GetFeedback().contains("操作被拒绝")
+        && view->findChild<QLabel*>("moduleFeedback")->text()==view->GetFeedback(),
+        "rejection also stays visible inside its owning module");
+    log.close();
+    QFile filledLog(window.GetLogPath());Check(filledLog.open(QIODevice::Append),"rotation fixture can extend this session's own log");
+    const QByteArray padding(4*1024*1024,'x');Check(filledLog.write(padding)==padding.size(),"rotation fixture reaches the configured size boundary");filledLog.close();
+    window.SetInputFile(QCoreApplication::applicationDirPath()+"/missing-log-rotation-input.raw");
+    QFile previousLog(window.GetLogPath()+".previous.txt");
+    Check(previousLog.open(QIODevice::ReadOnly) && QString::fromUtf8(previousLog.readAll()).contains("操作被拒绝"),"rotation keeps the earlier diagnostic details");previousLog.close();
+    QFile rotatedLog(window.GetLogPath());Check(rotatedLog.open(QIODevice::ReadOnly) && rotatedLog.size()<4*1024*1024
+        && QString::fromUtf8(rotatedLog.readAll()).contains("请选择存在的体数据文件"),"rotation continues writing actual UTF-8 diagnostics within the size bound");
     QTemporaryDir directory;
     Check(directory.isValid(), "temporary fixture directory");
     std::vector<float> voxels(24 * 24 * 24, 0.0f);
@@ -2049,26 +2672,21 @@ void StartSelfTest(TestWindow& window)
     const auto recordCount = window.GetRecords().GetRecords()["records"].toArray().size();
     window.GetWorkflow().onNavigate("View", "Set", {});
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
-    QTimer dialogDeadline; dialogDeadline.setSingleShot(true);
-    QObject::connect(&dialogDeadline, &QTimer::timeout, &window, [] {
-        if (auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();
-    });
     bool opened = false;
-    QTimer::singleShot(0, &window, [&] {
+    DrivePopupInteraction([&]{window.findChild<QPushButton*>("openVolume")->click();},[&] {
         auto* dialog = window.findChild<QFileDialog*>("inputFileDialog");
-        if (!dialog) return;
-        opened = true; dialog->reject();
-    });
-    dialogDeadline.start(5000); window.findChild<QPushButton*>("openVolume")->click(); dialogDeadline.stop();
+        if (!dialog || QApplication::activeModalWidget()!=dialog) return false;
+        opened = true; dialog->reject();return true;
+    },"cancelling file picker did not become ready within the fixture deadline");
     Check(opened && dataPanel->GetParameterEditor("Load")->GetValue() == loadDraft,
         "cancelling the top-level file picker preserves the loading parameters");
     opened = false;
-    QTimer::singleShot(0, &window, [&] {
+    DrivePopupInteraction([&]{window.findChild<QPushButton*>("openVolume")->click();},[&] {
         auto* dialog = window.findChild<QFileDialog*>("inputFileDialog");
-        if (!dialog) return;
+        if (!dialog || QApplication::activeModalWidget()!=dialog) return false;
         opened = true; dialog->selectFile(path); QMetaObject::invokeMethod(dialog, "accept", Qt::DirectConnection);
-    });
-    dialogDeadline.start(5000); window.findChild<QPushButton*>("openVolume")->click(); dialogDeadline.stop();
+        return true;
+    },"opening file picker did not become ready within the fixture deadline");
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs, false);
     Check(opened && dataPanel->isVisible() && dataPanel->GetCurrentAction() == "Load"
         && dataPanel->GetParameterEditor("Load")->GetValue() == loadDraft
@@ -2125,7 +2743,7 @@ void StartSelfTest(TestWindow& window)
     GetComplete(window, ClickNodeAction(window, dataTree, sourceNode, "UseData"), "Succeeded");
     Check(window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold == initialIso,
         "reselecting the same data preserves the initial ISO");
-    window.grab().save("scene-ui-data-graph.png");
+    GrabWindow(window).save("scene-ui-data-graph.png");
     GetComplete(window, Click(window, "View", "Reset", {{"viewId", "missing"}}), "Failed");
     GetComplete(window, Send(window, "Data", "Select", {{"revision", GetRefText(original.dataRevision)}, {"expectedBindingRevision", "0"}}), "Failed");
     GetComplete(window, Send(window, "View", "Set", {{"viewId", "primary-3d"}, {"iso", 50.0}}), "Succeeded");
@@ -2192,7 +2810,7 @@ void StartSelfTest(TestWindow& window)
         GetComplete(window, Send(window, "Part", "SetState", {{"target", target["binding"]}, {"name", "节点刷新测试零件"}}), "Succeeded");
         Check(Wait([&] { const auto* item = partNode(target["binding"].toObject()); return item && item->text(0).contains("节点刷新测试零件") && editTree->selectedItems().size() == 2; }),
             "scene rebuild preserves multi-selection by stable part identity");
-        QCoreApplication::processEvents(); window.grab().save("scene-ui-parts.png");
+        QCoreApplication::processEvents(); GrabWindow(window).save("scene-ui-parts.png");
         GetComplete(window, SendUnavailable(window, "Part", "Commit"), "Rejected");
         GetComplete(window, Click(window, "Part", "EditSelected", {{"target", target["binding"]}}), "ParametersCopied");
         Check(editPanel == window.GetModule("Part") && editPanel->GetCurrentAction() == "Paint"
@@ -2376,7 +2994,7 @@ void StartSelfTest(TestWindow& window)
             bool hasResidual = false;
             for (QTreeWidgetItemIterator it(resultTree); *it; ++it) hasResidual = hasResidual || (*it)->data(0, Qt::UserRole).toJsonObject()["id"].toString().startsWith("residual:");
             Check(hasResidual, "alignment residuals are visible as result nodes");
-            QCoreApplication::processEvents(); window.grab().save("scene-ui-alignment.png");
+            QCoreApplication::processEvents(); GrabWindow(window).save("scene-ui-alignment.png");
             GetComplete(window, Send(window, "Alignment", "Activate"), "FullyDetermined");
             CheckOverlaySwitch(window, "Alignment");
             GetComplete(window, Send(window, "Alignment", "Start"), "Rejected");
@@ -2456,6 +3074,7 @@ void StartSelfTest(TestWindow& window)
     Check(reportOwner.expired(),"session closing releases native report rows while the report widget remains alive");
     Check(!closingReports->GetReportIds().contains("session-closing-native-rows"),"closing removes the native document while late terminal records remain available");
     Check(window.GetRecords().GetRecord(pendingLoad)["completeCount"].toInt() == 1, "Stop delivers late completion once while receiver lives");
+    CheckReadTaskStop();
 }
 QJsonValue GetResolved(const QJsonValue& value, const QJsonObject& results)
 {
@@ -2637,6 +3256,12 @@ QJsonObject CheckPartDisplay(TestWindow& window)
 void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeoutMs)
 {
     const auto script = LoadJson(path);
+    const auto audit=script["uiAudit"].toObject();
+    if(!audit.isEmpty()){
+        if(audit.contains("fontPoints")){auto font=qApp->font();font.setPointSizeF(GetNumber(audit,"fontPoints"));qApp->setFont(font);}
+        if(audit["dark"].toBool()){auto palette=qApp->palette();palette.setColor(QPalette::Window,QColor("#18212c"));palette.setColor(QPalette::WindowText,QColor("#e5edf5"));palette.setColor(QPalette::Text,QColor("#e5edf5"));palette.setColor(QPalette::Base,QColor("#222e3c"));qApp->setPalette(palette);}
+        qApp->setProperty("uiAuditGrayscale",audit["grayscale"].toBool());qApp->setStyleSheet(GetWorkbenchStyle());QCoreApplication::processEvents();
+    }
     const auto steps=script["steps"].toArray();
     const bool unbounded=std::any_of(steps.cbegin(),steps.cend(),[](const auto& step){const auto timeout=step.toObject().value("timeoutMs");return timeout.isUndefined() || (timeout.isDouble() && timeout.toDouble()==0);});
     const auto shutdown=script.contains("shutdownTimeoutMs")?GetNumber(script,"shutdownTimeoutMs"):(unbounded?0.:30000.);
@@ -2645,10 +3270,18 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
     shutdownTimeoutMs=static_cast<int>(shutdown);
     if(script.contains("windowSize")) {
         const auto size=script["windowSize"].toArray();
-        Check(size.size()==2 && size[0].toInt()>=1000 && size[1].toInt()>=800,
+        Check(size.size()==2 && size[0].toInt()>=window.minimumWidth() && size[1].toInt()>=window.minimumHeight(),
             "scenario declares a usable business screenshot window");
         window.resize(size[0].toInt(),size[1].toInt());QCoreApplication::processEvents();
     }
+    if(script["expectColumns"].isObject()) {
+        const auto expected=script["expectColumns"].toObject();
+        for(const auto& entry:{std::pair<const char*,const char*>{"objects","toggleObjectColumn"},{"parameters","toggleParameterColumn"}})
+            if(expected.contains(entry.first))Check(window.findChild<QToolButton*>(entry.second)->isChecked()==expected[entry.first].toBool(),"a new process restores the saved sidebar state");
+    }
+    window.findChild<QToolButton*>("toggleObjectColumn")->setChecked(true);
+    window.findChild<QToolButton*>("toggleParameterColumn")->setChecked(true);
+    QCoreApplication::processEvents();
     const auto initialWindowSize=window.size();
     if(script["viewLayout"].isString()) {
         auto* choice=window.findChild<QComboBox*>("viewLayout");const auto index=choice->findData(script["viewLayout"].toString());
@@ -2672,7 +3305,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             const bool iso = view->viewMode == HostRenderMode::IsoSurface || view->viewMode == HostRenderMode::CompositeIsoSurface;
             hasHiddenSource = hasHiddenSource || (iso && view->material.opacity <= 0);
             if (!hasPreparationCapture && script.contains("partPreparationScreenshot")) {
-                hasPreparationCapture = window.grab().save(GetText(script, "partPreparationScreenshot"));
+                hasPreparationCapture = GrabWindow(window).save(GetText(script, "partPreparationScreenshot"));
             }
         });
         previewWatch.start(100);
@@ -2686,7 +3319,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         return static_cast<int>(timeout);
     };
     for(const auto value:script["steps"].toArray())
-        if(!value.toObject()["generateKnownTransformReference"].toBool() && value.toObject()["control"]!="checkPage" && value.toObject()["control"]!="editParameters") {
+        if(!value.toObject()["generateKnownTransformReference"].toBool() && value.toObject()["control"]!="checkPage" && value.toObject()["control"]!="editParameters" && value.toObject()["control"]!="dockLayout" && value.toObject()["control"]!="histogramIso" && value.toObject()["control"]!="surfaceHistogramIso") {
             (void)getWaitMilliseconds(value.toObject());
             (void)GetExpectedStatuses(value.toObject());
         }
@@ -2694,6 +3327,11 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
     const auto checkObserved=[&](const QJsonObject& step) {
         auto* panel=window.GetModule(GetText(step,"module"));
         const auto expected=GetResolved(step["expectState"],results).toObject();QJsonObject actual;
+        if(step.contains("expectActionEnabled") && !step["expectActionEnabled"].isObject())
+            throw std::invalid_argument("expectActionEnabled 必须是动作名到布尔值的对象");
+        const auto expectedActions=step["expectActionEnabled"].toObject();
+        for(auto it=expectedActions.begin();it!=expectedActions.end();++it)
+            Check(it.value().isBool() && panel->findChild<QPushButton*>("action_"+it.key()),"scripted availability names an actual command and a boolean");
         const auto observedValue=[&](const QString& key){
             QJsonValue value=actual;for(const auto& part:key.split('.'))value=value.toObject().value(part);return value;
         };
@@ -2701,32 +3339,187 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         const bool settled=Wait([&] {
             panel->Observe();actual=panel->GetObservedState();
             for(auto it=expected.begin();it!=expected.end();++it)if(observedValue(it.key())!=it.value())return false;
+            for(auto it=expectedActions.begin();it!=expectedActions.end();++it) {
+                const auto* button=panel->findChild<QPushButton*>("action_"+it.key());
+                if(!button || button->isEnabled()!=it.value().toBool())return false;
+            }
             return true;
         },getWaitMilliseconds(step));
         if(!settled)std::cerr<<"STATE MISMATCH: expected="<<GetJsonText(expected).toStdString()<<" actual="<<GetJsonText(actual).toStdString()<<std::endl;
         for(auto it=expected.begin();it!=expected.end();++it)Check(observedValue(it.key())==it.value(),("observed business state matches "+it.key()).toStdString().c_str());
+        for(auto it=expectedActions.begin();it!=expectedActions.end();++it)
+            Check(panel->findChild<QPushButton*>("action_"+it.key())->isEnabled()==it.value().toBool(),("actual command availability matches "+it.key()).toStdString().c_str());
         if(step.contains("stateAudit"))ExportJson(GetText(step,"stateAudit"),{{"module",panel->GetName()},{"parameterAction",panel->GetParameterAction()},{"primary",panel->findChild<QPushButton*>("businessPrimary")->property("businessAction").toString()},{"state",actual}});
     };
     for (const auto value : script["steps"].toArray()) {
         const auto step = value.toObject();
+        std::cout<<"UI_CONTROL control="<<step["control"].toString().toStdString()<<" module="<<step["module"].toString().toStdString()<<" action="<<step["action"].toString().toStdString()<<std::endl;
         const auto params = GetResolved(step["parameters"], results).toObject();
+        if(step["control"]=="dockLayout") {
+            const auto session=window.GetSession();const auto beforeViews=session->GetRenderViewStates();QMap<QString,vtkRenderWindow*> windows;
+            for(auto* view:window.findChildren<QVTKOpenGLNativeWidget*>())windows[view->objectName()]=view->renderWindow();
+            if(step["reset"].toBool())window.ResetLayout();
+            const auto area=[](const QString& value){if(value=="Left")return Qt::LeftDockWidgetArea;if(value=="Right")return Qt::RightDockWidgetArea;if(value=="Top")return Qt::TopDockWidgetArea;if(value=="Bottom")return Qt::BottomDockWidgetArea;throw std::invalid_argument("unknown dock area");};
+            for(const auto item:step["docks"].toArray()){
+                const auto entry=item.toObject();auto* dock=window.findChild<QDockWidget*>(GetText(entry,"name"));Check(dock,"layout control names an existing dock");
+                if(entry.contains("area")){dock->setFloating(false);window.addDockWidget(area(GetText(entry,"area")),dock);}
+                if(entry.contains("splitWith")){auto* anchor=window.findChild<QDockWidget*>(GetText(entry,"splitWith"));Check(anchor,"split anchor exists");window.splitDockWidget(anchor,dock,entry["orientation"]=="Vertical"?Qt::Vertical:Qt::Horizontal);}
+                if(entry.contains("tabWith")){auto* anchor=window.findChild<QDockWidget*>(GetText(entry,"tabWith"));Check(anchor,"tab anchor exists");window.tabifyDockWidget(anchor,dock);}
+                if(entry.contains("floating"))dock->setFloating(entry["floating"].toBool());
+                if(dock->isFloating()){dock->resize(700,400);dock->move(window.pos()+QPoint(40,40));}
+                if(entry.contains("visible"))dock->setVisible(entry["visible"].toBool());if(entry["raise"].toBool())dock->raise();
+            }
+            QCoreApplication::processEvents();if(step["save"].toBool())window.SaveLayout();if(step["restore"].toBool())window.RestoreLayout();QCoreApplication::processEvents();
+            for(const auto item:step["check"].toArray()) {const auto entry=item.toObject();auto* dock=window.findChild<QDockWidget*>(GetText(entry,"name"));Check(dock,"checked dock exists");if(entry.contains("area"))Check(window.dockWidgetArea(dock)==area(GetText(entry,"area")),"dock restores its requested edge");if(entry.contains("floating"))Check(dock->isFloating()==entry["floating"].toBool(),"dock restores its floating state");if(entry.contains("visible"))Check(!dock->isHidden()==entry["visible"].toBool(),"dock restores explicit visibility");if(entry.contains("tabWith"))Check(window.tabifiedDockWidgets(dock).contains(window.findChild<QDockWidget*>(GetText(entry,"tabWith"))),"dock restores its tab group");}
+            Check(session==window.GetSession() && session->GetRenderViewStates().size()==beforeViews.size(),"layout preserves the live Session and all Host view identities");
+            for(auto* view:window.findChildren<QVTKOpenGLNativeWidget*>())Check(windows.value(view->objectName())==view->renderWindow(),"floating and docking retain the original VTK render window");
+            if(step.contains("screenshot"))Check(GrabWindow(window).save(GetText(step,"screenshot")),"dock layout captured from the actual window");
+            if(step.contains("floatingScreenshot")){auto* dock=window.findChild<QDockWidget*>(GetText(step,"captureDock"));Check(dock && dock->isFloating() && dock->grab().save(GetText(step,"floatingScreenshot")),"actual floating dock captured");}
+            continue;
+        }
+        if(step["control"]=="surfaceHistogramIso") {
+            auto* panel=window.GetModule("Surface");NavigateTool(window,"Surface","GlobalAutomatic");auto* toggle=window.findChild<QAction*>("showGrayHistogram");if(!toggle->isChecked())toggle->trigger();
+            const auto timeout=getWaitMilliseconds(step);Check(Wait([&]{panel->Observe();return !panel->GetGrayStatisticsWidget()->GetHistogram()["counts"].toArray().isEmpty();},timeout),"Surface exposes the current scope's real histogram");
+            auto* statistics=panel->GetGrayStatisticsWidget();auto* plot=statistics->findChild<QWidget*>("businessHistogramPlot");statistics->SelectInteractionMode("编辑表面初值");QCoreApplication::processEvents();GrabWindow(window);
+            const auto data=statistics->GetHistogram(),before=panel->GetActionParameters("GlobalAutomatic"),stateBefore=panel->GetObservedState();const auto edges=data["edges"].toArray();QJsonObject marker;
+            for(const auto item:data["markers"].toArray())if(item.toObject()["key"]=="initialIsoValue")marker=item.toObject();Check(marker["editable"].toBool(),"Surface has its separate editable initial threshold");
+            const auto low=edges.first().toDouble(),high=edges.last().toDouble(),fraction=.58;const QPointF start(62+(plot->width()-82)*(marker["value"].toDouble()-low)/(high-low),40),end(62+(plot->width()-82)*fraction,40);
+            const auto count=window.GetRecords().GetRecords()["records"].toArray().size();QMouseEvent press(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier),move(QEvent::MouseMove,end,Qt::NoButton,Qt::LeftButton,Qt::NoModifier),release(QEvent::MouseButtonRelease,end,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+            QApplication::sendEvent(plot,&press);QApplication::sendEvent(plot,&move);Check(panel->GetActionParameters("GlobalAutomatic")==before,"Surface marker movement changes no request parameters");
+            const auto cancel=step["cancelBy"].toString();if(cancel=="Escape"){QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(plot,&escape);}else if(cancel=="scope")panel->SetParameterPatch("GlobalAutomatic",{{"analysisRoi",""}});
+            QApplication::sendEvent(plot,&release);QCoreApplication::processEvents();Check(window.GetRecords().GetRecords()["records"].toArray().size()==count,"Surface marker release cannot invoke Preview or Determine");
+            const auto after=panel->GetActionParameters("GlobalAutomatic");if(cancel.isEmpty()){Check(after["initialIsoValue"].isDouble()&&std::abs(after["initialIsoValue"].toDouble()-(low+(high-low)*fraction))<=(high-low)/std::max(1,plot->width()-82),"Surface release writes the pointed initial threshold to the draft");Check(panel->findChild<QComboBox*>("surfaceParameterSource")->currentData().toBool(),"Surface marker explicitly selects manual initial parameters");Check(panel->GetObservedState()["isoEstimate"]==stateBefore["isoEstimate"],"editing Surface initial threshold cannot replace the measured BG/M estimate");}
+            else Check(after["initialIsoValue"]==before["initialIsoValue"],"cancelled or changed-scope Surface release preserves the old initial draft");
+            continue;
+        }
+        if(step["control"]=="histogramIso") {
+            auto* panel=window.GetModule("View");NavigateTool(window,"View","Set");panel->SetParameterPatch("Set",{{"viewId","primary-3d"},{"mode",QJsonValue()},{"iso",QJsonValue()}});
+            auto* histogram=window.findChild<QAction*>("showGrayHistogram");if(!histogram->isChecked())histogram->trigger();
+            Check(histogram->isChecked()&&window.findChild<QDockWidget*>("grayHistogramDock")->isVisible(),"the unique histogram toggle exposes its synchronized dock");
+            const int timeout=getWaitMilliseconds(step);Check(Wait([&]{panel->Observe();return panel->GetGrayStatisticsWidget()->GetHistogram()["status"]=="Ready";},timeout),"real input gray histogram becomes ready");
+            auto* statistics=panel->GetGrayStatisticsWidget();auto* plot=statistics->findChild<QWidget*>("businessHistogramPlot");statistics->SelectInteractionMode("设置等值阈值");QCoreApplication::processEvents();GrabWindow(window);
+            const auto data=statistics->GetHistogram();const auto edges=data["edges"].toArray();const auto low=edges.first().toDouble(),high=edges.last().toDouble();
+            window.GetRecords().AddTiming("UI.GrayHistogramMaximumBlock",static_cast<qint64>(data["maximumOwnerBlockMs"].toDouble()*1000000.));
+            QJsonObject marker;for(const auto value:data["markers"].toArray())if(value.toObject()["key"]=="iso")marker=value.toObject();Check(marker["editable"].toBool(),"View ISO exposes an editable display marker");
+            const auto before=window.GetSession()->GetRenderViewState({"primary-3d"});Check(before.has_value(),"display target exists");
+            Check(Wait([&]{return !window.GetWorkflow().getRenderPending("primary-3d");},timeout),"the displayed volume settles before marker manipulation");
+            const auto renderedBefore=window.GetRecords().GetTimings()["Render.primary-3d"].toObject()["count"].toDouble();
+            QMap<QString,QJsonObject> businessResults;
+            if(step["preserveResults"].toBool())for(const auto* name:{"Surface","Part","Wall"}){
+                auto* business=window.GetModule(name);business->Observe(false);const auto state=business->GetObservedState();QJsonObject frozen;
+                for(const auto* key:{"formalMesh","formalParameterFingerprint","formalParameters","generation","result","source","labels","mesh","labelMap","catalogRevision"})if(state.contains(key))frozen[key]=state[key];
+                Check(!frozen.isEmpty(),"display-only check starts with an existing formal business identity");businessResults[name]=frozen;
+            }
+            const auto beginCount=window.GetRecords().GetRecords()["records"].toArray().size();
+            const auto xFor=[&](double value){return 62+(plot->width()-82)*(value-low)/(high-low);};
+            const auto fraction=step.contains("toFraction")?GetNumber(step,"toFraction"):0.63;const QPointF start(xFor(marker["value"].toDouble()),40),end(62+(plot->width()-82)*fraction,40);
+            QMouseEvent press(QEvent::MouseButtonPress,start,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(plot,&press);QMouseEvent move(QEvent::MouseMove,end,Qt::NoButton,Qt::LeftButton,Qt::NoModifier);QElapsedTimer previewClock;previewClock.start();QApplication::sendEvent(plot,&move);plot->repaint();const auto previewNs=previewClock.nsecsElapsed();window.GetRecords().AddTiming("UI.HistogramPreview",previewNs);Check(previewNs<=100000000,"Qt marker input and paint return within the 100 ms direct-feedback limit");
+            Check(window.GetRecords().GetRecords()["records"].toArray().size()==beginCount && window.GetSession()->GetRenderViewState({"primary-3d"})->isoThreshold==before->isoThreshold,"marker movement changes only the local candidate");
+            const auto cancel=step["cancelBy"].toString();
+            if(cancel=="Escape"){QKeyEvent escape(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(plot,&escape);}
+            else if(cancel=="target")panel->SetParameterPatch("Set",{{"viewId","slice-top-down"}});
+            else if(cancel=="mode")panel->SetParameterPatch("Set",{{"mode","CompositeVolume"}});
+            else if(cancel=="hide")window.findChild<QDockWidget*>("grayHistogramDock")->hide();
+            else if(cancel=="source"){const auto id=Click(window,"Data","Load",GetResolved(step["switchParameters"],results).toObject(),timeout);GetComplete(window,id,"Succeeded",timeout);Check(Wait([&]{const auto current=window.GetSession()->GetRenderViewState({"primary-3d"});panel->Observe();return current&&current->dataRevision!=before->dataRevision;},timeout),"actual input switch invalidates the old marker drag");}
+            const auto countBeforeRelease=window.GetRecords().GetRecords()["records"].toArray().size();
+            QMouseEvent release(QEvent::MouseButtonRelease,end,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(plot,&release);
+            if(!cancel.isEmpty()){QCoreApplication::processEvents();Check(window.GetRecords().GetRecords()["records"].toArray().size()==countBeforeRelease,"cancelled or stale marker release submits no View.Set");}
+            else {
+                Check(window.GetRecords().GetRecords()["records"].toArray().size()==beginCount+1,"one release creates exactly one existing View.Set request");
+                const auto record=GetComplete(window,static_cast<std::uint64_t>(beginCount+1),"Succeeded",timeout);Check(record["module"]=="View"&&record["action"]=="Set","drag uses the existing View.Set business action");
+                const auto requested=record["parameters"].toObject()["iso"].toDouble();const auto pixel=(high-low)/std::max(1,plot->width()-82);
+                Check(std::abs(requested-(low+(high-low)*fraction))<=pixel,"released display threshold matches the pointer within one logical plot pixel");
+                Check(Wait([&]{const auto applied=window.GetSession()->GetRenderViewState({"primary-3d"});return applied && applied->isoThreshold==requested;},timeout),"Host observes the threshold submitted through View.Set");
+                if(requested!=before->isoThreshold)Check(Wait([&]{return window.GetRecords().GetTimings()["Render.primary-3d"].toObject()["count"].toDouble()>renderedBefore&&!window.GetWorkflow().getRenderPending("primary-3d");},timeout),"the actual 3D view renders after its changed display threshold");
+                QApplication::sendEvent(plot,&release);Check(window.GetRecords().GetRecords()["records"].toArray().size()==beginCount+1,"repeated release cannot submit again");
+            }
+            for(auto it=businessResults.begin();it!=businessResults.end();++it){auto* business=window.GetModule(it.key());business->Observe(false);const auto state=business->GetObservedState();for(auto value=it->begin();value!=it->end();++value)Check(state[value.key()]==value.value(),"display ISO preserves the exact formal business identity and parameters");}
+            if(step.contains("screenshot"))Check(GrabWindow(window).save(GetText(step,"screenshot")),"display histogram captured after the actual interaction");
+            continue;
+        }
         if(step["control"]=="checkPage") {
-            const auto module=GetText(step,"module");auto* tabs=window.findChild<QTabBar*>("featureTabs");int index=-1;
-            const int group=QStringList{"Data","View","Rotation"}.contains(module)?0:QStringList{"Roi","Crop","Artifact","Part","Surface"}.contains(module)?1:2;
-            auto* workspaces=window.findChild<QTabBar*>("workspaceTabs");Check(workspaces->isTabEnabled(group),"planned business group is compiled");
-            const auto groupPoint=workspaces->tabRect(group).center();
-            QMouseEvent groupPress(QEvent::MouseButtonPress,groupPoint,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(workspaces,&groupPress);
-            QMouseEvent groupRelease(QEvent::MouseButtonRelease,groupPoint,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(workspaces,&groupRelease);QCoreApplication::processEvents();
-            for(int i=0;i<tabs->count();++i)if(tabs->tabData(i)==module)index=i;
-            Check(index>=0,"planned business tab is present");
-            const auto point=tabs->tabRect(index).center();
-            QMouseEvent press(QEvent::MouseButtonPress,point,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
-            QApplication::sendEvent(tabs,&press);QMouseEvent release(QEvent::MouseButtonRelease,point,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);QApplication::sendEvent(tabs,&release);
+            window.findChild<QToolButton*>("toggleObjectColumn")->setChecked(true);
+            window.findChild<QToolButton*>("toggleParameterColumn")->setChecked(true);
+            const auto module=GetText(step,"module");auto* tabs=window.findChild<QComboBox*>("featureTabs");int index=-1;
+            const int group=QStringList{"Data","View","Rotation","Artifact"}.contains(module)?0:module=="Surface"?1:QStringList{"Roi","Crop"}.contains(module)?2:3;
+            auto* workspaces=window.findChild<QComboBox*>("workspaceTabs");Check(GetComboEnabled(workspaces,group),"planned business group is compiled");
+            SelectComboIndex(workspaces,group);QCoreApplication::processEvents();
+            for(int i=0;i<tabs->count();++i)if(tabs->itemData(i)==module)index=i;
+            Check(index>=0,"planned business module is present");
+            SelectComboIndex(tabs,index);
             auto* page=window.GetModule(module);QCoreApplication::processEvents();page->Observe();
-            Check(page->isVisible() && page->findChild<QPushButton*>("businessPrimary")->isVisible(),"Qt tab mouse event reveals the planned stage and primary");
+            if(auto* filter=window.findChild<QComboBox*>("sceneView"))filter->setCurrentIndex(step["sceneView"].toInt(0));
+            Check(page->isVisible() && page->findChild<QPushButton*>("businessPrimary")->isVisible(),"Qt navigation key events reveal the planned stage and primary");
             Check(window.size()==initialWindowSize,"tab clicks preserve the current outer window size");
+            if(step.contains("parameterAction")){page->SelectAction(GetText(step,"parameterAction"));QCoreApplication::processEvents();}
+            for(const auto& entry:{std::pair<const char*,const char*>{"objects","toggleObjectColumn"},{"parameters","toggleParameterColumn"}}) {
+                if(step["columns"].toObject().contains(entry.first))window.findChild<QToolButton*>(entry.second)->setChecked(step["columns"].toObject()[entry.first].toBool());
+            }
+            QCoreApplication::processEvents();
+            if(step["showHistogram"].toBool()){
+                window.GetWorkflow().onShowHistogram(module);
+                Check(Wait([&]{page->Observe();const auto data=page->GetGrayStatisticsWidget()->GetHistogram();return data["status"]=="Ready"||!data["counts"].toArray().isEmpty();},getWaitMilliseconds(step)),"the selected tool exposes its real grayscale distribution");
+            }
+            if(step["checkViewTextFit"].toBool())CheckViewToolbarText(window);
+            if(step.contains("expectedDpr"))Check(window.devicePixelRatioF()==GetNumber(step,"expectedDpr"),"the capture uses the requested application scale");
+            QPixmap pageCapture;
+            if(step["checkPanelTextFit"].toBool()) {
+                // grab 同步完成当前帧的布局与绘制；断言和保存使用同一帧，不要求内部滚动位置静止。
+                std::string layoutError;
+                const bool ready=Wait([&] {
+                    pageCapture=GrabWindow(window);
+                    try {CheckModulePanelText(*page);return true;}
+                    catch(const std::runtime_error& error){layoutError=error.what();return false;}
+                },static_cast<int>(getWaitMilliseconds(step)));
+                if(!ready)throw std::runtime_error(layoutError.empty()?"module layout did not become ready":layoutError);
+                Check(ready,"the captured module frame satisfies the unchanged layout assertions");
+            }
+            if(step.contains("toolsScreenshot")) {
+                auto* tools=page->findChild<QToolButton*>("moreOperations");auto* menu=tools->menu();
+                menu->popup(tools->mapToGlobal(QPoint(0,tools->height())));QCoreApplication::processEvents();
+                Check(menu->isVisible(),"the shared tools menu is visible");
+                for(auto* action:menu->actions())if(action->isVisible() && !action->isSeparator())
+                    Check(menu->actionGeometry(action).width()>=menu->fontMetrics().horizontalAdvance(action->text())+24,"tool menu text remains complete");
+                Check(menu->grab().save(GetText(step,"toolsScreenshot")),"tools menu screenshot saved");
+                QKeyEvent close(QEvent::KeyPress,Qt::Key_Escape,Qt::NoModifier);QApplication::sendEvent(menu,&close);
+                Check(!menu->isVisible(),"Escape closes the tools menu");
+            }
+            if(step["expectInputElided"].toBool()) {
+                const auto* identity=window.findChild<QLabel*>("currentInputIdentity");const auto input=window.GetSession()->GetImageDescriptor();
+                Check(identity && identity->text().endsWith(QChar(0x2026)),"long input identity yields space with a visible ellipsis");
+                Check(input && identity->accessibleName().contains(QString::fromStdString(input->metadata.identity.datasetId))
+                    && identity->toolTip().contains(identity->accessibleName()),"elided input keeps its full current identity in the tooltip and accessible name");
+            }
+            if(step["columns"].toObject()["parameters"].toBool(true)) {
+                const auto* scroll=page->findChild<QScrollArea*>("operationScroll");
+                Check(scroll->height()>=100,"parameter area retains usable height in every visible mode");
+            }
             checkObserved(step);if(step.contains("expectPrimaryAction"))Check(page->findChild<QPushButton*>("businessPrimary")->property("businessAction")==step["expectPrimaryAction"].toString(),"current page presents the expected phase without selecting a form");
-            if(step.contains("screenshot"))Check(window.grab().save(GetText(step,"screenshot")),"business page screenshot saved");
+            if(step.contains("screenshot")) {
+                if(pageCapture.isNull())pageCapture=GrabWindow(window);
+                Check(pageCapture.save(GetText(step,"screenshot")),"business page screenshot saved");
+                auto* scene=window.findChild<QDockWidget*>("sceneDock");auto* properties=window.findChild<QDockWidget*>("parameterDock");const QList<int> sizes{scene->isVisible()?scene->width():0,window.findChild<QVTKOpenGLNativeWidget*>("primary3D")->width(),properties->isVisible()?properties->width():0};
+                auto* scroll=page->findChild<QScrollArea*>("operationScroll");auto* footer=page->findChild<QWidget*>("businessCommandFooter");
+                const bool shown=properties->isVisible();
+                if(shown)Check(scroll->height()>=100 && page->rect().contains(QRect(footer->mapTo(page,QPoint()),footer->size()))
+                    && page->findChildren<QScrollArea*>().size()==1,"the complete parameter area and current footer fit without nested scrollers");
+                QJsonArray propertyGeometry;
+                for(auto* label:page->findChildren<QLabel*>("parameterTitle"))if(label->isVisible()) {
+                    auto* field=label->parentWidget();QWidget* body=nullptr;
+                    for(auto* child:field->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->property("parameterValue").toBool())body=child;
+                    propertyGeometry.append(QJsonObject{{"key",field->objectName()},{"fieldWidth",field->width()},
+                        {"label",label->text()},{"labelX",label->x()},{"labelY",label->y()},{"labelWidth",label->width()},
+                        {"labelHeight",label->height()},{"fontPixelSize",label->font().pixelSize()},{"labelRequiredWidth",label->fontMetrics().horizontalAdvance(label->text())},
+                        {"vectorBelow",field->property("vectorBelow").toBool()},
+                        {"valueX",body?body->x():-1},{"valueY",body?body->y():-1},{"valueWidth",body?body->width():-1}});
+                }
+                QJsonArray commandGeometry;
+                for(auto* child:footer->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly))if(child->isVisible())
+                    commandGeometry.append(QJsonObject{{"name",child->objectName()},{"y",child->y()},{"height",child->height()},{"hint",child->sizeHint().height()}});
+                ExportJson(GetText(step,"screenshot")+".layout.json",{{"module",module},{"width",window.width()},{"height",window.height()},{"devicePixelRatio",window.devicePixelRatioF()},
+                    {"columns",QJsonArray{sizes[0],sizes[1],sizes[2]}},{"parametersVisible",shown},{"parameterHeight",scroll->height()},
+                    {"footerHeight",footer->height()},{"scrollMaximum",scroll->verticalScrollBar()->maximum()},{"properties",propertyGeometry},{"commands",commandGeometry}});
+            }
             continue;
         }
         if(step["control"]=="editParameters") {
@@ -2734,7 +3527,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             const auto action=panel->GetParameterAction();if(step.contains("action"))Check(action==GetText(step,"action"),"editing preserves the currently selected form");
             panel->SetParameterPatch(action,params);QCoreApplication::processEvents();panel->Observe();
             if(step.contains("expectPrimaryAction"))Check(panel->findChild<QPushButton*>("businessPrimary")->property("businessAction")==step["expectPrimaryAction"].toString(),"edited current form changes its natural next action");
-            if(step.contains("screenshot"))Check(window.grab().save(GetText(step,"screenshot")),"edited business page screenshot saved");
+            if(step.contains("screenshot"))Check(GrabWindow(window).save(GetText(step,"screenshot")),"edited business page screenshot saved");
             checkObserved(step);
             continue;
         }
@@ -2761,27 +3554,42 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         }
         if (step["waitForCropFrames"].toBool()) {
             auto* crop = window.GetModule("Crop");
-            Check(crop && Wait([&] { crop->Observe(); return crop->GetObservedState()["framesReady"].toBool(); },
+            Check(crop && Wait([&] {
+                const auto state=crop->GetObservedState();
+                const bool isReady=GetCropFramesReady(state);
+                if(!isReady)CheckCropPendingConfirmation(crop,state);
+                return isReady;
+            },
                 static_cast<int>(timeout)), "crop business frames are ready before the next operation");
         }
         const auto checkpointPath = step["performanceCheckpoint"].toString();
         const auto timingsBefore = checkpointPath.isEmpty() ? QJsonObject{} : window.GetRecords().GetTimings();
         const auto measurementsBefore = checkpointPath.isEmpty() ? QJsonObject{} : window.GetRecords().GetMeasurements();
+        const auto sceneBefore = checkpointPath.isEmpty() ? std::optional<HostSceneViewState>{}
+            : window.GetSession()->GetSceneViewState({"primary-3d"});
         const auto requestedUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
         QElapsedTimer checkpointClock; checkpointClock.start();
         if (!checkpointPath.isEmpty()) std::cout << "phase=" << GetText(step,"module").toStdString() << "."
             << GetText(step,"action").toStdString() << " event=start utc=" << requestedUtc.toStdString() << std::endl;
         const auto control=step["control"].toString();
         std::uint64_t id=0;
-        if(control=="businessPrimary" || control=="nextButton" || control=="currentPrimary") {
+        if(control=="businessPrimary" || control=="nextButton" || control=="currentPrimary" || control=="previewButton") {
             const auto module=GetText(step,"module"),action=GetText(step,"action");auto* panel=window.GetModule(module);
             if(!panel)throw std::invalid_argument("脚本模块不存在");
             const auto parameterAction=step["parameterAction"].isString()?GetText(step,"parameterAction"):action;
             if(control=="currentPrimary") {Check(panel->isVisible(),"primary click targets the already visible page");Check(params.isEmpty(),"currentPrimary never injects parameters or navigation");}
-            else window.GetWorkflow().onNavigate(module,parameterAction,params);
+            else {NavigateTool(window,module,parameterAction);panel->SetParameterPatch(parameterAction,params);}
             QCoreApplication::processEvents();panel->Observe();
             QPointer<QPushButton> button;
-            const bool available=Wait([&]{panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : "businessPrimary");return button && button->isVisible() && button->isEnabled();},timeout);
+            QPointer<QAction> nextCommand;
+            const bool available=Wait([&]{
+                panel->Observe();button=panel->findChild<QPushButton*>(control=="nextButton" ? "next_"+action : control=="previewButton"?"previewSurface":"businessPrimary");
+                if(control=="nextButton") {
+                    auto* tools=panel->findChild<QToolButton*>("moreOperations");nextCommand=tools->menu()->findChild<QAction*>("nextMenu_"+action);
+                    return tools->isVisible() && tools->isEnabled() && nextCommand && nextCommand->isVisible() && nextCommand->isEnabled();
+                }
+                return button && button->isVisible() && button->isEnabled();
+            },timeout);
             if(!available)std::cout << "CONTROL BLOCKED: " << module.toStdString() << "." << action.toStdString()
                 << " tooltip=" << (button ? button->toolTip().toStdString() : "missing control") << " state="
                 << QJsonDocument(panel->GetObservedState()).toJson(QJsonDocument::Compact).toStdString() << std::endl;
@@ -2789,18 +3597,18 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
             if(step["expectPrimaryAction"].isString())Check(button->property("businessAction").toString()==step["expectPrimaryAction"].toString(),"stage primary matches the planned business phase");
             id=static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size())+1;
             std::cout<<"PRIMARY CLICK: "<<module.toStdString()<<"."<<action.toStdString()<<" record="<<id<<std::endl;
-            button->click();
+            if(nextCommand)nextCommand->trigger();else button->click();
             std::cout<<"PRIMARY RETURN: "<<module.toStdString()<<"."<<action.toStdString()<<std::endl;
             const bool dispatched=Wait([&]{return !window.GetRecords().GetRecord(id).isEmpty();},timeout);
             if(!dispatched)std::cerr<<"PRIMARY DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
                 <<" primary="<<button->property("businessAction").toString().toStdString()<<" enabled="<<button->isEnabled()
-                <<" message="<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
+                <<" message="<<window.GetFeedback().toStdString()
                 <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
             Check(dispatched,"primary click creates the actual operation record");
         } else if(control=="catalogAction") {
             const auto module=GetText(step,"module"),action=GetText(step,"action");
             auto* panel=window.GetModule(module);
-            window.GetWorkflow().onNavigate(module,action,{});QCoreApplication::processEvents();panel->Observe();
+            NavigateTool(window,module,action);panel->Observe();
             auto* tree=panel->GetCatalogTree();QTreeWidgetItem* target=nullptr;
             Check(Wait([&] {
                 panel->Observe();
@@ -2823,10 +3631,10 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         QTimer switching, cancellation;
         int switchCount = 0;
         if (step["switchFeaturesWhilePending"].toBool()) {
-            auto* tabs = window.findChild<QTabBar*>("featureTabs");
+            auto* tabs = window.findChild<QComboBox*>("featureTabs");
             QObject::connect(&switching, &QTimer::timeout, &window, [&, tabs] {
                 if (window.GetRecords().GetRecord(id)["isTerminal"].toBool()) { switching.stop(); return; }
-                auto* workspaces = window.findChild<QTabBar*>("workspaceTabs");
+                auto* workspaces = window.findChild<QComboBox*>("workspaceTabs");
                 if (tabs->currentIndex()+1 < tabs->count()) tabs->setCurrentIndex(tabs->currentIndex()+1);
                 else { workspaces->setCurrentIndex((workspaces->currentIndex()+1) % workspaces->count()); tabs->setCurrentIndex(0); }
                 ++switchCount;
@@ -2867,7 +3675,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         const auto metrics=GetResolved(step["expectMetrics"],results).toObject();
         for(auto field=metrics.begin();field!=metrics.end();++field) {
             QJsonValue actual=record["result"];
-            for(const auto& key:field.key().split('.'))actual=actual.toObject().value(key);
+            for(const auto& key:field.key().split('.')){if(actual.isArray()){bool validIndex=false;const auto index=key.toInt(&validIndex);Check(validIndex&&index>=0&&index<actual.toArray().size(),"metric array path names an existing result");actual=actual.toArray()[index];}else actual=actual.toObject().value(key);}
             bool valid=actual.isDouble();const auto number=actual.isString()?actual.toString().toDouble(&valid):actual.toDouble();
             Check(valid && std::isfinite(number),("business metric is finite: "+field.key()).toStdString().c_str());
             const auto bounds=field.value().toObject();
@@ -2881,7 +3689,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         checkObserved(step);
         if(step.contains("expectFollowupStatus")) {
             const bool followed=Wait([&]{return !window.GetRecords().GetRecord(id+1).isEmpty();},2000);
-            if(!followed)std::cerr<<"FOLLOWUP MISSING: "<<window.findChild<QLabel*>("latestMessage")->text().toStdString()
+            if(!followed)std::cerr<<"FOLLOWUP MISSING: "<<window.GetFeedback().toStdString()
                 <<" state="<<GetJsonText(window.GetModule(GetText(step,"module"))->GetObservedState()).toStdString()<<std::endl;
             Check(followed,"combined primary dispatches its real follow-up transaction");
             const auto followup=GetComplete(window,id+1,GetText(step,"expectFollowupStatus"),timeout);
@@ -2893,28 +3701,31 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         }
         if(script["checkWindowStable"].toBool() || script["checkWindowLocked"].toBool())Check(window.size()==initialWindowSize,"business operations preserve the user-selected outer window size");
         if(step["showStatistics"].toBool()) {
-            auto* panel=window.GetModule(GetText(step,"module"));window.GetWorkflow().onShowStatistics(panel->GetName());panel->RefreshStatistics();
+            auto* panel=window.GetModule(GetText(step,"module"));
+            const bool gray=step["waitHistogram"].toBool() || QStringList{"Data","View","Roi","Crop","Surface","Rotation"}.contains(panel->GetName());
+            if(gray){window.GetWorkflow().onShowHistogram(panel->GetName());panel->RefreshGrayStatistics();}else{window.GetWorkflow().onShowStatistics(panel->GetName());panel->RefreshStatistics();}
+            auto* statistics=gray?panel->GetGrayStatisticsWidget():panel->GetStatisticsWidget();
             if(step["waitHistogram"].toBool() || step["waitStatistics"].toBool()) {
                 Check(Wait([&]{
-                    const auto data=panel->GetStatisticsWidget()->GetHistogram();
+                    const auto data=statistics->GetHistogram();
                     const bool directReady=step["waitHistogram"].toBool()
-                        && !data["cacheKey"].isString() && !data["counts"].toArray().isEmpty()
+                        && !data["counts"].toArray().isEmpty()
                         && (data["status"].isUndefined() || data["status"]=="Ready");
                     return directReady || (data["cacheKey"].isString()
                         && QStringList{"Ready","Empty","Failed"}.contains(data["status"].toString()));
                 },timeout),"real statistics reaches a terminal state within the bounded read");
-                const auto data=panel->GetStatisticsWidget()->GetHistogram();
+                const auto data=statistics->GetHistogram();
                 const bool directReady=step["waitHistogram"].toBool()
-                    && !data["cacheKey"].isString() && !data["counts"].toArray().isEmpty()
+                    && !data["counts"].toArray().isEmpty()
                     && (data["status"].isUndefined() || data["status"]=="Ready");
                 Check(directReady || data["status"]=="Ready" || data["status"]=="Empty",
                     "real statistics succeeds including a valid empty result");
                 if(step["waitHistogram"].toBool() && data["status"]=="Ready")
                     Check(!data["counts"].toArray().isEmpty(),"ready histogram contains its declared bins");
             }
-            if(step.contains("statisticsAudit"))ExportJson(GetText(step,"statisticsAudit"),panel->GetStatisticsWidget()->GetHistogram());
-            if(step.contains("statisticsScreenshot"))Check(panel->GetStatisticsWidget()->grab().save(GetText(step,"statisticsScreenshot")),"actual embedded statistics controls are captured");
-            // 统计在主窗口内部，不再有遮挡裁切视窗的浮动统计窗口。
+            if(step.contains("statisticsAudit"))ExportJson(GetText(step,"statisticsAudit"),statistics->GetHistogram());
+            if(step.contains("statisticsScreenshot"))Check(statistics->grab().save(GetText(step,"statisticsScreenshot")),"actual embedded statistics controls are captured");
+            // 灰度与分析统计分别属于可恢复的原生停靠窗。
             QCoreApplication::processEvents();
         }
         switching.stop(); cancellation.stop();
@@ -3179,7 +3990,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 }
             }
             std::cout<<"CAPTURE: saving window"<<std::endl;
-            Check(window.grab().save(GetText(step, "screenshot")), "case screenshot saved");
+            Check(GrabWindow(window).save(GetText(step, "screenshot")), "case screenshot saved");
         }
         if (step["checkViewLayout"].toBool()) CheckFourViewGeometry(window);
         if (step["checkSceneConsistency"].toBool()) {
@@ -3228,6 +4039,18 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         }
         if (step.contains("businessCapture")) SaveBusinessCapture(window,GetText(step,"businessCapture"),step,id);
         if (!checkpointPath.isEmpty()) {
+            const auto timingsAfter = window.GetRecords().GetTimings();
+            const auto sceneAfter = window.GetSession()->GetSceneViewState({"primary-3d"});
+            const auto callCount = [&](const char* key) {
+                return timingsAfter[key].toObject()["count"].toInt()
+                    - timingsBefore[key].toObject()["count"].toInt();
+            };
+            // 区分owner推进、渲染请求、真实绘制与场景提交；均不是屏幕刷新率。
+            const QJsonObject convergence{{"ownerUpdateCalls", callCount("Host.Update")},
+                {"renderBatchCalls", callCount("Host.Render")}, {"primaryRenderCalls", callCount("Render.primary-3d")},
+                {"sceneEpochBefore", sceneBefore ? QJsonValue(QString::number(sceneBefore->sceneEpoch)) : QJsonValue()},
+                {"sceneEpochAfter", sceneAfter ? QJsonValue(QString::number(sceneAfter->sceneEpoch)) : QJsonValue()},
+                {"elapsedToStableCheckMs", QString::number(checkpointClock.elapsed())}};
             QJsonArray viewports;
             for (const auto* widget : window.findChildren<QVTKOpenGLNativeWidget*>()) viewports.append(QJsonObject{
                 {"id",widget->objectName()},{"width",widget->width()},{"height",widget->height()},
@@ -3238,7 +4061,7 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
                 {"module",GetText(step,"module")},{"action",GetText(step,"action")},{"status",record["status"]},
                 {"requestedUtc",requestedUtc},{"checkpointUtc",QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
                 {"elapsedToCheckpointMs",QString::number(checkpointClock.elapsed())},{"businessElapsedMs",record["elapsedMs"]},
-                {"timingsBefore",timingsBefore},{"timingsAfter",window.GetRecords().GetTimings()},
+                {"timingsBefore",timingsBefore},{"timingsAfter",timingsAfter},{"convergence",convergence},
                 {"measurementsBefore",measurementsBefore},{"measurementsAfter",window.GetRecords().GetMeasurements()},
                 {"viewports",viewports},{"isoThreshold",state ? QJsonValue(state->isoThreshold) : QJsonValue()},
                 {"frameGuardChecked",step["checkSceneConsistency"].toBool()}});
@@ -3273,7 +4096,7 @@ int StartTestCase(TestWindow& window, const QString& path, const QString& record
         Check(window.findChild<QLabel*>("businessMeasurements") != nullptr, "manual business measurements panel exists");
         Check(window.GetRecords().GetMeasurements()["memory"].toObject()["available"].toBool(), "OS process resource measurement is available");
         if (selfTest) StartSelfTest(window); else StartSequence(window, path,shutdownTimeoutMs);
-    } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; window.grab().save("scene-ui-failure.png"); result = 1; }
+    } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; GrabWindow(window).save("scene-ui-failure.png"); result = 1; }
     const auto businessDiagnostics = window.GetDiagnostics();
     QElapsedTimer stopClock; stopClock.start(); int stopAttempts = 0;
     const bool stopped = Wait([&] { ++stopAttempts; return window.StopSession(); },shutdownTimeoutMs);

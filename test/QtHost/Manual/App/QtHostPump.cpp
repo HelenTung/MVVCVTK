@@ -48,6 +48,7 @@ void QtHostPump::SendUpdates()
 {
     const auto session = m_session.lock();
     if (!session || m_signal->isStopped.load()) return;
+    if(onPhaseStarting)onPhaseStarting("Host.Update");
     QElapsedTimer clock; clock.start();
     const auto update = session->SendUpdates();
     if (onTiming) onTiming("Host.Update", clock.nsecsElapsed());
@@ -96,6 +97,7 @@ void QtHostPump::SendRender()
     request.desiredUpdateRate = 30.0;
     for (const auto& id : m_pending) if (getVisible && getVisible(id)) request.viewIds.push_back(id);
     if (request.viewIds.empty()) return;
+    if(onPhaseStarting)onPhaseStarting("Host.Render");
     QElapsedTimer clock; clock.start();
     const auto result = session->SendRender(request);
     if (onTiming) onTiming("Host.Render", clock.nsecsElapsed());

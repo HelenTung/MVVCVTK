@@ -158,8 +158,11 @@ bool HostRenderViewRuntime::GetPresentationEqual(
 }
 
 HostSceneViewState HostRenderViewRuntime::BuildSceneViewState(
-    std::vector<std::string> featureIds, const HostSceneViewState* previous) const
+    std::vector<std::string> featureIds, const HostSceneViewState* previous,
+    bool* isPresentationPending, bool* hasPresentationFailed) const
 {
+    if (isPresentationPending) *isPresentationPending = false;
+    if (hasPresentationFailed) *hasPresentationFailed = false;
     HostSceneViewState state;
     state.id = config.id;
     state.role = config.role;
@@ -169,6 +172,9 @@ HostSceneViewState HostRenderViewRuntime::BuildSceneViewState(
     if (!isAvailable || !app.view) return state;
 
     const auto appState = app.view->GetViewState();
+    // 与输入修订使用同一次采样；准备状态只留在 Host 私有帧校验中。
+    if (isPresentationPending) *isPresentationPending = appState.isPresentationPending;
+    if (hasPresentationFailed) *hasPresentationFailed = appState.hasPresentationFailed;
     if (previous && previous->id == config.id && previous->role == config.role
         && previous->isAvailable && previous->presentation
         && previous->presentationRevision == appState.revision

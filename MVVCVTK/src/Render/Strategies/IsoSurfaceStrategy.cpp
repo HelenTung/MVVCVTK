@@ -1,7 +1,10 @@
 #include "IsoSurfaceStrategy.h"
 #include <vtkImageData.h>
+#include <vtkCellArray.h>
 #include <vtkObjectFactory.h>
+#include <vtkOpenGLIndexBufferObject.h>
 #include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLRenderWindow.h>
 #include <vtkPolyData.h>
 #include <vtkPointData.h>
 #include <vtkProperty.h>
@@ -32,6 +35,22 @@ public:
     vtkTypeMacro(Mapper, vtkOpenGLPolyDataMapper);
 
     void SetEffectBinding(RenderEffectBinding* binding) { m_binding = binding; }
+    void SetPreparedProduct(std::shared_ptr<const IsoSurfaceProduct> product)
+    {
+        if (m_preparedProduct == product) return;
+        m_preparedProduct = std::move(product);
+        m_uploadedProduct.reset();
+        m_uploadedIndexCount = 0;
+        this->Modified();
+    }
+    bool GetHasUploadedProduct(const std::shared_ptr<const IsoSurfaceProduct>& product) const
+    {
+        const auto* indices = this->Primitives[PrimitiveTris].IBO;
+        return product && m_preparedProduct == product
+            && m_uploadedProduct.lock() == product && indices
+            && indices->IndexCount == m_uploadedIndexCount
+            && (m_uploadedIndexCount == 0 || (indices->IsReady() && indices->GetHandle() != 0));
+    }
     void RenderPiece(vtkRenderer* renderer, vtkActor* actor) override
     {
         if (m_binding) {
@@ -43,8 +62,72 @@ public:
         }
     }
 
+protected:
+    void BuildIBO(vtkRenderer* renderer, vtkActor* actor, vtkPolyData* surface) override
+    {
+        auto* context = vtkOpenGLRenderWindow::SafeDownCast(renderer->GetRenderWindow());
+        auto* property = actor->GetProperty();
+        const auto product = m_preparedProduct;
+        const bool isPrepared = product && context
+            && product->surface.GetPointer() == surface
+            && product->triangleIndicesTime != 0
+            && product->triangleIndicesTime == surface->GetMeshMTime()
+            && property->GetRepresentation() == VTK_SURFACE
+            && !property->GetEdgeVisibility() && !property->GetVertexVisibility()
+            && !renderer->GetSelector()
+            && surface->GetNumberOfVerts() == 0 && surface->GetNumberOfLines() == 0
+            && surface->GetNumberOfStrips() == 0;
+        if (isPrepared) {
+            try {
+                auto* indices = this->Primitives[PrimitiveTris].IBO;
+                bool hasUpload = m_uploadedProduct.lock() == product
+                    && m_uploadedContext == context
+                    && m_uploadedContextTime == context->GetContextCreationTime()
+                    && indices->IndexCount == m_uploadedIndexCount
+                    && (m_uploadedIndexCount == 0 || (indices->IsReady() && indices->GetHandle() != 0));
+                if (!hasUpload) {
+                    auto values = product->triangleIndices ? product->triangleIndices->TakeIndices() : nullptr;
+                    // 缓存已被其他读者消耗，或上下文需要重传：原生路径仍成功显示。
+                    if (values && (values->empty()
+                        || indices->Upload(*values, vtkOpenGLIndexBufferObject::ElementArrayBuffer))) {
+                        m_uploadedIndexCount = values->size();
+                        hasUpload = true;
+                    }
+                    // 只读上传读者在此退出：先释放CPU存储，再同步归还同产品预算。
+                }
+                if (hasUpload) {
+                    indices->IndexCount = m_uploadedIndexCount;
+                    // 此窄路径只有三角面；其他表示和辅助图元交还原 BuildIBO。
+                    for (int primitive = PrimitiveStart; primitive < PrimitiveEnd; ++primitive)
+                        if (primitive != PrimitiveTris) this->Primitives[primitive].IBO->IndexCount = 0;
+                    this->EdgeValues.clear();
+                    this->IBOBuildState.Clear();
+                    m_uploadedProduct = product;
+                    m_uploadedContext = context;
+                    m_uploadedContextTime = context->GetContextCreationTime();
+                    m_isUsingPreparedIndices = true;
+                    return;
+                }
+            }
+            catch (...) {
+                // 缓存或上传只是优化；恢复 VTK 原有装配/上传及错误处理。
+                this->IBOBuildState.Clear();
+            }
+        }
+        if (m_isUsingPreparedIndices) this->IBOBuildState.Clear();
+        m_isUsingPreparedIndices = false;
+        m_uploadedProduct.reset();
+        this->Superclass::BuildIBO(renderer, actor, surface);
+    }
+
 private:
     RenderEffectBinding* m_binding = nullptr;
+    std::shared_ptr<const IsoSurfaceProduct> m_preparedProduct;
+    std::weak_ptr<const IsoSurfaceProduct> m_uploadedProduct;
+    std::size_t m_uploadedIndexCount = 0;
+    const void* m_uploadedContext = nullptr;
+    vtkMTimeType m_uploadedContextTime = 0;
+    bool m_isUsingPreparedIndices = false;
 };
 
 vtkStandardNewMacro(IsoSurfaceStrategy::Mapper);
@@ -238,6 +321,7 @@ bool IsoSurfaceStrategy::SetPolyInput(
     if (!poly || !m_mapper || !m_lodController) return false;
 
     // 上游 mesh 没有可降采样的体数据输入；质量意图保留，但不改写几何。
+    m_mapper->SetPreparedProduct(nullptr);
     m_mapper->SetInputData(poly);
     m_mapper->ScalarVisibilityOff();
     m_activeProduct.reset();
@@ -304,9 +388,81 @@ bool IsoSurfaceStrategy::StartProduct(
 {
     request.resources = m_resources;
     if (!m_asyncState || !request.input) return false;
+    const auto discardOlderCompletion = [&] {
+        std::lock_guard<std::mutex> lock(m_asyncState->mutex);
+        if (m_asyncState->completion
+            && m_asyncState->completion->requestRevision < request.requestRevision)
+            m_asyncState->completion.reset();
+    };
+    const auto setPreparing = [&](const std::uint64_t estimatedBytes, const bool isCacheHit) {
+        discardOlderCompletion();
+        m_transition.status = RenderProductStatus::Preparing;
+        m_transition.failureReason = RenderProductFailure::None;
+        m_transition.inputStamp = request.key.inputStamp;
+        m_transition.requestedQuality = request.requestedQuality;
+        m_transition.appliedQuality = m_appliedQuality;
+        m_transition.stats.requestRevision = request.requestRevision;
+        m_transition.stats.cpuPrepareUs = 0;
+        m_transition.stats.gpuReleaseUs = 0;
+        m_transition.stats.gpuUploadUs = 0;
+        m_transition.stats.firstRenderUs = 0;
+        m_transition.stats.candidateBytes = estimatedBytes;
+        m_transition.stats.resolvedDimensions = request.key.outputDimensions;
+        m_transition.stats.isPreview = request.isPreview;
+        m_transition.stats.isCacheHit = isCacheHit;
+        m_transition.message.clear();
+        return m_taskChannel->GetState().status == RenderProductStatus::Ready
+            ? SetProductCommit() : true;
+    };
     if (m_resources) {
         auto cached = m_resources->GetIsoSurfaceProduct(request.key);
         if (cached) {
+            const auto estimate = IsoSurfaceProductBuilder::GetIndexEstimatedBytes(cached);
+            const bool needsIndices = m_taskChannel && estimate && cached->surface && cached->triangleIndices
+                && cached->triangleIndicesTime != 0
+                && cached->triangleIndicesTime == cached->surface->GetMeshMTime()
+                && !cached->triangleIndices->GetHasIndices()
+                && !m_mapper->GetHasUploadedProduct(cached);
+            if (needsIndices) {
+                RenderTaskRequest task;
+                task.requestRevision = request.requestRevision;
+                task.estimatedBytes = *estimate;
+                const auto asyncState = m_asyncState;
+                // 复用同一channel/worker/取代取消。后台只生成私有索引候选，
+                // 不改缓存几何、缓存对象或mapper；owner提交前保留当前已显示产品。
+                task.work = [asyncState, request, cached](const RenderTaskToken token) {
+                    const auto started = std::chrono::steady_clock::now();
+                    IsoSurfaceBuildResult result;
+                    result.preparedIndices = IsoSurfaceProductBuilder().BuildIndexCandidate(cached, token);
+                    if (token.GetIsStopped()) {
+                        result.preparedIndices.reset();
+                        result.failureReason = RenderProductFailure::Cancelled;
+                        result.message = "The iso index candidate was cancelled.";
+                    }
+                    else if (!cached->inputUse.GetIsPublished()) {
+                        result.preparedIndices.reset();
+                        result.failureReason = RenderProductFailure::StaleInput;
+                        result.message = "The iso index source retired while preparing.";
+                    }
+                    else {
+                        // 可选候选不可用时仍提交原几何，沿原VTK路径成功绘制。
+                        result.product = cached;
+                    }
+                    const auto prepareUs = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - started).count());
+                    std::lock_guard<std::mutex> lock(asyncState->mutex);
+                    if (!token.GetIsStopped() && (!asyncState->completion
+                        || asyncState->completion->requestRevision <= request.requestRevision)) {
+                        asyncState->completion = AsyncState::Completion{
+                            request.requestRevision, request.key, std::move(result), prepareUs};
+                    }
+                };
+                const auto admission = m_taskChannel->StartTask(std::move(task));
+                if (admission == RenderTaskAdmission::Accepted || admission == RenderTaskAdmission::Replaced)
+                    return setPreparing(*estimate, true);
+                // 软优化未准入仍走既有缓存成功路径，不新增显示门槛。
+            }
             IsoSurfaceBuildResult result;
             result.product = std::move(cached);
             m_transition.status = RenderProductStatus::Ready;
@@ -323,7 +479,9 @@ bool IsoSurfaceStrategy::StartProduct(
                 request.key.outputDimensions;
             m_transition.stats.isCacheHit = true;
             m_transition.stats.isPreview = request.isPreview;
-            return SetProduct(request.key, result, 0, false);
+            const bool isCommitted = SetProduct(request.key, result, 0, false);
+            if (isCommitted) discardOlderCompletion();
+            return isCommitted;
         }
     }
     if (!m_taskChannel) return false;
@@ -365,24 +523,7 @@ bool IsoSurfaceStrategy::StartProduct(
         return false;
     }
 
-    m_transition.status = RenderProductStatus::Preparing;
-    m_transition.failureReason = RenderProductFailure::None;
-    m_transition.inputStamp = request.key.inputStamp;
-    m_transition.requestedQuality = request.requestedQuality;
-    m_transition.appliedQuality = m_appliedQuality;
-    m_transition.stats.requestRevision = request.requestRevision;
-    m_transition.stats.cpuPrepareUs = 0;
-    m_transition.stats.gpuReleaseUs = 0;
-    m_transition.stats.gpuUploadUs = 0;
-    m_transition.stats.firstRenderUs = 0;
-    m_transition.stats.candidateBytes = estimatedBytes;
-    m_transition.stats.resolvedDimensions =
-        request.key.outputDimensions;
-    m_transition.stats.isPreview = request.isPreview;
-    m_transition.stats.isCacheHit = false;
-    m_transition.message.clear();
-    return m_taskChannel->GetState().status == RenderProductStatus::Ready
-        ? SetProductCommit() : true;
+    return setPreparing(estimatedBytes, false);
 }
 
 bool IsoSurfaceStrategy::SetProduct(
@@ -431,11 +572,11 @@ bool IsoSurfaceStrategy::SetProduct(
         && !(isChannelReady
             ? m_taskChannel->SetActiveBytes(
                 activeRevision,
-                result.product->actualBytes,
+                result.product->GetActualBytes(),
                 result.product.get())
             : m_taskChannel->SetCachedActive(
                 activeRevision,
-                result.product->actualBytes,
+                result.product->GetActualBytes(),
                 result.product.get()))) {
         m_transition.status = RenderProductStatus::Failed;
         m_transition.failureReason =
@@ -447,9 +588,14 @@ bool IsoSurfaceStrategy::SetProduct(
         return false;
     }
 
+    if (result.preparedIndices && result.product->triangleIndices
+        && result.product->triangleIndicesTime == result.product->surface->GetMeshMTime()) {
+        result.product->triangleIndices->SetPreparedIndices(result.preparedIndices);
+    }
     const auto gpuCommitStart = std::chrono::steady_clock::now();
     if (!m_activeProduct || m_activeProduct->surface != result.product->surface)
         m_mapper->SetInputData(result.product->surface);
+    m_mapper->SetPreparedProduct(result.product);
     m_mapper->ScalarVisibilityOff();
     const auto gpuUploadUs = std::max(std::uint64_t{ 1 },
         static_cast<std::uint64_t>(
@@ -478,7 +624,7 @@ bool IsoSurfaceStrategy::SetProduct(
     m_transition.stats.cpuBindUs = gpuUploadUs;
     m_transition.stats.gpuUploadUs = 0;
     m_transition.stats.candidateBytes = 0;
-    m_transition.stats.activeBytes = result.product->actualBytes;
+    m_transition.stats.activeBytes = result.product->GetActualBytes();
     m_transition.stats.resolvedDimensions =
         result.product->inputDimensions;
     m_transition.stats.isPreview = isPreview;
@@ -776,6 +922,11 @@ bool IsoSurfaceStrategy::SetProductCommit()
         m_transition.status = channelState.status;
         m_transition.failureReason = channelState.failureReason;
         m_transition.message = channelState.message;
+        {
+            std::lock_guard<std::mutex> lock(m_asyncState->mutex);
+            if (m_asyncState->completion && m_asyncState->completion->requestRevision
+                <= m_transition.stats.requestRevision) m_asyncState->completion.reset();
+        }
         return channelState.status != RenderProductStatus::Failed;
     }
     if (channelState.status != RenderProductStatus::Ready
@@ -811,6 +962,7 @@ RenderTransitionState
 IsoSurfaceStrategy::GetTransitionState() const
 {
     auto state = m_transition;
+    if (m_activeProduct) state.stats.activeBytes = m_activeProduct->GetActualBytes();
     if (m_taskChannel) {
         const auto channelState = m_taskChannel->GetState();
         if (channelState.stats.requestRevision
@@ -819,6 +971,7 @@ IsoSurfaceStrategy::GetTransitionState() const
                 channelState.stats.candidateBytes;
             state.stats.cacheBytes =
                 channelState.stats.cacheBytes;
+            state.stats.activeBytes = channelState.stats.activeBytes;
         }
     }
     return state;

@@ -10,6 +10,12 @@ class QLabel;
 class QTreeWidget;
 class QComboBox;
 class QTabWidget;
+class QHBoxLayout;
+class QToolButton;
+class QLineEdit;
+class QPushButton;
+class QHideEvent;
+class QFocusEvent;
 namespace Manual {
 using GrayPointFilter=std::function<std::vector<bool>(const std::vector<std::array<double,3>>&)>;
 struct GrayStatisticsScope {
@@ -38,12 +44,21 @@ public:
     bool ContainsInterval(double value,double low,double high) const;
     void SetMarkers(const QJsonArray& markers);
     void SetInteractionModes(const QStringList& modes);
+    void SetInteractionContext(const QString& context);
+    void CancelInteraction();
+    void SelectInteractionMode(const QString& mode);
     QString GetInteractionMode() const;
     void ShowTable();
     QJsonObject GetHistogram() const { return m_data; }
     std::function<void(double,double)> onInterval;
     std::function<void(int)> onRow;
+    // 仅 owner thread 的释放、确认或 Enter 同步通知；移动、取消和失效不通知。
+    // 调用前已清除候选，回调可发既有请求、查询或关闭界面；返回后不沿用旧交互状态。
     std::function<void(const QString&,double)> onMarker;
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
 private:
     class Plot;
     Plot* m_plot=nullptr;
@@ -52,6 +67,13 @@ private:
     QTreeWidget* m_table=nullptr;
     QComboBox* m_interaction=nullptr;
     QTabWidget* m_tabs=nullptr;
+    QLineEdit* m_markerValue=nullptr;
+    QPushButton* m_applyMarker=nullptr;
+    QWidget* m_markerRow=nullptr;
+    QHBoxLayout* m_controls=nullptr;
+    QToolButton* m_info=nullptr;
+    QHBoxLayout* m_markerLayout=nullptr;
+    bool m_inlineMarker=false;
     QJsonObject m_data;
     QStringList m_tableHeadings;
     QJsonArray m_tableRows;
@@ -61,12 +83,19 @@ private:
     std::vector<double> m_counts;
     std::vector<double> m_comparisonCounts;
     std::size_t m_offset=0,m_used=0,m_excluded=0;
+    qint64 m_maximumOwnerBlockNs=0;
     double m_minimum=0,m_maximum=0;
     bool m_isCounting=false,m_hasValue=false;
     enum class State { None,Loading,Ready,Empty,Failed,Cancelled };
     State m_state=State::None;
     std::uint64_t m_generation=0;
     bool m_compact=false;
+    int m_tableTab=-1;
+    QString m_interactionContext;
+    QStringList m_interactionModes;
+    bool m_autoModeSelected=false;
+    QString m_markerEditKey;
+    QJsonObject m_markerEditSource;
     void StopRead();
     void ResetPresentation();
     void Present(const QJsonObject& data);

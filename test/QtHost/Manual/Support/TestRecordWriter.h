@@ -15,6 +15,7 @@ public:
         const QJsonObject& params, const QJsonObject& source);
     void SetAdmission(std::uint64_t id, const QJsonObject& admission);
     void SetProgress(std::uint64_t id, int percent);
+    void SetReadTaskTimings(std::uint64_t id, const QJsonObject& timings);
     void SetComplete(std::uint64_t id, const QString& status,
         const QJsonObject& result, const QJsonObject& current);
     QJsonObject GetRecord(std::uint64_t id) const;

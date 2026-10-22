@@ -1,9 +1,12 @@
 // 测试用途：启动功能自动化测试，执行默认回归或指定 JSON 用例并导出记录。
 #include "App/TestWindow.h"
+#include "Support/WorkbenchStyle.h"
 #include "TestCaseRunner.h"
 #include "ReportWorkflowTests.h"
 #include "ReportLargeTests.h"
 #include <QApplication>
+#include <QTemporaryDir>
+#include <QDir>
 #include <QCommandLineParser>
 #include <QSurfaceFormat>
 #include <QMetaObject>
@@ -73,9 +76,13 @@ int main(int argc, char* argv[])
         std::cerr<<"Background Qt tests require Windows desktop isolation."<<std::endl;return 2;
 #endif
     }else if(!childDesktop.empty()){std::cerr<<"Background child requires desktop isolation."<<std::endl;return 2;}
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
     auto format = QVTKOpenGLNativeWidget::defaultFormat(); format.setSamples(0); format.setAlphaBufferSize(8);
     QSurfaceFormat::setDefaultFormat(format);
     QApplication app(argc, argv);
+    app.setStyleSheet(Manual::GetWorkbenchStyle());
     QCommandLineParser parser;
     parser.setApplicationDescription("功能自动化测试；默认执行合成数据、界面分派和生命周期回归。");
     parser.addHelpOption();
@@ -89,6 +96,7 @@ int main(int argc, char* argv[])
     parser.addOption({"gap-report-output", "Gap 报告定向验证输出目录", "path"});
     parser.addOption({"gap-report-real-input", "可选的32立方真实 float32 小样本", "path"});
     parser.addOption({"reports-only", "仅执行独立报告导入、比较、分页与选择回归，不创建业务会话"});
+    parser.addOption({"layout-config", "自动化独立布局配置文件", "path"});
     parser.addOption({"background", "在独立后台桌面运行实际 Qt/VTK 窗口，不显示在用户桌面"});
     parser.addOption({"background-child", "内部测试子进程桌面标识", "name"});
     parser.addOption({"memory-budget-mib", "算法工作集上限（MiB），0 为不启用估算工作集硬限额", "MiB", "0"});
@@ -99,6 +107,10 @@ int main(int argc, char* argv[])
     if(parser.isSet("report-csv")){Manual::CheckSavedReportComparisons(parser.value("report-csv"),parser.isSet("report-spatial-only"));return 0;}
     if(parser.isSet("gap-boundary-reports-only")){Manual::CheckGapBoundaryReports(parser.value("gap-report-output"),parser.value("gap-report-real-input"));return 0;}
     if(parser.isSet("reports-only")){Manual::CheckReportWorkflow();return 0;}
+    QTemporaryDir layoutDirectory(QDir::tempPath()+"/qt-workbench-XXXXXX");
+    if(!layoutDirectory.isValid())throw std::runtime_error("cannot isolate workbench layout");
+    app.setProperty("workbenchLayoutPath",parser.isSet("layout-config")?parser.value("layout-config"):layoutDirectory.filePath("layout.ini"));
+    app.setProperty("measureUiResponsiveness",true);
     Manual::TestWindow window(budget);
     window.setWindowTitle("功能自动化测试");
     if(parser.isSet("background")){window.setAttribute(Qt::WA_ShowWithoutActivating,true);window.setWindowFlag(Qt::WindowDoesNotAcceptFocus,true);window.setWindowFlag(Qt::WindowTransparentForInput,true);}

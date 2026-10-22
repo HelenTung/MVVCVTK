@@ -27,23 +27,49 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <future>
 #include <memory>
 #include <limits>
+#include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <vtkActor.h>
+#include <vtkProperty.h>
+#include <vtkCamera.h>
+#include <vtkCellArray.h>
 #include <vtkImageData.h>
+#include <vtkFloatArray.h>
+#include <vtkDataObject.h>
+#include <vtkIdTypeArray.h>
+#include <vtkPoints.h>
+#include <vtkSOADataArrayTemplate.h>
+#include <vtkHardwareSelector.h>
+#include <vtkOpenGLHardwareSelector.h>
+#include <vtkSelection.h>
+#include <vtkSelectionNode.h>
+#include <vtkInformation.h>
 #include <vtkPointData.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkOpenGLPolyDataMapper.h>
+#include <vtkOpenGLIndexBufferObject.h>
 #include <vtkPlaneSource.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkTrivialProducer.h>
 #include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
+#include <vtkColorTransferFunction.h>
+#include <vtkPiecewiseFunction.h>
+#include <vtkWindowToImageFilter.h>
 #include <vtkTextActor.h>
 #include <vtkTextProperty.h>
 
@@ -96,6 +122,33 @@ public:
     std::optional<std::uint64_t> freeBytes;
 private:
     std::optional<std::uint64_t> GetGpuFreeBytes() const override{return freeBytes;}
+};
+
+class RangeReadProbe final : public vtkFloatArray {
+public:
+    static RangeReadProbe* New() {return new RangeReadProbe;}
+    vtkTypeMacro(RangeReadProbe, vtkFloatArray);
+    inline static bool shouldThrow = false;
+    void* GetVoidPointer(vtkIdType index) override
+    {
+        if (shouldThrow) {
+            shouldThrow = false;
+            throw std::runtime_error("injected optional range preparation failure");
+        }
+        return this->Superclass::GetVoidPointer(index);
+    }
+};
+
+class SoaRangeReadProbe final : public vtkSOADataArrayTemplate<float> {
+public:
+    static SoaRangeReadProbe* New() {return new SoaRangeReadProbe;}
+    vtkTypeMacro(SoaRangeReadProbe, vtkSOADataArrayTemplate<float>);
+    inline static int voidPointerCalls = 0;
+    void* GetVoidPointer(vtkIdType index) override
+    {
+        ++voidPointerCalls;
+        return this->Superclass::GetVoidPointer(index);
+    }
 };
 
 int GetGpuHeadroomFailCount()
@@ -456,6 +509,262 @@ int GetRenderStopFailCount()
     return failureCount;
 }
 
+int GetOptionalCpuBudgetFailCount()
+{
+    int failureCount = 0;
+    for (const auto budget : { std::uint64_t{ 256 }, std::uint64_t{ 64 } }) {
+        auto lane = std::make_shared<ManualRenderLane>();
+        RenderResourceCoordinator resources(
+            [lane](RenderLaneWork work) {
+                return lane->Start(std::move(work));
+            });
+        const bool isBudgetSet = resources.SetCpuBudgetBytes(budget);
+        auto channel = resources.CreateTaskChannel(
+            RenderProductKind::IsoSurface);
+        bool isInitialSet = false;
+        bool isOptionalSet = false;
+        bool isNotStopped = false;
+        bool hasNoFailure = false;
+        bool hasExpectedRunningBytes = false;
+        bool isFinalSet = false;
+        RenderTaskRequest request;
+        request.requestRevision = 1;
+        request.estimatedBytes = 16;
+        request.work = [&](RenderTaskToken token) {
+            isInitialSet = token.SetActualBytes(32);
+            isOptionalSet = token.TrySetActualBytes(128);
+            const auto afterOptional = resources.GetResourceState();
+            isNotStopped = !token.GetIsStopped();
+            hasNoFailure = channel->GetState().failureReason
+                == RenderProductFailure::None;
+            hasExpectedRunningBytes = afterOptional.runningBytes
+                == (budget == 256 ? 128 : 32);
+            isFinalSet = token.SetActualBytes(32);
+        };
+        const bool isAccepted = channel->StartTask(std::move(request))
+            == RenderTaskAdmission::Accepted;
+        const bool isSent = lane->SendOne();
+        const auto ready = channel->GetState();
+        const auto readyResources = resources.GetResourceState();
+        const bool isActive = channel->SetActiveBytes(1, 32)
+            && channel->CompleteActiveBytes(1);
+        const auto active = channel->GetState();
+        const auto activeResources = resources.GetResourceState();
+        const bool isStopped = channel->Stop();
+        channel.reset();
+        const auto stopped = resources.GetResourceState();
+        const bool isEmpty = stopped.activeBytes == 0
+            && stopped.pendingBytes == 0
+            && stopped.runningBytes == 0
+            && stopped.cacheBytes == 0;
+        failureCount += GetCaseResult(
+            isBudgetSet && isAccepted && isSent && isInitialSet
+                && isOptionalSet == (budget == 256)
+                && isNotStopped && hasNoFailure && hasExpectedRunningBytes
+                && isFinalSet && ready.status == RenderProductStatus::Ready
+                && readyResources.pendingBytes == 32
+                && isActive && active.stats.activeBytes == 32
+                && activeResources.activeBytes == 32
+                && activeResources.pendingBytes == 0
+                && activeResources.runningBytes == 0
+                && isStopped && isEmpty,
+            budget == 256
+                ? "Optional Iso reservation succeeds and returns to the mesh byte count"
+                : "Optional Iso reservation can fail without cancelling or rejecting the mesh")
+            ? 0 : 1;
+    }
+
+    {
+        auto lane = std::make_shared<ManualRenderLane>();
+        RenderResourceCoordinator resources(
+            [lane](RenderLaneWork work) {
+                return lane->Start(std::move(work));
+            });
+        const bool isBudgetSet = resources.SetCpuBudgetBytes(64);
+        auto channel = resources.CreateTaskChannel(
+            RenderProductKind::IsoSurface);
+        bool isHardReject = false;
+        bool isStopped = false;
+        RenderTaskRequest request;
+        request.requestRevision = 1;
+        request.estimatedBytes = 16;
+        request.work = [&](RenderTaskToken token) {
+            isHardReject = !token.SetActualBytes(128);
+            isStopped = token.GetIsStopped();
+        };
+        const bool isAccepted = channel->StartTask(std::move(request))
+            == RenderTaskAdmission::Accepted;
+        const bool isSent = lane->SendOne();
+        const auto state = channel->GetState();
+        (void)resources.StartStop();
+        const bool isStopCompleted = resources.Stop(
+            std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        const auto stopped = resources.GetResourceState();
+        failureCount += GetCaseResult(
+            isBudgetSet && isAccepted && isSent && isHardReject && isStopped
+                && state.failureReason == RenderProductFailure::ResourceRejected
+                && isStopCompleted && stopped.activeBytes == 0
+                && stopped.pendingBytes == 0 && stopped.runningBytes == 0
+                && stopped.cacheBytes == 0,
+            "SetActualBytes keeps its hard ResourceRejected behavior")
+            ? 0 : 1;
+    }
+
+    {
+        auto lane = std::make_shared<ManualRenderLane>();
+        RenderResourceCoordinator resources(
+            [lane](RenderLaneWork work) {
+                return lane->Start(std::move(work));
+            });
+        auto channel = resources.CreateTaskChannel(
+            RenderProductKind::IsoSurface);
+        std::promise<void> readyPromise;
+        auto readyFuture = readyPromise.get_future();
+        std::promise<void> goPromise;
+        auto goFuture = goPromise.get_future();
+        std::promise<void> budgetDonePromise;
+        auto budgetDoneFuture = budgetDonePromise.get_future();
+        bool isOptionalSet = false;
+        bool isFinalSet = false;
+        bool isNotStopped = false;
+        RenderTaskRequest request;
+        request.requestRevision = 1;
+        request.estimatedBytes = 16;
+        request.work = [&](RenderTaskToken token) {
+            readyPromise.set_value();
+            goFuture.wait();
+            isOptionalSet = token.TrySetActualBytes(128);
+            budgetDoneFuture.wait();
+            isFinalSet = token.SetActualBytes(16);
+            isNotStopped = !token.GetIsStopped();
+        };
+        const bool isAccepted = channel->StartTask(std::move(request))
+            == RenderTaskAdmission::Accepted;
+        bool isSent = false;
+        std::thread worker([&] {
+            isSent = lane->SendOne();
+            if (!isSent) readyPromise.set_value();
+        });
+        readyFuture.wait();
+        goPromise.set_value();
+        const bool budgetChanged = resources.SetCpuBudgetBytes(64);
+        budgetDonePromise.set_value();
+        worker.join();
+        const auto state = channel->GetState();
+        const auto beforeStop = resources.GetResourceState();
+        (void)resources.StartStop();
+        const bool isStopCompleted = resources.Stop(
+            std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        const auto stopped = resources.GetResourceState();
+        failureCount += GetCaseResult(
+            isAccepted && isSent && (isOptionalSet != budgetChanged) && isFinalSet
+                && isNotStopped && state.status == RenderProductStatus::Ready
+                && state.failureReason == RenderProductFailure::None
+                && state.stats.candidateBytes == 16
+                && beforeStop.pendingBytes == 16
+                && beforeStop.runningBytes == 0
+                && isStopCompleted && stopped.activeBytes == 0
+                && stopped.pendingBytes == 0 && stopped.runningBytes == 0
+                && stopped.cacheBytes == 0,
+            "Optional Iso reservation and concurrent budget change are mutually exclusive")
+            ? 0 : 1;
+    }
+
+    {
+        auto lane = std::make_shared<ManualRenderLane>();
+        RenderResourceCoordinator resources(
+            [lane](RenderLaneWork work) {
+                return lane->Start(std::move(work));
+            });
+        auto channel = resources.CreateTaskChannel(
+            RenderProductKind::IsoSurface);
+        bool isOldOptionalSet = false;
+        bool isReplacementAccepted = false;
+        bool isOldCancelled = false;
+        bool isLateOldOptionalRejected = false;
+        bool isReplacementSet = false;
+        RenderTaskRequest first;
+        first.requestRevision = 1;
+        first.estimatedBytes = 16;
+        first.work = [&](RenderTaskToken token) {
+            isOldOptionalSet = token.TrySetActualBytes(128);
+            RenderTaskRequest replacement;
+            replacement.requestRevision = 2;
+            replacement.estimatedBytes = 16;
+            replacement.work = [&](RenderTaskToken nextToken) {
+                isReplacementSet = nextToken.SetActualBytes(32);
+            };
+            isReplacementAccepted = channel->StartTask(
+                std::move(replacement)) == RenderTaskAdmission::Accepted;
+            isLateOldOptionalRejected = !token.TrySetActualBytes(256);
+            isOldCancelled = token.GetIsStopped();
+        };
+        const bool isAccepted = channel->StartTask(std::move(first))
+            == RenderTaskAdmission::Accepted;
+        const bool isOldSent = lane->SendOne();
+        const bool isReplacementStarted = resources.SendTasks();
+        const bool isReplacementSent = lane->SendOne();
+        const auto ready = channel->GetState();
+        const auto beforeStop = resources.GetResourceState();
+        (void)resources.StartStop();
+        const bool isStopCompleted = resources.Stop(
+            std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        const auto stopped = resources.GetResourceState();
+        failureCount += GetCaseResult(
+            isAccepted && isOldSent && isOldOptionalSet
+                && isReplacementAccepted && isLateOldOptionalRejected
+                && isOldCancelled && isReplacementStarted
+                && isReplacementSent && isReplacementSet
+                && ready.status == RenderProductStatus::Ready
+                && ready.stats.requestRevision == 2
+                && ready.stats.candidateBytes == 32
+                && beforeStop.pendingBytes == 32
+                && beforeStop.runningBytes == 0
+                && isStopCompleted && stopped.activeBytes == 0
+                && stopped.pendingBytes == 0 && stopped.runningBytes == 0
+                && stopped.cacheBytes == 0,
+            "Replacing an Iso task releases its optional reservation")
+            ? 0 : 1;
+    }
+
+    {
+        auto lane = std::make_shared<ManualRenderLane>();
+        RenderResourceCoordinator resources(
+            [lane](RenderLaneWork work) {
+                return lane->Start(std::move(work));
+            });
+        auto channel = resources.CreateTaskChannel(
+            RenderProductKind::IsoSurface);
+        bool isOptionalSet = false;
+        bool isStopStarted = false;
+        bool isStopped = false;
+        bool isLateOptionalRejected = false;
+        RenderTaskRequest request;
+        request.requestRevision = 1;
+        request.estimatedBytes = 16;
+        request.work = [&](RenderTaskToken token) {
+            isOptionalSet = token.TrySetActualBytes(128);
+            isStopStarted = resources.StartStop();
+            isStopped = token.GetIsStopped();
+            isLateOptionalRejected = !token.TrySetActualBytes(256);
+        };
+        const bool isAccepted = channel->StartTask(std::move(request))
+            == RenderTaskAdmission::Accepted;
+        const bool isSent = lane->SendOne();
+        const bool isStopCompleted = resources.Stop(
+            std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        const auto stopped = resources.GetResourceState();
+        failureCount += GetCaseResult(
+            isAccepted && isSent && isOptionalSet && isStopStarted
+                && isStopped && isLateOptionalRejected && isStopCompleted
+                && stopped.activeBytes == 0 && stopped.pendingBytes == 0
+                && stopped.runningBytes == 0 && stopped.cacheBytes == 0,
+            "Stop cancels optional Iso reservations and clears resource counters")
+            ? 0 : 1;
+    }
+    return failureCount;
+}
+
 int GetExecutorLaneFailCount()
 {
     std::atomic<int> workerCount{ 0 };
@@ -648,11 +957,35 @@ int GetIsoBuilderFailCount()
             && buildResult.product->surface
             && buildResult.product->surface->GetNumberOfPoints() > 0
             && buildResult.product->surface->GetNumberOfCells() > 0
-            && buildResult.product->actualBytes > 0
+            && buildResult.product->GetActualBytes() > 0
             && vtkTrivialProducer::SafeDownCast(
                 mapper->GetInputAlgorithm()),
         "Iso builder returns a materialized producer-free CPU product")
         ? 0 : 1;
+
+    if (buildResult.product && buildResult.product->surface) {
+        // BuildIsoImage 在网格边上的零交点由 4.75 / (4.75 + 3.25) 线性插值确定。
+        const std::array<double, 6> expected{1.59375, 9.40625, 1.59375, 9.40625, 1.59375, 9.40625};
+        double bounds[6]{};
+        buildResult.product->surface->GetCellsBounds(bounds);
+        const bool isCorrect = std::equal(expected.begin(), expected.end(), bounds);
+        auto changed = vtkSmartPointer<vtkPolyData>::New();
+        changed->DeepCopy(buildResult.product->surface);
+        changed->ComputeCellsBounds();
+        for (vtkIdType index = 0; index < changed->GetNumberOfPoints(); ++index) {
+            double point[3];
+            changed->GetPoint(index, point);
+            point[0] += 2.0;
+            changed->GetPoints()->SetPoint(index, point);
+        }
+        changed->GetPoints()->Modified();
+        changed->GetCellsBounds(bounds);
+        auto translated = expected;
+        translated[0] += 2.0; translated[1] += 2.0;
+        failureCount += GetCaseResult(isCorrect
+            && std::equal(translated.begin(), translated.end(), bounds),
+            "Iso cell bounds preserve analytic grid intersections and invalidate after private geometry changes") ? 0 : 1;
+    }
 
     auto invalidMask = vtkSmartPointer<vtkImageData>::New();
     invalidMask->SetDimensions(3, 3, 3);
@@ -796,6 +1129,540 @@ VolumeLodBuildRequest GetVolumeRequest(
     return request;
 }
 
+int GetIsoIndexProfileFailCount()
+{
+    const auto getEnvironment = [](const char* name) {
+        char* buffer = nullptr; std::size_t count = 0;
+        if (_dupenv_s(&buffer, &count, name) != 0) return std::string{};
+        std::unique_ptr<char, decltype(&std::free)> value(buffer, &std::free);
+        return value ? std::string(value.get()) : std::string{};
+    };
+    const auto path = getEnvironment("MVVCVTK_TEST_ISO_PROFILE_RAW");
+    if (path.empty()) return 0;
+    const auto dimensionsText = getEnvironment("MVVCVTK_TEST_ISO_PROFILE_DIMENSIONS");
+    const auto spacingText = getEnvironment("MVVCVTK_TEST_ISO_PROFILE_SPACING");
+    const auto originText = getEnvironment("MVVCVTK_TEST_ISO_PROFILE_ORIGIN");
+    const auto isoText = getEnvironment("MVVCVTK_TEST_ISO_PROFILE_VALUE");
+    if (dimensionsText.empty() || spacingText.empty() || originText.empty() || isoText.empty())
+        return GetCaseResult(false, "Explicit Iso profile requires dimensions, spacing, origin and scalar threshold") ? 0 : 1;
+    try {
+        std::string dimensionsValue(dimensionsText), spacingValue(spacingText), originValue(originText);
+        std::replace(dimensionsValue.begin(), dimensionsValue.end(), ',', ' ');
+        std::replace(spacingValue.begin(), spacingValue.end(), ',', ' ');
+        std::replace(originValue.begin(), originValue.end(), ',', ' ');
+        std::istringstream dimensionsInput(dimensionsValue), spacingInput(spacingValue), originInput(originValue);
+        std::array<int, 3> dimensions{}; std::array<double, 3> spacing{}, origin{};
+        dimensionsInput >> dimensions[0] >> dimensions[1] >> dimensions[2];
+        spacingInput >> spacing[0] >> spacing[1] >> spacing[2];
+        originInput >> origin[0] >> origin[1] >> origin[2];
+        const double iso = std::stod(isoText);
+        const auto count = RenderWorkBudget::GetVoxelCount(dimensions);
+        if (!dimensionsInput || !spacingInput || !originInput || !count || !std::isfinite(iso)
+            || std::any_of(spacing.begin(), spacing.end(), [](double value) {return !std::isfinite(value) || value <= 0;})
+            || std::any_of(origin.begin(), origin.end(), [](double value) {return !std::isfinite(value);})
+            || *count > static_cast<std::uint64_t>((std::numeric_limits<std::streamsize>::max)()) / sizeof(float))
+            return GetCaseResult(false, "Explicit Iso profile parameters are valid") ? 0 : 1;
+        const auto bytes = *count * sizeof(float);
+        std::ifstream stream(std::filesystem::u8path(path), std::ios::binary | std::ios::ate);
+        if (!stream || stream.tellg() != static_cast<std::streamoff>(bytes))
+            return GetCaseResult(false, "Explicit Iso profile has exact Float32 RAW storage") ? 0 : 1;
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(dimensions.data()); image->SetSpacing(spacing.data()); image->SetOrigin(origin.data());
+        image->AllocateScalars(VTK_FLOAT, 1);
+        stream.seekg(0); stream.read(static_cast<char*>(image->GetScalarPointer()), static_cast<std::streamsize>(bytes));
+        if (!stream) return GetCaseResult(false, "Explicit Iso profile reads the complete RAW input") ? 0 : 1;
+        image->GetPointData()->GetScalars()->Modified(); image->Modified();
+        auto request = GetIsoRequest(image, 1, VolumeQuality::Ultra, iso);
+        request.key.outputDimensions = dimensions;
+        auto lane = std::make_shared<ManualRenderLane>();
+        RenderResourceCoordinator resources([lane](RenderLaneWork work) {return lane->Start(std::move(work));});
+        auto channel = resources.CreateTaskChannel(RenderProductKind::IsoSurface);
+        IsoSurfaceBuildResult result;
+        RenderTaskRequest work; work.requestRevision = 1;
+        work.estimatedBytes = *IsoSurfaceProductBuilder::GetEstimatedBytes(request);
+        work.work = [&](RenderTaskToken token) {result = IsoSurfaceProductBuilder().BuildProduct(request, token);};
+        const auto admission = channel->StartTask(std::move(work));
+        const bool sent = lane->SendOne();
+        auto upload = result.product && result.product->triangleIndices
+            ? result.product->triangleIndices->TakeIndices() : nullptr;
+        const bool valid = admission == RenderTaskAdmission::Accepted && sent && result.product
+            && result.product->surface && result.product->triangleIndicesTime != 0 && upload;
+        if (valid) {
+            std::cout << "ISO_INDEX_PROFILE dimensions=" << dimensions[0] << ',' << dimensions[1] << ',' << dimensions[2]
+                << " iso=" << iso << " points=" << result.product->surface->GetNumberOfPoints()
+                << " polygons=" << result.product->surface->GetNumberOfPolys()
+                << " emitted_triangles=" << upload->size() / 3
+                << " index_capacity_bytes=" << upload->capacity() * sizeof(unsigned int)
+                << " mesh_bytes=" << static_cast<std::uint64_t>(result.product->surface->GetActualMemorySize()) * 1024
+                << " product_bytes=" << result.product->GetActualBytes() << '\n';
+        }
+        upload.reset();
+        result.product.reset(); (void)channel->Stop(); channel.reset();
+        const auto released = resources.GetResourceState();
+        return GetCaseResult(valid && released.runningBytes == 0 && released.pendingBytes == 0,
+            "Explicit private Iso profile records actual triangle storage and releases its product") ? 0 : 1;
+    }
+    catch (...) {
+        return GetCaseResult(false, "Explicit Iso profile completes without an exception") ? 0 : 1;
+    }
+}
+
+int GetIsoIndexReleaseFailCount()
+{
+    int failures = 0;
+    auto image = BuildIsoImage();
+    auto request = GetIsoRequest(image, 1, VolumeQuality::Ultra, 0.0);
+    auto lane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator resources([lane](RenderLaneWork work) {return lane->Start(std::move(work));});
+    auto first = resources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    auto second = resources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    IsoSurfaceBuildResult result; std::function<void()> released;
+    RenderTaskRequest work; work.requestRevision = 1;
+    work.estimatedBytes = *IsoSurfaceProductBuilder::GetEstimatedBytes(request);
+    work.work = [&](RenderTaskToken token) {
+        result = IsoSurfaceProductBuilder().BuildProduct(request, token);
+        if (result.product) released = token.GetProductBytesRelease(result.product, result.product->meshBytes);
+    };
+    bool valid = first->StartTask(std::move(work)) == RenderTaskAdmission::Accepted && lane->SendOne()
+        && result.product && result.product->triangleIndices;
+    if (!valid) return GetCaseResult(false, "Managed Iso upload-release fixture builds its CPU candidate") ? 0 : 1;
+    const auto total = result.product->GetActualBytes(), mesh = result.product->meshBytes;
+    auto upload = result.product->triangleIndices->TakeIndices();
+    auto reader = upload;
+    auto other = std::make_shared<int>(0);
+    valid = resources.SetIsoSurfaceProduct(request.key, result.product)
+        && first->SetActiveBytes(1, total, result.product.get()) && first->CompleteActiveBytes(1)
+        && second->SetCachedActive(2, total, result.product.get()) && second->CompleteActiveBytes(2)
+        && second->SetCachedActive(3, 32, other.get()) && valid;
+    auto state = resources.GetResourceState();
+    valid = valid && upload && total > mesh && state.activeBytes == total + 32
+        && !resources.SetCpuBudgetBytes(mesh + 32);
+    upload.reset();
+    valid = valid && resources.GetResourceState().activeBytes == total + 32;
+    reader.reset();
+    if (released) {released(); released();} // 重复通知不能再次扣掉mesh。
+    state = resources.GetResourceState();
+    valid = valid && result.product->GetActualBytes() == mesh && state.activeBytes == mesh + 32
+        && state.cacheBytes == 0 && state.pendingBytes == 0 && resources.SetCpuBudgetBytes(mesh + 32)
+        && first->SetCachedActive(4, total, result.product.get()) && first->CompleteActiveBytes(4)
+        && second->RestoreActiveBytes(3) && resources.GetResourceState().activeBytes == mesh;
+    failures += GetCaseResult(valid,
+        "CPU upload release shrinks shared active/retiring/cache leases once and stale activation cannot recharge freed indices") ? 0 : 1;
+    first.reset(); second.reset(); result.product.reset(); (void)resources.StartStop();
+    failures += GetCaseResult(resources.GetResourceState().pendingBytes == 0
+        && resources.GetResourceState().cacheBytes == 0,
+        "Released Iso product bookkeeping returns to zero after all channels and cache retire") ? 0 : 1;
+
+    auto stopLane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator stopResources([stopLane](RenderLaneWork task) {return stopLane->Start(std::move(task));});
+    auto channel = stopResources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    IsoSurfaceBuildResult stopped;
+    RenderTaskRequest stopWork; stopWork.requestRevision = 1;
+    stopWork.estimatedBytes = *IsoSurfaceProductBuilder::GetEstimatedBytes(request);
+    stopWork.work = [&](RenderTaskToken token) {stopped = IsoSurfaceProductBuilder().BuildProduct(request, token);};
+    valid = channel->StartTask(std::move(stopWork)) == RenderTaskAdmission::Accepted && stopLane->SendOne()
+        && stopped.product && stopped.product->triangleIndices;
+    if (valid) {
+        const auto bytes = stopped.product->GetActualBytes();
+        auto held = stopped.product->triangleIndices->TakeIndices();
+        valid = stopResources.SetIsoSurfaceProduct(request.key, stopped.product) && held && valid;
+        stopped.product.reset(); channel.reset(); (void)stopResources.StartStop();
+        valid = valid && stopResources.GetResourceState().pendingBytes == bytes;
+        std::thread lastReader([held = std::move(held)]() mutable {held.reset();});
+        lastReader.join();
+        const auto finalState = stopResources.GetResourceState();
+        valid = valid && finalState.activeBytes == 0 && finalState.pendingBytes == 0
+            && finalState.runningBytes == 0 && finalState.cacheBytes == 0;
+    }
+    return failures + (GetCaseResult(valid,
+        "Stop preserves an in-flight CPU upload reader and returns all bytes when its final reader exits") ? 0 : 1);
+}
+
+int GetIsoIndexCandidateFailCount()
+{
+    int failures = 0;
+    auto image = BuildIsoImage();
+    const auto request = GetIsoRequest(image, 1, VolumeQuality::Ultra, 0.0);
+    auto product = IsoSurfaceProductBuilder().BuildProduct(request, RenderTaskToken{}).product;
+    if (!product || !product->triangleIndices)
+        return GetCaseResult(false, "Iso index-only fixture has an immutable mesh and disposable cache") ? 0 : 1;
+    auto firstUpload = product->triangleIndices->TakeIndices();
+    if (!firstUpload)
+        return GetCaseResult(false, "Iso index-only fixture can consume its initial CPU indices") ? 0 : 1;
+    std::vector<unsigned int> reference;
+    vtkOpenGLIndexBufferObject::AppendTriangleIndexBuffer(reference,
+        product->surface->GetPolys(), product->surface->GetPoints(), 0, nullptr, nullptr);
+    firstUpload.reset();
+    const auto mesh = product->meshBytes;
+    const auto meshTime = product->surface->GetMeshMTime();
+    auto lane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator resources([lane](RenderLaneWork work) {return lane->Start(std::move(work));});
+    auto channel = resources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    std::shared_ptr<const std::vector<unsigned int>> candidate;
+    RenderTaskRequest work; work.requestRevision = 1;
+    work.estimatedBytes = *IsoSurfaceProductBuilder::GetIndexEstimatedBytes(product);
+    work.work = [&](RenderTaskToken token) {candidate = IsoSurfaceProductBuilder().BuildIndexCandidate(product, token);};
+    bool valid = resources.SetIsoSurfaceProduct(request.key, product)
+        && channel->StartTask(std::move(work)) == RenderTaskAdmission::Accepted && lane->SendOne()
+        && candidate && *candidate == reference && product->GetActualBytes() == mesh
+        && !product->triangleIndices->GetHasIndices()
+        && product->surface->GetMeshMTime() == meshTime;
+    if (!valid) return GetCaseResult(false, "Index-only preparation preserves exact VTK indices and immutable geometry") ? 0 : 1;
+    const auto bytes = candidate->capacity() * sizeof(unsigned int);
+    std::weak_ptr<const std::vector<unsigned int>> weakCandidate = candidate;
+    valid = resources.GetResourceState().pendingBytes == bytes
+        && resources.GetResourceState().cacheBytes == mesh
+        && !resources.SetCpuBudgetBytes(mesh) && valid;
+    product->triangleIndices->SetPreparedIndices(candidate);
+    candidate.reset();
+    auto upload = product->triangleIndices->TakeIndices();
+    auto otherReader = upload;
+    upload.reset();
+    valid = otherReader && *otherReader == reference && resources.GetResourceState().pendingBytes == bytes && valid;
+    otherReader.reset();
+    valid = weakCandidate.expired() && resources.GetResourceState().pendingBytes == 0
+        && resources.GetResourceState().cacheBytes == mesh && resources.SetCpuBudgetBytes(mesh) && valid;
+    failures += GetCaseResult(valid,
+        "Index-only candidate charges independent pending bytes once and refunds after its last upload reader, including a weak observer") ? 0 : 1;
+
+    bool tokenWasStopped = true;
+    RenderTaskRequest limited; limited.requestRevision = 2; limited.estimatedBytes = 0;
+    limited.work = [&](RenderTaskToken token) {
+        candidate = IsoSurfaceProductBuilder().BuildIndexCandidate(product, token);
+        tokenWasStopped = token.GetIsStopped();
+    };
+    valid = channel->StartTask(std::move(limited)) == RenderTaskAdmission::Accepted && lane->SendOne()
+        && !candidate && !tokenWasStopped && channel->GetState().status == RenderProductStatus::Ready
+        && resources.GetIsoSurfaceProduct(request.key) == product
+        && resources.GetResourceState().pendingBytes == 0;
+    failures += GetCaseResult(valid,
+        "Insufficient optional index-only workspace preserves a successful cached mesh without cancelling its token") ? 0 : 1;
+
+    const auto estimate = *IsoSurfaceProductBuilder::GetIndexEstimatedBytes(product);
+    valid = resources.SetCpuBudgetBytes(mesh + estimate);
+    bool sawReservation = false;
+    RenderTaskRequest cancelled; cancelled.requestRevision = 3; cancelled.estimatedBytes = 0;
+    cancelled.onNeeded = [&] {
+        sawReservation = channel->GetState().stats.candidateBytes > 0;
+        return !sawReservation;
+    };
+    cancelled.work = [&](RenderTaskToken token) {candidate = IsoSurfaceProductBuilder().BuildIndexCandidate(product, token);};
+    valid = channel->StartTask(std::move(cancelled)) == RenderTaskAdmission::Accepted && lane->SendOne()
+        && sawReservation && !candidate && resources.GetResourceState().runningBytes == 0
+        && resources.GetResourceState().pendingBytes == 0 && valid;
+    failures += GetCaseResult(valid,
+        "Cancelling an index-only candidate after reservation discards its private buffer and preserves cached geometry") ? 0 : 1;
+
+    RenderTaskRequest finalWork; finalWork.requestRevision = 4; finalWork.estimatedBytes = estimate;
+    finalWork.work = [&](RenderTaskToken token) {candidate = IsoSurfaceProductBuilder().BuildIndexCandidate(product, token);};
+    valid = channel->StartTask(std::move(finalWork)) == RenderTaskAdmission::Accepted && lane->SendOne() && candidate;
+    if (candidate) product->triangleIndices->SetPreparedIndices(candidate);
+    candidate.reset(); product.reset(); channel.reset();
+    valid = resources.StartStop() && resources.Stop(std::chrono::steady_clock::now() + std::chrono::seconds(1)) && valid;
+    const auto stopped = resources.GetResourceState();
+    failures += GetCaseResult(valid && stopped.activeBytes == 0 && stopped.pendingBytes == 0
+        && stopped.runningBytes == 0 && stopped.cacheBytes == 0,
+        "Stop evicts an unuploaded index-only cache without reentering its coordinator lock or leaking a lease") ? 0 : 1;
+    return failures;
+}
+
+int GetIsoIndexFailCount()
+{
+    int failures = 0;
+    auto image = BuildIsoImage();
+    const auto request = GetIsoRequest(image, 1, VolumeQuality::Ultra, 0.0);
+    const auto prepared = IsoSurfaceProductBuilder().BuildProduct(request, RenderTaskToken{});
+    if (!prepared.product || !prepared.product->surface) {
+        return GetCaseResult(false, "Iso index fixture builds a complete CPU product") ? 0 : 1;
+    }
+    const auto meshBytes = static_cast<std::uint64_t>(prepared.product->surface->GetActualMemorySize()) * 1024;
+    std::vector<unsigned int> reference;
+    vtkOpenGLIndexBufferObject::AppendTriangleIndexBuffer(reference,
+        prepared.product->surface->GetPolys(), prepared.product->surface->GetPoints(), 0, nullptr, nullptr);
+    auto preparedIndices = prepared.product->triangleIndices ? prepared.product->triangleIndices->TakeIndices() : nullptr;
+    failures += GetCaseResult(!reference.empty()
+        && preparedIndices && *preparedIndices == reference
+        && prepared.product->triangleIndicesTime == prepared.product->surface->GetMeshMTime()
+        && prepared.product->GetActualBytes() == meshBytes + preparedIndices->capacity() * sizeof(unsigned int),
+        "Iso batches preserve VTK triangle order, unsigned index type and zero vertex offset with exact retained bytes") ? 0 : 1;
+    preparedIndices.reset();
+    failures += GetCaseResult(prepared.product->GetActualBytes() == meshBytes
+        && !prepared.product->triangleIndices->TakeIndices(),
+        "An Iso CPU upload cache is consumed once without changing its immutable mesh") ? 0 : 1;
+
+    auto budgetLane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator budgetResources([budgetLane](RenderLaneWork work) {return budgetLane->Start(std::move(work));});
+    auto budgetChannel = budgetResources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    bool wasBudgetSet = false;
+    IsoSurfaceBuildResult fallback;
+    RenderTaskRequest limited; limited.requestRevision = 1;
+    limited.estimatedBytes = *IsoSurfaceProductBuilder::GetEstimatedBytes(request);
+    // 等 mesh 已按旧路径计费后启用恰好容纳它的限制，确定性拒绝可选缓存。
+    limited.onNeeded = [&] {
+        if (!wasBudgetSet && budgetChannel->GetState().stats.candidateBytes == meshBytes) {
+            wasBudgetSet = budgetResources.SetCpuBudgetBytes(budgetResources.GetResourceState().runningBytes);
+        }
+        return true;
+    };
+    limited.work = [&](RenderTaskToken token) {fallback = IsoSurfaceProductBuilder().BuildProduct(request, token);};
+    const auto admitted = budgetChannel->StartTask(std::move(limited));
+    const bool wasSent = budgetLane->SendOne();
+    failures += GetCaseResult(admitted == RenderTaskAdmission::Accepted && wasSent && wasBudgetSet
+        && fallback.product && fallback.failureReason == RenderProductFailure::None
+        && fallback.product->triangleIndicesTime == 0 && !fallback.product->triangleIndices
+        && fallback.product->GetActualBytes() == meshBytes
+        && budgetChannel->GetState().status == RenderProductStatus::Ready,
+        "An insufficient optional Iso budget keeps the original mesh product successful") ? 0 : 1;
+
+    auto cancelledLane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator cancelledResources([cancelledLane](RenderLaneWork work) {return cancelledLane->Start(std::move(work));});
+    auto cancelledChannel = cancelledResources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    bool sawReservation = false;
+    IsoSurfaceBuildResult cancelled;
+    RenderTaskRequest cancelWork; cancelWork.requestRevision = 1;
+    cancelWork.estimatedBytes = *IsoSurfaceProductBuilder::GetEstimatedBytes(request);
+    cancelWork.onNeeded = [&] {
+        sawReservation = cancelledChannel->GetState().stats.candidateBytes > meshBytes;
+        return !sawReservation;
+    };
+    cancelWork.work = [&](RenderTaskToken token) {cancelled = IsoSurfaceProductBuilder().BuildProduct(request, token);};
+    const auto cancelAdmission = cancelledChannel->StartTask(std::move(cancelWork));
+    const bool wasCancelSent = cancelledLane->SendOne();
+    const auto cancelState = cancelledResources.GetResourceState();
+    failures += GetCaseResult(cancelAdmission == RenderTaskAdmission::Accepted && wasCancelSent && sawReservation
+        && !cancelled.product && cancelled.failureReason == RenderProductFailure::Cancelled
+        && cancelState.runningBytes == 0 && cancelState.pendingBytes == 0,
+        "Cancellation after an Iso index reservation discards the private candidate and returns its bytes") ? 0 : 1;
+
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto window = vtkSmartPointer<vtkRenderWindow>::New();
+    window->SetOffScreenRendering(1); window->SetSize(64, 64); window->SetMultiSamples(0); window->AddRenderer(renderer);
+    auto capture = vtkSmartPointer<vtkWindowToImageFilter>::New();
+    capture->SetInput(window); capture->ReadFrontBufferOff(); capture->SetInputBufferTypeToRGBA();
+    const auto pixels = [&] {
+        window->Render(); window->WaitForCompletion(); capture->Modified(); capture->Update();
+        auto* values = capture->GetOutput()->GetPointData()->GetScalars();
+        const auto* begin = static_cast<const unsigned char*>(values->GetVoidPointer(0));
+        return std::vector<unsigned char>(begin, begin + values->GetNumberOfValues());
+    };
+    const auto checkRender = [&](const std::shared_ptr<const IsoSurfaceProduct>& product, const bool checkModes) {
+        if (!product) return false;
+        auto lane = std::make_shared<ManualRenderLane>();
+        auto resources = std::make_shared<RenderResourceCoordinator>([lane](RenderLaneWork work) {return lane->Start(std::move(work));});
+        auto services = std::make_shared<RenderStrategyServices>(); services->resources = resources;
+        IsoSurfaceStrategy strategy(services);
+        RenderParams params; params.volumeQuality = VolumeQuality::Ultra; params.isoValue = 0.0;
+        bool valid = resources->SetIsoSurfaceProduct(request.key, product)
+            && strategy.SetRenderInputStamp(request.key.inputStamp)
+            && strategy.SetVisualState(params, UpdateFlags::Quality | UpdateFlags::IsoValue)
+            && strategy.SetInputData(image, nullptr) && strategy.SetProductCommit();
+        auto* actor = vtkActor::SafeDownCast(strategy.GetMainProp());
+        if (!actor) return false;
+        auto optimized = vtkSmartPointer<vtkMapper>(actor->GetMapper());
+        auto legacy = vtkSmartPointer<vtkOpenGLPolyDataMapper>::New();
+        legacy->SetInputData(product->surface); legacy->ScalarVisibilityOff();
+        legacy->SetVBOShiftScaleMethod(vtkOpenGLPolyDataMapper::DISABLE_SHIFT_SCALE);
+        actor->GetProperty()->SetColor(.2, .7, .9);
+        strategy.AttachRenderer(renderer);
+        renderer->GetActiveCamera()->SetPosition(20, 18, 22);
+        renderer->ResetCamera();
+        const auto samePixels = [&](const char* stage) {
+            // 原生 mapper 的首次上下文/光照初始化也可能产生末位变化；两边同样
+            // 初始化一次，再要求各自连续两帧及两路径之间逐字节相等。
+            actor->SetMapper(legacy); (void)pixels(); const auto expected = pixels(); const auto legacyRepeat = pixels();
+            actor->SetMapper(optimized); (void)pixels(); const auto actual = pixels(); const auto optimizedRepeat = pixels();
+            bool hasVisiblePixel = false;
+            for (std::size_t index = 0; index + 3 < expected.size(); index += 4)
+                hasVisiblePixel = hasVisiblePixel || expected[index] || expected[index + 1] || expected[index + 2];
+            const bool same = hasVisiblePixel && !expected.empty() && actual == expected
+                && legacyRepeat == expected && optimizedRepeat == actual;
+            if (!same) {
+                std::size_t different = 0;
+                for (std::size_t index = 0; index < std::min(expected.size(), actual.size()); ++index)
+                    if (expected[index] != actual[index]) ++different;
+                std::cerr << "ISO_INDEX_PIXEL_DIFF stage=" << stage << " visible=" << hasVisiblePixel
+                    << " expected_bytes=" << expected.size() << " actual_bytes=" << actual.size()
+                    << " differing_bytes=" << different << " legacy_repeat_equal=" << (expected == legacyRepeat)
+                    << " optimized_repeat_equal=" << (actual == optimizedRepeat)
+                    << " actual_matches_legacy_repeat=" << (actual == legacyRepeat) << '\n';
+                for (std::size_t index = 0, shown = 0; index < std::min(expected.size(), actual.size()) && shown < 8; ++index) {
+                    if (expected[index] != actual[index]) {
+                        std::cerr << "ISO_INDEX_PIXEL_VALUE offset=" << index << " expected=" << int(expected[index])
+                            << " actual=" << int(actual[index]) << '\n';
+                        ++shown;
+                    }
+                }
+            }
+            return same;
+        };
+        valid = samePixels("surface") && valid;
+        const auto activeBytes = resources->GetResourceState().activeBytes;
+        if (activeBytes != product->GetActualBytes())
+            std::cerr << "ISO_INDEX_ADOPTED_BYTES actual=" << activeBytes << " expected=" << product->GetActualBytes() << '\n';
+        valid = activeBytes == product->GetActualBytes() && valid;
+        if (checkModes) {
+            // 点选择会要求不同的IBO表示；返回普通绘制后仍须逐字节相同。
+            // 产品actor默认不可拾取，此处只在夹具显式启用选择能力。
+            actor->PickableOn();
+            const auto selectedIds = [&](vtkMapper* mapper) {
+                actor->SetMapper(mapper);
+                auto selector = vtkSmartPointer<vtkOpenGLHardwareSelector>::New();
+                selector->SetRenderer(renderer); selector->SetArea(0, 0, 63, 63);
+                selector->SetFieldAssociation(vtkDataObject::FIELD_ASSOCIATION_POINTS);
+                auto selection = vtkSmartPointer<vtkSelection>::Take(selector->Select());
+                std::vector<vtkIdType> ids;
+                if (selection) for (unsigned int node = 0; node < selection->GetNumberOfNodes(); ++node) {
+                    auto* values = vtkIdTypeArray::SafeDownCast(selection->GetNode(node)->GetSelectionList());
+                    if (values) for (vtkIdType index = 0; index < values->GetNumberOfValues(); ++index)
+                        ids.push_back(values->GetValue(index));
+                }
+                std::sort(ids.begin(), ids.end()); return ids;
+            };
+            actor->GetProperty()->SetPointSize(3);
+            const auto optimizedIds = selectedIds(optimized);
+            const auto legacyIds = selectedIds(legacy);
+            if (legacyIds.empty() || optimizedIds != legacyIds)
+                std::cerr << "ISO_INDEX_SELECTION legacy_ids=" << legacyIds.size() << " prepared_ids=" << optimizedIds.size()
+                    << " equal=" << (optimizedIds == legacyIds) << '\n';
+            valid = !legacyIds.empty() && optimizedIds == legacyIds && samePixels("selector-return") && valid;
+            actor->PickableOff();
+            actor->GetProperty()->SetRepresentationToPoints(); valid = samePixels("points") && valid;
+            actor->GetProperty()->SetRepresentationToWireframe(); valid = samePixels("wireframe") && valid;
+            actor->GetProperty()->SetRepresentationToSurface();
+            actor->GetProperty()->EdgeVisibilityOn(); valid = samePixels("edges") && valid;
+            actor->GetProperty()->EdgeVisibilityOff();
+            actor->GetProperty()->VertexVisibilityOn(); valid = samePixels("vertices") && valid;
+            actor->GetProperty()->VertexVisibilityOff(); valid = samePixels("surface-return") && valid;
+            // GPU 资源被释放后，同一不可变 CPU 产品必须重新上传，不能沿用旧 handle。
+            optimized->ReleaseGraphicsResources(window); valid = samePixels("resource-reset") && valid;
+            params.volumeQuality = VolumeQuality::Low;
+            valid = strategy.SetVisualState(params, UpdateFlags::Quality) && lane->SendOne()
+                && strategy.SetProductCommit() && valid;
+            auto* lowSurface = vtkPolyDataMapper::SafeDownCast(optimized)->GetInput();
+            (void)pixels(); // 消耗Low索引，随后回到已释放CPU缓存的原生产品。
+            const auto beforeReturn = lane->GetStartCount();
+            const auto buildsBeforeReturn = resources->GetResourceState().productBuildCount;
+            params.volumeQuality = VolumeQuality::Ultra;
+            const bool accepted = strategy.SetVisualState(params, UpdateFlags::Quality);
+            valid = accepted && strategy.GetTransitionState().status == RenderProductStatus::Preparing
+                && vtkPolyDataMapper::SafeDownCast(optimized)->GetInput() == lowSurface
+                && lane->GetStartCount() == beforeReturn + 1 && lane->SendOne()
+                && resources->GetResourceState().pendingBytes > 0 && valid;
+            // 就绪但未提交的索引被新缓存请求取代，应立即丢弃邮箱缓冲。
+            params.volumeQuality = VolumeQuality::Low;
+            valid = strategy.SetVisualState(params, UpdateFlags::Quality)
+                && resources->GetResourceState().pendingBytes == 0
+                && vtkPolyDataMapper::SafeDownCast(optimized)->GetInput() == lowSurface && valid;
+            params.volumeQuality = VolumeQuality::Ultra;
+            valid = strategy.SetVisualState(params, UpdateFlags::Quality)
+                && strategy.GetTransitionState().status == RenderProductStatus::Preparing
+                && lane->GetStartCount() == beforeReturn + 2 && lane->SendOne()
+                && strategy.SetProductCommit()
+                && vtkPolyDataMapper::SafeDownCast(optimized)->GetInput() == product->surface
+                && resources->GetResourceState().productBuildCount == buildsBeforeReturn
+                && product->triangleIndices->GetHasIndices() && valid;
+            valid = samePixels("quality-return") && resources->GetResourceState().pendingBytes == 0 && valid;
+            params.volumeQuality = VolumeQuality::Low;
+            valid = strategy.SetVisualState(params, UpdateFlags::Quality) && lane->SendOne()
+                && strategy.SetProductCommit() && valid;
+            (void)pixels();
+            const auto used = resources->GetResourceState();
+            const auto startsBeforeFallback = lane->GetStartCount();
+            // 恰好容纳现存产品，拒绝可选重装配；原几何与原VTK绘制仍成功。
+            params.volumeQuality = VolumeQuality::Ultra;
+            valid = resources->SetCpuBudgetBytes(used.activeBytes + used.cacheBytes + used.pendingBytes + used.runningBytes)
+                && strategy.SetVisualState(params, UpdateFlags::Quality)
+                && strategy.GetTransitionState().status == RenderProductStatus::Active
+                && lane->GetStartCount() == startsBeforeFallback
+                && vtkPolyDataMapper::SafeDownCast(optimized)->GetInput() == product->surface && valid;
+            valid = samePixels("quality-budget-fallback") && resources->GetResourceState().pendingBytes == 0 && valid;
+        }
+        strategy.DetachRenderer(renderer);
+        legacy->ReleaseGraphicsResources(window); optimized->ReleaseGraphicsResources(window);
+        return valid;
+    };
+    const auto renderProduct = IsoSurfaceProductBuilder().BuildProduct(request, RenderTaskToken{});
+    failures += GetCaseResult(checkRender(renderProduct.product, true)
+        && renderProduct.product->GetActualBytes() == meshBytes,
+        "Prepared Iso indices release CPU storage; quality reuse, budget, points, selection and resource-reset paths match legacy RGBA exactly") ? 0 : 1;
+    failures += GetCaseResult(checkRender(fallback.product, false),
+        "Optional Iso budget fallback renders exactly the same nonempty RGBA as the original mapper") ? 0 : 1;
+
+    auto changed = vtkSmartPointer<vtkPolyData>::New(); changed->DeepCopy(prepared.product->surface);
+    auto fewerCells = vtkSmartPointer<vtkCellArray>::New();
+    auto* originalCells = changed->GetPolys();
+    for (vtkIdType cell = 0; cell < originalCells->GetNumberOfCells(); cell += 4) {
+        vtkIdType count = 0; const vtkIdType* ids = nullptr;
+        originalCells->GetCellAtId(cell, count, ids); fewerCells->InsertNextCell(count, ids);
+    }
+    changed->SetPolys(fewerCells);
+    const auto makeProduct = [&](vtkPolyData* surface, vtkMTimeType indexTime, std::vector<unsigned int> indices) {
+        auto product = std::make_shared<IsoSurfaceProduct>();
+        product->inputUse = prepared.product->inputUse; product->requestRevision = prepared.product->requestRevision;
+        product->inputStamp = prepared.product->inputStamp; product->requestedQuality = prepared.product->requestedQuality;
+        product->inputDimensions = prepared.product->inputDimensions; product->isoValue = prepared.product->isoValue;
+        product->surface = surface; product->meshBytes = static_cast<std::uint64_t>(surface->GetActualMemorySize()) * 1024;
+        product->triangleIndicesTime = indexTime;
+        product->triangleIndices = std::make_unique<IsoSurfaceIndexCache>(std::move(indices), product, std::function<void()>{});
+        return product;
+    };
+    auto stale = makeProduct(changed, prepared.product->triangleIndicesTime, reference);
+    failures += GetCaseResult(stale->triangleIndicesTime != changed->GetMeshMTime()
+        && checkRender(stale, false),
+        "Changed private Iso topology invalidates prepared indices and preserves legacy RGBA") ? 0 : 1;
+
+    for (int variant = 0; variant < 4; ++variant) {
+        auto mixed = vtkSmartPointer<vtkPolyData>::New();
+        auto points = vtkSmartPointer<vtkPoints>::New();
+        for (const auto& point : std::array<std::array<double, 3>, 8>{{
+            {{-1,-1,0}},{{1,-1,0}},{{-1,1,0}},{{1,1,0}},
+            {{2,-.8,0}},{{3,-.8,0}},{{2,.8,0}},{{3,.8,0}}}})
+            points->InsertNextPoint(point.data());
+        mixed->SetPoints(points);
+        auto polys = vtkSmartPointer<vtkCellArray>::New();
+        const vtkIdType triangle[]{0,1,2}; polys->InsertNextCell(3, triangle); mixed->SetPolys(polys);
+        if (variant == 0 || variant == 3) {
+            auto verts = vtkSmartPointer<vtkCellArray>::New(); const vtkIdType vertex[]{3};
+            verts->InsertNextCell(1, vertex); mixed->SetVerts(verts);
+        }
+        if (variant == 1 || variant == 3) {
+            auto lines = vtkSmartPointer<vtkCellArray>::New(); const vtkIdType line[]{1,3};
+            lines->InsertNextCell(2, line); mixed->SetLines(lines);
+        }
+        if (variant == 2 || variant == 3) {
+            auto strips = vtkSmartPointer<vtkCellArray>::New(); const vtkIdType strip[]{4,5,6,7};
+            strips->InsertNextCell(4, strip); mixed->SetStrips(strips);
+        }
+        mixed->ComputeCellsBounds();
+        auto mixedProduct = makeProduct(mixed, mixed->GetMeshMTime(), {0,1,2});
+        failures += GetCaseResult(checkRender(mixedProduct, false),
+            "Mixed vertices/lines/triangle strips bypass the triangle-only fast path and preserve legacy RGBA") ? 0 : 1;
+    }
+
+    auto leaseLane = std::make_shared<ManualRenderLane>();
+    auto leaseResources = std::make_shared<RenderResourceCoordinator>([leaseLane](RenderLaneWork work) {return leaseLane->Start(std::move(work));});
+    auto leaseServices = std::make_shared<RenderStrategyServices>(); leaseServices->resources = leaseResources;
+    auto strategy = std::make_unique<IsoSurfaceStrategy>(leaseServices);
+    RenderParams params; params.volumeQuality = VolumeQuality::Ultra; params.isoValue = 0.0;
+    bool validLease = strategy->SetRenderInputStamp(request.key.inputStamp)
+        && strategy->SetVisualState(params, UpdateFlags::Quality | UpdateFlags::IsoValue)
+        && strategy->SetInputData(image, nullptr) && leaseLane->SendOne() && strategy->SetProductCommit();
+    auto retained = leaseResources->GetIsoSurfaceProduct(request.key);
+    std::weak_ptr<const IsoSurfaceProduct> weakProduct = retained;
+    const auto retainedBytes = retained ? retained->GetActualBytes() : 0;
+    auto retainedActor = vtkSmartPointer<vtkActor>(vtkActor::SafeDownCast(strategy->GetMainProp()));
+    retained.reset(); strategy.reset();
+    (void)leaseResources->StartStop();
+    const auto beforeRelease = leaseResources->GetResourceState();
+    validLease = validLease && !weakProduct.expired() && beforeRelease.pendingBytes == retainedBytes;
+    retainedActor = nullptr;
+    const auto afterRelease = leaseResources->GetResourceState();
+    failures += GetCaseResult(validLease && weakProduct.expired() && afterRelease.pendingBytes == 0
+        && afterRelease.activeBytes == 0 && afterRelease.runningBytes == 0 && afterRelease.cacheBytes == 0,
+        "An externally retained Iso actor owns its CPU indices until the final mapper reader releases them") ? 0 : 1;
+    return failures + GetIsoIndexReleaseFailCount() + GetIsoIndexCandidateFailCount() + GetIsoIndexProfileFailCount();
+}
+
 int GetVolumeBuilderFailCount()
 {
     int failureCount = 0;
@@ -854,13 +1721,15 @@ int GetVolumeBuilderFailCount()
         RenderTaskToken{});
     failureCount += GetCaseResult(
         nativeResult.product
-            && nativeResult.product->volume == image
+            && nativeResult.product->volume != image
+            && nativeResult.product->volume->GetScalarPointer() == image->GetScalarPointer()
+            && nativeResult.product->volume->GetPointData()->GetScalars() != image->GetPointData()->GetScalars()
             && denoiseResult.product
             && denoiseResult.product->volume
             && denoiseResult.product->volume != image
             && denoiseResult.product->volume->GetNumberOfPoints()
                 == image->GetNumberOfPoints(),
-        "Volume Ultra aliases native input only when denoise is disabled")
+        "Volume Ultra shares native storage through private scalar metadata when denoise is disabled")
         ? 0 : 1;
 
     auto invalidMask = vtkSmartPointer<vtkImageData>::New();
@@ -878,6 +1747,148 @@ int GetVolumeBuilderFailCount()
         "Volume builder rejects invalid mask geometry without a partial product")
         ? 0 : 1;
     return failureCount;
+}
+
+int GetVolumeRangeFailCount()
+{
+    int failures = 0;
+    auto soaImage = vtkSmartPointer<vtkImageData>::New(); soaImage->SetDimensions(4, 2, 2);
+    auto soa = vtkSmartPointer<SoaRangeReadProbe>::New();
+    soa->SetNumberOfComponents(3); soa->SetNumberOfTuples(16);
+    for (vtkIdType tuple = 0; tuple < 16; ++tuple)
+        for (int component = 0; component < 3; ++component)
+            soa->SetTypedComponent(tuple, component, static_cast<float>(tuple + component * 100));
+    soaImage->GetPointData()->SetScalars(soa); SoaRangeReadProbe::voidPointerCalls = 0;
+    const auto soaResult = VolumeLodProductBuilder().BuildProduct(
+        GetVolumeRequest(soaImage, nullptr, 1, VolumeQuality::Ultra, {4, 2, 2}, false), RenderTaskToken{});
+    failures += GetCaseResult(soaResult.product && soaResult.product->volume == soaImage
+        && SoaRangeReadProbe::voidPointerCalls == 0 && soa->GetTypedComponent(15, 2) == 215
+        && !soa->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT()),
+        "Native multi-component SOA skips optional range materialization and preserves the original successful path") ? 0 : 1;
+    for (const int type : {VTK_FLOAT, VTK_DOUBLE, VTK_UNSIGNED_CHAR, VTK_SHORT, VTK_UNSIGNED_LONG_LONG}) {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(4, 2, 2);
+        image->AllocateScalars(type, 3);
+        auto* source = image->GetPointData()->GetScalars();
+        for (vtkIdType tuple = 0; tuple < source->GetNumberOfTuples(); ++tuple) {
+            source->SetComponent(tuple, 0, tuple +
+                (type == VTK_UNSIGNED_CHAR || type == VTK_UNSIGNED_LONG_LONG ? 0.0 : -7.0));
+            source->SetComponent(tuple, 1, tuple * 3.0);
+            source->SetComponent(tuple, 2, 42.0);
+        }
+        if (type == VTK_FLOAT || type == VTK_DOUBLE) {
+            source->SetComponent(0, 0, std::numeric_limits<double>::quiet_NaN());
+            source->SetComponent(1, 0, -std::numeric_limits<double>::infinity());
+            source->SetComponent(2, 0, std::numeric_limits<double>::infinity());
+            for (vtkIdType tuple = 0; tuple < source->GetNumberOfTuples(); ++tuple) {
+                source->SetComponent(tuple, 1, std::numeric_limits<double>::quiet_NaN());
+                source->SetComponent(tuple, 2, tuple % 2 ? std::numeric_limits<double>::infinity()
+                    : -std::numeric_limits<double>::infinity());
+            }
+        }
+        source->Modified();
+        auto reference = vtkSmartPointer<vtkDataArray>::Take(source->NewInstance());
+        reference->DeepCopy(source);
+        const auto sourceTime = source->GetMTime();
+        const auto result = VolumeLodProductBuilder().BuildProduct(
+            GetVolumeRequest(image, nullptr, 1, VolumeQuality::Ultra, {4, 2, 2}, false), RenderTaskToken{});
+        auto* prepared = result.product ? result.product->volume->GetPointData()->GetScalars() : nullptr;
+        bool valid = prepared && prepared != source && prepared->GetVoidPointer(0) == source->GetVoidPointer(0)
+            && source->GetMTime() == sourceTime
+            && !source->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT())
+            && prepared->GetInformation()->Has(vtkAbstractArray::PER_COMPONENT())
+            && prepared->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT());
+        for (int component = 0; component < 3 && prepared; ++component) {
+            double expected[2]{}, actual[2]{};
+            reference->GetRange(expected, component); prepared->GetRange(actual, component);
+            valid = std::equal(expected, expected + 2, actual) && valid;
+            reference->GetFiniteRange(expected, component); prepared->GetFiniteRange(actual, component);
+            valid = std::equal(expected, expected + 2, actual) && valid;
+        }
+        failures += GetCaseResult(valid,
+            "Volume scalar candidates retain VTK ordinary/finite component semantics without changing published metadata") ? 0 : 1;
+        if (prepared) {
+            prepared->Modified();
+            failures += GetCaseResult(!prepared->GetInformation()->Has(vtkAbstractArray::PER_COMPONENT())
+                && !prepared->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT()),
+                "VTK Modified invalidates both prepared component range caches") ? 0 : 1;
+        }
+    }
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(128, 128, 32);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    image->GetPointData()->GetScalars()->Fill(3.0);
+    auto request = GetVolumeRequest(image, nullptr, 1, VolumeQuality::Ultra, {128, 128, 32}, false);
+    auto lane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator resources([lane](RenderLaneWork work) {return lane->Start(std::move(work));});
+    auto channel = resources.CreateTaskChannel(RenderProductKind::VolumeLod);
+    int checks = 0;
+    VolumeLodBuildResult cancelled;
+    RenderTaskRequest work; work.requestRevision = 1;
+    // 在已进入构建后的协作检查点撤销需要者，不用 sleep 猜线程交错。
+    work.onNeeded = [&] {return ++checks < 7;};
+    work.work = [&](RenderTaskToken token) {cancelled = VolumeLodProductBuilder().BuildProduct(request, token);};
+    const auto accepted = channel->StartTask(std::move(work));
+    const auto sent = lane->SendOne();
+    failures += GetCaseResult(accepted == RenderTaskAdmission::Accepted && sent && checks >= 7
+        && !cancelled.product && cancelled.failureReason == RenderProductFailure::Cancelled
+        && !image->GetPointData()->GetScalars()->GetInformation()->Has(vtkAbstractArray::PER_FINITE_COMPONENT()),
+        "Cancellation during scalar preparation discards private range metadata and keeps the published input") ? 0 : 1;
+
+    auto fallbackImage = vtkSmartPointer<vtkImageData>::New();
+    fallbackImage->SetDimensions(32, 32, 32);
+    auto fallbackValues = vtkSmartPointer<RangeReadProbe>::New();
+    fallbackValues->SetNumberOfTuples(32 * 32 * 32);
+    fallbackValues->Fill(128.0);
+    fallbackImage->GetPointData()->SetScalars(fallbackValues);
+    RangeReadProbe::shouldThrow = true;
+    auto fallback = VolumeLodProductBuilder().BuildProduct(
+        GetVolumeRequest(fallbackImage, nullptr, 2, VolumeQuality::Ultra, {32, 32, 32}, false), RenderTaskToken{});
+    const bool wasFallback = !RangeReadProbe::shouldThrow && fallback.product
+        && fallback.failureReason == RenderProductFailure::None
+        && !fallback.product->volume->GetPointData()->GetScalars()->GetInformation()
+            ->Has(vtkAbstractArray::PER_FINITE_COMPONENT());
+    RangeReadProbe::shouldThrow = false;
+    bool isRendered = false;
+    if (fallback.product) {
+        auto renderer = vtkSmartPointer<vtkRenderer>::New();
+        auto window = vtkSmartPointer<vtkRenderWindow>::New();
+        window->SetOffScreenRendering(1); window->SetSize(32, 32); window->AddRenderer(renderer);
+        auto mapper = vtkSmartPointer<vtkGPUVolumeRayCastMapper>::New();
+        mapper->SetUseJittering(false);
+        auto volume = vtkSmartPointer<vtkVolume>::New(); volume->SetMapper(mapper);
+        auto color = vtkSmartPointer<vtkColorTransferFunction>::New();
+        color->AddRGBPoint(0, .8, .4, .2); color->AddRGBPoint(255, .8, .4, .2);
+        auto opacity = vtkSmartPointer<vtkPiecewiseFunction>::New();
+        opacity->AddPoint(0, 0); opacity->AddPoint(255, 1);
+        volume->GetProperty()->SetColor(color); volume->GetProperty()->SetScalarOpacity(opacity);
+        renderer->AddVolume(volume); mapper->SetInputData(fallbackImage); renderer->ResetCamera();
+        auto capture = vtkSmartPointer<vtkWindowToImageFilter>::New(); capture->SetInput(window);
+        capture->ReadFrontBufferOff(); capture->SetInputBufferTypeToRGBA();
+        window->Render(); window->WaitForCompletion(); capture->Update();
+        auto* pixels = capture->GetOutput()->GetPointData()->GetScalars();
+        const auto pixelBytes = static_cast<std::size_t>(pixels->GetNumberOfValues());
+        const auto* before = static_cast<const unsigned char*>(pixels->GetVoidPointer(0));
+        const std::vector<unsigned char> expected(before, before + pixelBytes);
+        mapper->ReleaseGraphicsResources(window);
+        mapper->SetInputData(fallback.product->volume);
+        window->Render(); window->WaitForCompletion(); capture->Modified(); capture->Update();
+        pixels = capture->GetOutput()->GetPointData()->GetScalars();
+        double range[2]{}; fallback.product->volume->GetPointData()->GetScalars()->GetFiniteRange(range, 0);
+        isRendered = range[0] == 128 && range[1] == 128
+            && pixels->GetNumberOfValues() == static_cast<vtkIdType>(expected.size())
+            && std::equal(expected.begin(), expected.end(), static_cast<unsigned char*>(pixels->GetVoidPointer(0)));
+        renderer->RemoveVolume(volume); mapper->ReleaseGraphicsResources(window);
+    }
+    failures += GetCaseResult(wasFallback && isRendered,
+        "Unavailable optional range cache uses the original owner path and renders identical pixels without rejecting display") ? 0 : 1;
+    vtkWeakPointer<vtkDataArray> borrowed = fallbackValues;
+    fallbackImage = nullptr; fallbackValues = nullptr;
+    const bool hasOwner = borrowed.GetPointer() != nullptr;
+    fallback.product.reset();
+    failures += GetCaseResult(hasOwner && !borrowed.GetPointer(),
+        "Native scalar storage stays owned until the last private candidate is released") ? 0 : 1;
+    return failures;
 }
 
 int GetVolumeStrategyTaskFailCount()
@@ -1659,11 +2670,14 @@ int GetRenderProductFailCount()
         + GetDefaultStrategyFailCount()
         + GetRenderLaneFailCount()
         + GetRenderStopFailCount()
+        + GetOptionalCpuBudgetFailCount()
         + GetExecutorLaneFailCount()
         + GetInitialIsoStageFailCount()
         + GetIsoBuilderFailCount()
         + GetIsoStrategyTaskFailCount()
+        + GetIsoIndexFailCount()
         + GetVolumeBuilderFailCount()
+        + GetVolumeRangeFailCount()
         + GetVolumeStrategyTaskFailCount()
         + GetResourceAccountingFailCount()
         + GetSharedCacheAndGpuFailCount()

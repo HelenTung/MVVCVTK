@@ -47,6 +47,12 @@ void TestRecordWriter::SetProgress(std::uint64_t id, int percent)
     entry.value["elapsedMs"] = QString::number(entry.clock.elapsed());
     if (onChanged) onChanged(entry.value);
 }
+void TestRecordWriter::SetReadTaskTimings(std::uint64_t id, const QJsonObject& timings)
+{
+    if(id==0 || id>m_entries.size())return;
+    // 所属线程在交付终态前补齐诊断，由随后 SetComplete 一次性通知观察者。
+    m_entries[id-1].value["readTaskTimings"]=timings;
+}
 void TestRecordWriter::SetComplete(std::uint64_t id, const QString& status,
     const QJsonObject& result, const QJsonObject& current)
 {

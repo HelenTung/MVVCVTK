@@ -11,22 +11,26 @@
 #include <QSignalBlocker>
 #include <QScrollBar>
 #include <QSet>
+#include <QStyle>
 namespace Manual {
 ObjectBrowser::ObjectBrowser(QWidget* parent) : QWidget(parent)
 {
     setObjectName("sharedObjectBrowser");
     auto* layout = new QVBoxLayout(this); layout->setContentsMargins(0,0,0,0);
     m_search = new QLineEdit(this); m_search->setObjectName("objectSearch");
-    m_search->setPlaceholderText("搜索数据、范围和结果"); m_search->setClearButtonEnabled(true); layout->addWidget(m_search);
+    m_search->setPlaceholderText("搜索名称或修订"); m_search->setAccessibleName("搜索对象"); m_search->setClearButtonEnabled(true); layout->addWidget(m_search);
     m_tree = new QTreeWidget(this); m_tree->setObjectName("workbenchObjects");
-    m_tree->setHeaderLabels({"对象", "状态"}); m_tree->setUniformRowHeights(true);
+    m_tree->setHeaderLabels({"对象", "状态"});m_tree->setUniformRowHeights(false);m_tree->setWordWrap(true);m_tree->setTextElideMode(Qt::ElideNone);
+    m_tree->setAlternatingRowColors(true); m_tree->setIndentation(14); m_tree->setAccessibleName("对象与结果目录");
     m_tree->header()->setSectionResizeMode(0,QHeaderView::Stretch);
-    m_tree->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents); layout->addWidget(m_tree,1);
+    m_tree->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);m_tree->header()->setStretchLastSection(false);layout->addWidget(m_tree,1);
     m_summary = new QLabel("单击只选中；显隐和采用通过独立操作。",this);
     m_summary->setObjectName("selectedObjectSummary"); m_summary->setWordWrap(true); layout->addWidget(m_summary);
+    m_summary->setTextFormat(Qt::PlainText); m_summary->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);m_summary->hide();
     m_use = new QPushButton("设为工作输入",this); m_use->setObjectName("useSelectedObject"); m_use->setEnabled(false); layout->addWidget(m_use);
-    auto* visibility=new QHBoxLayout;m_show=new QPushButton("显示",this);m_hide=new QPushButton("隐藏",this);
-    m_show->setObjectName("showSelectedObject");m_hide->setObjectName("hideSelectedObject");visibility->addWidget(m_show);visibility->addWidget(m_hide);layout->addLayout(visibility);m_show->setEnabled(false);m_hide->setEnabled(false);
+    m_use->hide();auto* visibility=new QHBoxLayout;m_show=new QPushButton("显示",this);m_hide=new QPushButton("隐藏",this);
+    m_show->setObjectName("showSelectedObject");m_hide->setObjectName("hideSelectedObject");visibility->addWidget(m_show);visibility->addWidget(m_hide);layout->addLayout(visibility);m_show->hide();m_hide->hide();m_show->setEnabled(false);m_hide->setEnabled(false);
+    connect(m_tree,&QTreeWidget::itemChanged,this,[this](QTreeWidgetItem* item,int column){if(column!=0)return;const auto node=item->data(0,Qt::UserRole).toJsonObject();if(!node["isVisible"].isBool())return;SendObjectAction(node["id"].toString(),node["isVolume"].toBool()?"SetVolumeVisible":"Visibility",{{"isVisible",item->checkState(0)==Qt::Checked}});});
     for(const auto& entry:{std::pair<QPushButton*,bool>{m_show,true},{m_hide,false}})connect(entry.first,&QPushButton::clicked,this,[this,visible=entry.second] {
         if(!m_tree->currentItem())return;const auto node=m_tree->currentItem()->data(0,Qt::UserRole).toJsonObject();
         SendObjectAction(node["id"].toString(),node["isVolume"].toBool()?"SetVolumeVisible":"Visibility",{{"isVisible",visible}});
@@ -69,7 +73,7 @@ ObjectBrowser::ObjectBrowser(QWidget* parent) : QWidget(parent)
     });
 }
 void ObjectBrowser::SetObjects(const QJsonObject& graph,const QJsonArray& regions,
-    const QJsonArray& moduleNodes,const QString& current,const QStringList& roiActions,std::optional<double> currentOpacity)
+    const QJsonArray& moduleNodes,const QString& current,const QStringList& roiActions,std::optional<double> currentOpacity,const QString& currentName)
 {
     QJsonArray groups;
     for(const auto* title:{"数据","范围","分析与结果","参考"})
@@ -99,7 +103,8 @@ void ObjectBrowser::SetObjects(const QJsonObject& graph,const QJsonArray& region
         const bool result=id.startsWith("wall-result:") || id.startsWith("gap-result:") || id.startsWith("alignment-result:") || id.startsWith("surface:");
         const bool candidate=id.startsWith("artifact-candidate:") || id.startsWith("edit-preview:") || id.startsWith("surface-preview:");
         if(!reference && !result && !candidate && !id.startsWith("part:")) continue;
-        const auto ref=id.section(':',1); represented.insert(ref); node["ref"]=ref;
+        const auto ref=id.section(':',1);represented.insert(ref);node["ref"]=ref;
+        if(node["actions"].toArray().contains("Visibility") && (node["status"]=="显示"||node["status"]=="隐藏"))node["isVisible"]=node["status"]=="显示";
         node["children"]=QJsonArray{}; append(reference?3:2,node);
     }
     for(const auto value:graph["nodes"].toArray()) {
@@ -111,13 +116,14 @@ void ObjectBrowser::SetObjects(const QJsonObject& graph,const QJsonArray& region
             type=="org.mvvcvtk.surface-mesh"?"正式表面":"标签";
         const QJsonObject target{{"graphRevision",ref}}; QJsonArray actions{"GraphInfo"}; if(volume){actions.prepend("UseData");if(ref==current && currentOpacity)actions.append("SetVolumeVisible");}
         const QString status=ref==current?QString("当前输入")+(currentOpacity?*currentOpacity>0?" · 三维显示":" · 三维隐藏":" · 三维尚未就绪"):QString("已发布");
-        append(volume?0:2,{{"id","published:"+ref},{"title",title+" · #"+data["order"].toString()},
-            {"status",status},{"isVolume",volume},{"ref",ref},{"module","Data"},
+        append(volume?0:2,{{"id","published:"+ref},{"title",ref==current&&!currentName.isEmpty()?currentName:title+" · #"+data["order"].toString()},
+            {"status",status},{"isVisible",volume&&ref==current&&currentOpacity?QJsonValue(*currentOpacity>0):QJsonValue()},{"isVolume",volume},{"ref",ref},{"module","Data"},
             {"source",data["parents"]},{"actions",actions},{"patches",QJsonObject{{"GraphInfo",target},{"UseData",target},{"SetVolumeVisible",target}}}});
     }
     if(groups==m_objects) return;
     m_objects=groups; const auto selected=m_tree->currentItem()?m_tree->currentItem()->data(0,Qt::UserRole).toJsonObject()["id"].toString():QString();
     const auto scroll=m_tree->verticalScrollBar()->value(); const QSignalBlocker blocker(m_tree);
+    const auto readyIcon=style()->standardIcon(QStyle::SP_DialogApplyButton);
     // 差量协调保留原有行、选择和折叠；目录刷新不执行任何业务。
     const std::function<void(QTreeWidgetItem*,const QJsonArray&)> reconcile=[&](QTreeWidgetItem* parent,const QJsonArray& nodes) {
         QMap<QString,QTreeWidgetItem*> old;
@@ -127,8 +133,12 @@ void ObjectBrowser::SetObjects(const QJsonObject& graph,const QJsonArray& region
             if(created){item=new QTreeWidgetItem;parent->insertChild(i,item);item->setExpanded(true);}
             else if(parent->indexOfChild(item)!=i){parent->takeChild(parent->indexOfChild(item));parent->insertChild(i,item);}
             if(item->data(0,Qt::UserRole).toJsonObject()!=node) {
-                item->setData(0,Qt::UserRole,node); item->setText(0,node["title"].toString()); item->setText(1,node["status"].toString());
+                item->setData(0,Qt::UserRole,node);item->setText(0,node["title"].toString());auto status=node["status"].toString();if(status.startsWith("当前输入"))status="当前";else if(status=="正式范围")status="区域";else if(status=="已归档")status="归档";item->setText(1,status);
+                item->setIcon(1,node["ref"].toString().isEmpty()?QIcon():readyIcon);
+                if(node["isVisible"].isBool()){item->setFlags(item->flags()|Qt::ItemIsUserCheckable);item->setCheckState(0,node["isVisible"].toBool()?Qt::Checked:Qt::Unchecked);}
+                else {item->setFlags(item->flags()&~Qt::ItemIsUserCheckable);item->setData(0,Qt::CheckStateRole,QVariant());}
                 item->setToolTip(0,node["title"].toString()+"\n修订："+node["ref"].toString());
+                item->setToolTip(1,node["status"].toString());
             }
             reconcile(item,node["children"].toArray()); if(node["id"]==selected)m_tree->setCurrentItem(item);
         }

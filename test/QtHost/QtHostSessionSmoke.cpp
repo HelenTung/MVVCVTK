@@ -345,6 +345,10 @@ bool SendFrame(
     if (!views.CollectFrameUpdates()) return false;
     const auto status = views.BuildFrameStage(committedEpoch + 1);
     if (status == HostFrameStageStatus::Failed) return false;
+    if (status == HostFrameStageStatus::Deferred) {
+        views.ClearFrameStage();
+        return true;
+    }
     if (status == HostFrameStageStatus::Unchanged) {
         views.SendFrameCompletions();
         return true;
@@ -1458,6 +1462,27 @@ bool BuildStyleQualityTest()
         request.toolMode = mode;
         return router.Dispatch(std::move(request));
     };
+    const auto getVolumeReady = [&endpoints]() {
+        auto* props = endpoints.front().renderer->GetViewProps();
+        vtkCollectionSimpleIterator iterator;
+        props->InitTraversal(iterator);
+        while (auto* prop = props->GetNextProp(iterator)) {
+            auto* volume = vtkVolume::SafeDownCast(prop);
+            auto* mapper = volume
+                ? vtkGPUVolumeRayCastMapper::SafeDownCast(volume->GetMapper()) : nullptr;
+            if (mapper && mapper->GetInput()) return true;
+        }
+        return false;
+    };
+    const auto waitForVolumeInput = [&]() {
+        // 与相机夹具使用相同的真实产物判据；准备帧不计入后面的交互绘制次数。
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!getVolumeReady() && std::chrono::steady_clock::now() < deadline) {
+            if (!SendTimer(interactor)) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return getVolumeReady();
+    };
     // 数据在 Host 组合根创建前已提交；用共享事件入口发布一次完整快照，
     // 再由窄 update port 构建策略，测试不注入具体 App runtime。
     core.sharedStateBroadcaster->SendFlags(UpdateFlags::All);
@@ -1474,6 +1499,7 @@ bool BuildStyleQualityTest()
     // 首次 Timer 清理初始化阶段已积累的状态，后续只观察 style source
     // 产生的 RenderRate 边界。
     (void)SendTimer(interactor);
+    if (!waitForVolumeInput()) return false;
     auto* oldStyle = vtkInteractorStyle::SafeDownCast(
         interactor->GetInteractorStyle());
     if (!oldStyle) {
@@ -1495,7 +1521,10 @@ bool BuildStyleQualityTest()
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(true);
     const bool isStartActive =
         core.sharedState->GetIsInteracting();
-    (void)SendTimer(interactor);
+    const bool isFastTimerDelivered = SendTimer(interactor);
+    const auto timerRate = renderWindow->GetDesiredUpdateRate();
+    const auto timerRenderCountDelta = renderWindow->GetRenderCount() - renderCountBeforeStyle;
+    const bool isTimerMapperReady = getVolumeReady();
     const bool isTimerFast =
         renderWindow->GetDesiredUpdateRate() == volumeTargetFps
         && renderWindow->GetRenderCount()
@@ -1584,6 +1613,7 @@ bool BuildStyleQualityTest()
         return false;
     }
     (void)SendTimer(interactor);
+    if (!waitForVolumeInput()) return false;
     const bool isReplaceStill =
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(false);
     auto* newStyle = vtkInteractorStyle::SafeDownCast(
@@ -1785,6 +1815,10 @@ bool BuildStyleQualityTest()
             << " direct_render_enabled="
             << isDirectRenderEnabled
             << " timer_fast=" << isTimerFast
+            << " timer_delivered=" << isFastTimerDelivered
+            << " timer_rate=" << timerRate
+            << " timer_render_delta=" << timerRenderCountDelta
+            << " timer_mapper_ready=" << isTimerMapperReady
             << " end_inactive=" << isEndInactive
             << " style_render_kept="
             << isStyleRenderKept

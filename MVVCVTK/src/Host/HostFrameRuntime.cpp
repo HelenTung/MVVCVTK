@@ -539,7 +539,13 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
             }
         }
 
-        std::map<std::string, std::pair<DataRevisionRef, DataBindingRevision>> sceneInputs;
+        struct SceneInput final {
+            std::pair<DataRevisionRef, DataBindingRevision> input;
+            bool isDifferent = false;
+            bool isPending = false;
+            bool hasFailed = false;
+        };
+        std::map<std::string, SceneInput> sceneInputs;
         std::map<std::string, DataRevisionRef> sceneSources;
         // 缓存仅存活于本次 frozen graph 校验，不能跨 epoch 或以 data 裸指针复用。
         std::vector<const HostFrameIntent*> validatedInputs, validatedDisplays;
@@ -557,7 +563,9 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
         };
         for (std::size_t index = 0; index < m_views.size(); ++index) {
             const auto* previousState = index < m_sceneStates.size() ? &m_sceneStates[index] : nullptr;
-            auto state = m_views[index].BuildSceneViewState(std::move(activeFeatures[index]), previousState);
+            bool isPending = false, hasFailed = false;
+            auto state = m_views[index].BuildSceneViewState(std::move(activeFeatures[index]),
+                previousState, &isPending, &hasFailed);
             if (m_views[index].isAvailable
                 && (!state.presentation || !state.camera)) {
                 restoreDirty();
@@ -579,13 +587,13 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
                     // 只比较已有输入的 View；辅助视图可以尚未采用主体数据。
                     // 比较已应用 binding，不要求它等于图中最新的 primary binding。
                     const auto& group = m_views[index].config.synchronizationGroup;
-                    const auto sceneInput = sceneInputs.find(group);
+                    auto sceneInput = sceneInputs.try_emplace(group, SceneInput{currentInput}).first;
                     if (m_views[index].config.syncPolicy == HostViewSyncPolicy::SamePrimary
-                        && sceneInput != sceneInputs.end() && sceneInput->second != currentInput) {
-                        restoreDirty();
-                        return HostFrameStageStatus::Failed;
+                        && sceneInput->second.input != currentInput) {
+                        sceneInput->second.isDifferent = true;
                     }
-                    sceneInputs[group] = currentInput;
+                    sceneInput->second.isPending = sceneInput->second.isPending || isPending;
+                    sceneInput->second.hasFailed = sceneInput->second.hasFailed || hasFailed;
                     if (m_views[index].config.syncPolicy == HostViewSyncPolicy::ExplicitInputs) {
                         const auto source = getSource(currentRevision);
                         const auto previous = sceneSources.find(group);
@@ -652,6 +660,21 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
             state.renderedEpoch = (m_isHostDriven || stage.renderNeeded[index])
                 ? m_views[index].renderedEpoch : nextEpoch;
             stage.sceneStates.push_back(std::move(state));
+        }
+        bool hasPendingInputs = false;
+        for (const auto& [group, input] : sceneInputs) {
+            if (!input.isDifferent) continue;
+            if (!input.isPending || input.hasFailed) {
+                restoreDirty();
+                return HostFrameStageStatus::Failed;
+            }
+            hasPendingInputs = true;
+        }
+        if (hasPendingInputs) {
+            // 数据图已发布，异步显示候选仍在准备；保留旧场景，等待真实完成事件。
+            // 必须先校验全部 View，不能让暂缓掩盖非法引用、相机或显式输入错误。
+            restoreDirty();
+            return HostFrameStageStatus::Deferred;
         }
         std::stable_sort(
             stage.renderOrder.begin(), stage.renderOrder.end(),

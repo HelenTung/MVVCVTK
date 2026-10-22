@@ -17,7 +17,7 @@ BusinessStep GetBusinessStep(const QString& module, const QJsonObject& s,
         if (s["activationFailed"].toBool() && !accepted.isEmpty())
             return {"数据已接纳，采用尚未完成", "保留已加载数据，重试显示组激活；顶部仍显示实际当前输入。", "ActivateAccepted", "重试使用已加载数据", {"Load", "Descriptor"}};
         return {input["available"].toBool() ? "当前输入已就绪" : "待加载体数据",
-            "核对 RAW 尺寸与 LPS 几何，加载完成后可进入显示或处理业务。", "Load", "加载并使用体数据", {"Descriptor", "ExportData", "OpenCrop"}};
+            "核对 RAW 尺寸与 LPS 几何，加载完成后可进入显示或处理业务。", "Load", "导入并使用", {"OpenSurface","Descriptor","ExportData","OpenRoi","OpenCrop"}};
     }
     if (module == "View") return {s["parametersChanged"].toBool()?"显示参数有未应用修改":"所选视图显示设置已应用", "所选视图、已应用值和表单草稿分别保留；明确提交修改。",
         QStringList{"Visibility", "Cursor"}.contains(parameterAction) ? parameterAction : "Set", s["parametersChanged"].toBool()?"应用所选视图修改":"应用显示设置", {"Reset", "State"}};

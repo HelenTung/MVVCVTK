@@ -102,9 +102,15 @@ public:
     // 估算默认只作诊断；宿主显式设置限制后才参与准入。
     bool SetEstimatedBytes(std::uint64_t estimatedBytes) const;
     bool SetActualBytes(std::uint64_t actualBytes) const;
+    // 可选缓存的原子预留；不足只返回 false，不取消、不设置产品失败。
+    bool TrySetActualBytes(std::uint64_t actualBytes) const;
     // 产品读者在取消/退役后仍存活时继续计费；不取得业务数据或渲染对象所有权。
     bool SetProductOwner(const std::shared_ptr<const void>& product,
         std::uint64_t actualBytes) const;
+    // 仅供真实释放可选缓存后同步调用；可跨任务结束，执行于调用线程，
+    // 不进入用户代码。按产品将账目幂等缩至retainedBytes，不重复扣减。
+    std::function<void()> GetProductBytesRelease(const std::shared_ptr<const void>& product,
+        std::uint64_t retainedBytes) const;
 
 private:
     class Impl;

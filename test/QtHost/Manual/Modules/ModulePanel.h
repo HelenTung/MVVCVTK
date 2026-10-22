@@ -13,6 +13,8 @@
 #include <QSet>
 #include <QPointer>
 #include <functional>
+#include <chrono>
+#include <optional>
 #include <map>
 #include <set>
 class QPushButton;
@@ -25,8 +27,6 @@ class QVBoxLayout;
 class QSplitter;
 class QLineEdit;
 class QTabWidget;
-class QTabBar;
-class QStackedWidget;
 class QToolButton;
 class QMenu;
 
@@ -34,9 +34,19 @@ namespace Manual {
 class ParameterEditor;
 class ColorLegendEditor;
 struct TestContext { TestSession& runtime; TestWorkflow& workflow; TestRecordWriter& records; };
+struct ReadTaskConfig final {
+    // 工作台私有默认值沿用 business-measurement 场景的一小时长测期限，可按任务覆盖。
+    std::chrono::milliseconds timeout{std::chrono::hours(1)};
+    std::optional<std::chrono::nanoseconds> preparationTime;
+    // 只供私有确定性回归替换时钟，须线程安全；正式任务使用 steady_clock。
+    std::function<std::chrono::steady_clock::time_point()> getNow;
+};
 struct ReadTaskContext final {
     ReportCheckpoint checkpoint;
-    // 提交与取消争用同一状态：开始提交后，取消明确不再被接纳。
+    // 线程安全；取消与期限共享任务仲裁状态，提交开始后均不再接纳。
+    std::function<bool()> getCancelled;
+    // 工作线程内同步调用 publish；取消/期限先胜出时不调用它，提交先开始时不再撤回。
+    // publish 仅提交线程私有文件，不访问 Host 或界面；接纳提交不保证替换一定成功。
     std::function<void(const std::function<void()>&)> commit;
 };
 class ModulePanel : public QWidget {
@@ -54,13 +64,17 @@ public:
     std::uint64_t SendAction(const QString& name, const QJsonObject& params, Completion onComplete = {});
     void SetComplete(std::uint64_t id, const QString& status, QJsonObject result = {});
     void SetAdmission(std::uint64_t id, bool accepted, QJsonObject raw = {});
-    // 只读长任务持有固定输入，在后台工作；完成回调和记录仍在界面线程执行。
+    // 同步启动；忙或配置非法时抛异常，不调用 onSucceeded。任务期限在此冻结。
+    // onSucceeded 仅成功时由所属线程定时器调用，不会在本函数返回前执行，随后发布终态记录。
+    // 回调内可查询/请求 Stop；当前任务仍占用读槽，新读会拒绝，Stop 可返回待重试。
     void StartReadTask(std::uint64_t id, QString status,
         std::function<QJsonObject(const ReadTaskContext&)> work,
-        std::function<void()> onSucceeded = {});
+        std::function<void()> onSucceeded = {}, ReadTaskConfig config = {});
     std::size_t CancelReadTasks();
     void SetState(const QJsonObject& value);
     void SetNotice(const QString& text);
+    void SetFeedback(const QString& text, const char* tone = "neutral");
+    QString GetFeedback() const;
     QString GetNotice() const { return m_notice; }
     void SendHost(std::uint64_t id, HostRequest&& request);
     void SetInput(std::uint64_t id, const DataRevisionRef& revision);
@@ -72,7 +86,9 @@ public:
     QJsonObject GetActionParameters(const QString& action) const;
     void SendBusinessAction(const QString& action, bool usesOutput = false);
     BusinessStatistics* GetStatisticsWidget() const { return m_statistics; }
+    BusinessStatistics* GetGrayStatisticsWidget() const { return m_grayStatistics; }
     void RefreshStatistics();
+    void RefreshGrayStatistics();
     void ShowSources(DataRevisionRef root);
     QString GetName() const { return m_name; }
     QString GetDisplayName() const;
@@ -84,6 +100,7 @@ public:
     std::function<void(bool)> setColorVisible;
     std::function<void(const QString&,bool,int)> setViewLegend;
     void SelectAction(const QString& action);
+    void SetInitialAction(const QString& action);
     bool SelectNodeGroup(const QString& id);
     bool SelectPartTarget(const QJsonObject& binding);
     void RefreshWorkflow();
@@ -99,6 +116,7 @@ public:
     std::function<void()> onObserve;
     std::function<void(const QString&,const QJsonObject&)> onParametersEdited;
     std::function<bool()> onStatistics;
+    std::function<bool()> onGrayStatistics;
     std::function<GrayStatisticsScope()> getGrayScope;
     std::function<void()> onStop;
     // 关闭会话时释放分页快照；页面和业务完成回调仍保留到 Host 停止完成。
@@ -108,9 +126,13 @@ public:
     std::function<QString(const QString&, const QJsonObject&)> validateAction;
 protected:
     TestContext m_context;
+    void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 private:
+    void QueueFocusOrder();
+    bool m_focusOrderQueued=false;
     class ReadTask;
     std::map<std::uint64_t, std::unique_ptr<ReadTask>> m_readTasks;
     struct Entry { QJsonObject defaults; Action action; TestPolicy policy; bool exitTools = false; };
@@ -133,12 +155,13 @@ private:
     QPushButton* m_primary = nullptr;
     QPushButton* m_viewReport = nullptr;
     BusinessStatistics* m_statistics = nullptr;
+    BusinessStatistics* m_grayStatistics = nullptr;
     QWidget* m_nextActions = nullptr;
     QGridLayout* m_nextLayout = nullptr;
     QStringList m_nextActionIds;
     QTabWidget* m_browser = nullptr;
-    QTabBar* m_parameterTabs = nullptr;
-    QTabBar* m_taskTabs = nullptr;
+    QComboBox* m_parameterTabs = nullptr;
+    QComboBox* m_taskTabs = nullptr;
     QString m_taskGroup;
     QMap<QString,QString> m_taskSelections;
     QString m_parameterAction;
@@ -148,9 +171,19 @@ private:
     QToolButton* m_help = nullptr;
     QToolButton* m_moreOperations = nullptr;
     QMenu* m_operationMenu = nullptr;
-    QStackedWidget* m_commandArea = nullptr;
+    QWidget* m_commandArea = nullptr;
+    QVBoxLayout* m_commandLayout = nullptr;
+    QWidget* m_currentCommands = nullptr;
+    QLabel* m_feedback = nullptr;
+    QString m_feedbackText;
+    QString m_feedbackTone="neutral";
+    bool m_commandHeightQueued=false;
     std::map<QString, QWidget*> m_commandRows;
     std::map<QString, QLabel*> m_requirements;
+    QWidget* m_requirementArea = nullptr;
+    QToolButton* m_requirementToggle = nullptr;
+    QGridLayout* m_requirementCommands=nullptr;
+    QLabel* m_currentRequirement = nullptr;
     QLineEdit* m_nodeSearch = nullptr;
     QSet<QString> m_searchExpanded;
     bool m_isSearching = false;
@@ -181,6 +214,8 @@ private:
     bool m_isObserving = false;
     bool m_parameterFocusQueued = false;
     void QueueParameterFocus();
+    void SetCommandHeight();
+    void SetRequirementLayout();
     void SetNode(QTreeWidgetItem* item);
     void SelectSceneItem(QTreeWidgetItem* item);
     void FilterNodes();

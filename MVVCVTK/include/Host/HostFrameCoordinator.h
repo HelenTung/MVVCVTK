@@ -16,7 +16,8 @@
 enum class HostFrameStageStatus : std::uint8_t {
     Failed,
     Unchanged,
-    Ready
+    Ready,
+    Deferred
 };
 
 // Host 私有 intent 会在入队时补齐 Session 与 Scene 身份；Feature 永远看不到

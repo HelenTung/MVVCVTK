@@ -7,6 +7,8 @@
 
 #include <vtkAlgorithm.h>
 #include <vtkCallbackCommand.h>
+#include <vtkCellArray.h>
+#include <vtkCellArrayIterator.h>
 #include <vtkClipPolyData.h>
 #include <vtkCommand.h>
 #include <vtkDataArray.h>
@@ -15,12 +17,16 @@
 #include <vtkImplicitFunction.h>
 #include <vtkMatrix3x3.h>
 #include <vtkObjectFactory.h>
+#include <vtkOpenGLIndexBufferObject.h>
 #include <vtkPointData.h>
+#include <vtkPoints.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -264,7 +270,195 @@ std::optional<std::uint64_t> GetMeshBytes(vtkImageData* image,
     return budget.GetBytes();
 }
 
+std::optional<std::vector<unsigned int>> BuildTriangleIndices(vtkPolyData* surface,
+    const std::uint64_t meshBytes, const RenderTaskToken& stopToken)
+{
+    try {
+        if (!surface->GetPoints() || surface->GetNumberOfVerts() != 0
+            || surface->GetNumberOfLines() != 0 || surface->GetNumberOfStrips() != 0) return {};
+        const auto pointCount = surface->GetNumberOfPoints();
+        if (pointCount > 0 && static_cast<std::uint64_t>(pointCount - 1)
+            > (std::numeric_limits<unsigned int>::max)()) return {};
+        auto* cells = surface->GetPolys();
+        auto iterator = vtkSmartPointer<vtkCellArrayIterator>::Take(cells->NewIterator());
+        constexpr vtkIdType chunkCells = 4096;
+        std::uint64_t triangleCount = 0, chunkIds = 0, maximumChunkIds = 0;
+        vtkIdType processed = 0;
+        // 1. 先确定实际所需容量；Iso/clip 的三、四边形以外保持 VTK 原路径。
+        for (iterator->GoToFirstCell(); !iterator->IsDoneWithTraversal(); iterator->GoToNextCell()) {
+            if (processed % chunkCells == 0 && stopToken.GetIsStopped()) return {};
+            vtkIdType size = 0; const vtkIdType* ids = nullptr;
+            iterator->GetCurrentCell(size, ids);
+            if (size != 3 && size != 4) return {};
+            if (triangleCount > (std::numeric_limits<std::uint64_t>::max)() - (size - 2)) return {};
+            triangleCount += size - 2;
+            chunkIds += size;
+            for (vtkIdType index = 0; index < size; ++index)
+                if (ids[index] < 0 || ids[index] >= pointCount) return {};
+            if (++processed % chunkCells == 0) {
+                maximumChunkIds = std::max(maximumChunkIds, chunkIds);
+                chunkIds = 0;
+            }
+        }
+        maximumChunkIds = std::max(maximumChunkIds, chunkIds);
+        RenderWorkBudget indicesBudget;
+        indicesBudget.Add(triangleCount, 3 * sizeof(unsigned int));
+        const auto indexBytes = indicesBudget.GetBytes();
+        if (!indexBytes || *indexBytes / sizeof(unsigned int) > (std::numeric_limits<std::size_t>::max)()) return {};
+        RenderWorkBudget working;
+        working.Add(1, meshBytes); working.Add(1, *indexBytes);
+        working.Add(maximumChunkIds + static_cast<std::uint64_t>(chunkCells) + 1, sizeof(vtkIdType));
+        working.Add(1, 4096); // 临时 cell 壳与 VTK 小容器，不成为产品常驻字节。
+        const auto workingBytes = working.GetBytes();
+        if (!workingBytes || !stopToken.TrySetActualBytes(*workingBytes)) return {};
+
+        // 2. 只调用 VTK 的纯 CPU 静态装配函数；batch 间可取消，不创建渲染对象。
+        std::vector<unsigned int> result;
+        result.reserve(static_cast<std::size_t>(*indexBytes / sizeof(unsigned int)));
+        auto batch = vtkSmartPointer<vtkCellArray>::New();
+        if (!batch->AllocateExact(chunkCells, static_cast<vtkIdType>(maximumChunkIds))) return {};
+        processed = 0;
+        for (iterator->GoToFirstCell(); !iterator->IsDoneWithTraversal(); iterator->GoToNextCell()) {
+            if (processed % chunkCells == 0 && stopToken.GetIsStopped()) return {};
+            vtkIdType size = 0; const vtkIdType* ids = nullptr;
+            iterator->GetCurrentCell(size, ids);
+            batch->InsertNextCell(size, ids);
+            if (++processed % chunkCells == 0) {
+                vtkOpenGLIndexBufferObject::AppendTriangleIndexBuffer(result, batch,
+                    surface->GetPoints(), 0, nullptr, nullptr);
+                batch->Reset();
+            }
+        }
+        if (stopToken.GetIsStopped()) return {};
+        if (batch->GetNumberOfCells() != 0)
+            vtkOpenGLIndexBufferObject::AppendTriangleIndexBuffer(result, batch,
+                surface->GetPoints(), 0, nullptr, nullptr);
+        if (stopToken.GetIsStopped()) return {};
+        return result;
+    }
+    catch (...) {
+        // 可选缓存失败不影响几何产品；调用者恢复 mesh 字节并走原绘制路径。
+        return {};
+    }
+}
+
 } // namespace
+
+class IsoSurfaceIndexCache::Impl final {
+public:
+    std::mutex mutex;
+    std::unique_ptr<std::vector<unsigned int>> indices;
+    std::shared_ptr<const std::vector<unsigned int>> preparedIndices;
+    std::weak_ptr<const void> owner;
+    std::function<void()> onReleased;
+    std::atomic<std::uint64_t> bytes{0};
+    std::uint64_t expectedBytes = 0;
+};
+
+IsoSurfaceIndexCache::IsoSurfaceIndexCache(std::vector<unsigned int> indices,
+    std::weak_ptr<const void> owner, std::function<void()> onReleased)
+    : m_impl(std::make_unique<Impl>())
+{
+    m_impl->indices = std::make_unique<std::vector<unsigned int>>(std::move(indices));
+    m_impl->bytes.store(m_impl->indices->capacity() * sizeof(unsigned int));
+    m_impl->expectedBytes = m_impl->bytes.load();
+    m_impl->owner = std::move(owner);
+    m_impl->onReleased = std::move(onReleased);
+}
+
+IsoSurfaceIndexCache::~IsoSurfaceIndexCache() = default;
+
+std::uint64_t IsoSurfaceIndexCache::GetBytes() const noexcept
+{
+    return m_impl->bytes.load(std::memory_order_acquire);
+}
+
+bool IsoSurfaceIndexCache::GetHasIndices() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->mutex);
+    return m_impl->indices || m_impl->preparedIndices;
+}
+
+std::uint64_t IsoSurfaceIndexCache::GetExpectedBytes() const noexcept
+{
+    return m_impl->expectedBytes;
+}
+
+void IsoSurfaceIndexCache::SetPreparedIndices(
+    std::shared_ptr<const std::vector<unsigned int>> indices)
+{
+    std::lock_guard<std::mutex> lock(m_impl->mutex);
+    if (!m_impl->indices && !m_impl->preparedIndices)
+        m_impl->preparedIndices = std::move(indices);
+}
+
+std::shared_ptr<const std::vector<unsigned int>> IsoSurfaceIndexCache::TakeIndices()
+{
+    // 不持缓存锁执行归还通知，避免与协调器的缓存驱逐锁形成反向顺序。
+    std::unique_lock<std::mutex> lock(m_impl->mutex);
+    if (!m_impl->indices) return std::move(m_impl->preparedIndices);
+    auto owner = m_impl->owner.lock();
+    if (!owner || !m_impl->indices) return {};
+    auto* indices = m_impl->indices.release();
+    lock.unlock();
+    // shared_ptr控制块分配失败也会调用deleter，仍先真实释放再归还。
+    return std::shared_ptr<const std::vector<unsigned int>>(indices,
+        [this, owner = std::move(owner)](const std::vector<unsigned int>* values) noexcept {
+            static_cast<void>(owner); // 生命周期持有，不只是缓存身份。
+            delete values;
+            m_impl->bytes.store(0, std::memory_order_release);
+            if (m_impl->onReleased) m_impl->onReleased();
+        });
+}
+
+std::optional<std::uint64_t> IsoSurfaceProductBuilder::GetIndexEstimatedBytes(
+    const std::shared_ptr<const IsoSurfaceProduct>& product)
+{
+    if (!product || !product->triangleIndices) return {};
+    RenderWorkBudget budget;
+    budget.Add(1, product->triangleIndices->GetExpectedBytes());
+    // 与原装配的4096个cell切片一致，四边形是受支持的最大单元。
+    budget.Add(5ULL * 4096 + 1, sizeof(vtkIdType));
+    budget.Add(1, 4096);
+    return budget.GetBytes();
+}
+
+std::shared_ptr<const std::vector<unsigned int>> IsoSurfaceProductBuilder::BuildIndexCandidate(
+    const std::shared_ptr<const IsoSurfaceProduct>& product,
+    const RenderTaskToken& stopToken) const
+{
+    try {
+        if (!product || !product->surface || !product->inputUse.GetIsPublished()
+            || product->triangleIndicesTime == 0
+            || product->triangleIndicesTime != product->surface->GetMeshMTime()
+            || stopToken.GetIsStopped()) return {};
+        // 共享几何只读；VTK遍历器、临时cell和索引均属于本worker候选。
+        auto surface = vtkSmartPointer<vtkPolyData>::New();
+        surface->ShallowCopy(product->surface);
+        auto indices = BuildTriangleIndices(surface, 0, stopToken);
+        if (!indices || stopToken.GetIsStopped() || !product->inputUse.GetIsPublished()
+            || product->triangleIndicesTime != product->surface->GetMeshMTime()) return {};
+        RenderWorkBudget retained;
+        retained.Add(indices->capacity(), sizeof(unsigned int));
+        const auto bytes = retained.GetBytes();
+        if (!bytes || !stopToken.TrySetActualBytes(*bytes)) return {};
+        // 沿既有产品租约登记独立分配身份，避免重复计入缓存几何的mesh字节。
+        auto owner = std::make_shared<const unsigned char>(0);
+        auto values = std::make_unique<std::vector<unsigned int>>(std::move(*indices));
+        std::shared_ptr<const std::vector<unsigned int>> candidate(values.release(),
+            [owner](const std::vector<unsigned int>* data) mutable noexcept {
+                delete data;
+                // 先释放存储，再使原有弱租约失效；即使缓存被锁内驱逐也不反向取锁。
+                owner.reset();
+            });
+        if (!stopToken.SetProductOwner(owner, *bytes)) return {};
+        return candidate;
+    }
+    catch (...) {
+        // 可选重装配不可把已成功的缓存几何改报失败。
+        return {};
+    }
+}
 
 std::optional<std::uint64_t> IsoSurfaceProductBuilder::GetEstimatedBytes(
     const IsoSurfaceBuildRequest& request)
@@ -431,14 +625,44 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         }
         auto surface = vtkSmartPointer<vtkPolyData>::New();
         surface->ShallowCopy(output);
-        const std::uint64_t actualBytes = GetDataBytes(surface);
-        if (!stopToken.SetActualBytes(actualBytes)) {
+        // ResetCamera 的 mapper 读取单元范围；在私有候选上完成惰性拓扑扫描，
+        // 缓存仍由 VTK 按 points/cells/ghost 的 GetMeshMTime 正常失效。
+        if (stopToken.GetIsStopped()) {
+            return GetFailure(RenderProductFailure::Cancelled, "The iso bounds preparation was cancelled.");
+        }
+        try {
+            surface->ComputeCellsBounds();
+        }
+        catch (...) {
+            // 原生计算可能先更新缓存时间再分配内存；丢弃此壳，保留未预热的
+            // 私有 output，避免半成品缓存，也不因可选预热拒绝原有显示路径。
+            surface = output;
+        }
+        if (stopToken.GetIsStopped()) {
+            return GetFailure(RenderProductFailure::Cancelled, "The iso bounds preparation was cancelled.");
+        }
+        const std::uint64_t meshBytes = GetDataBytes(surface);
+        if (!stopToken.SetActualBytes(meshBytes)) {
             return GetFailure(
                 RenderProductFailure::ResourceRejected,
                 "The iso-surface product exceeded its resource lease.");
         }
-
-
+        auto triangleIndices = BuildTriangleIndices(surface, meshBytes, stopToken);
+        if (stopToken.GetIsStopped()) {
+            return GetFailure(RenderProductFailure::Cancelled, "The iso index preparation was cancelled.");
+        }
+        RenderWorkBudget productBytes;
+        productBytes.Add(1, meshBytes);
+        if (triangleIndices) productBytes.Add(triangleIndices->capacity(), sizeof(unsigned int));
+        auto actualBytes = productBytes.GetBytes();
+        if (!actualBytes || !stopToken.TrySetActualBytes(*actualBytes)) {
+            triangleIndices.reset();
+            actualBytes = meshBytes;
+        }
+        if (!stopToken.SetActualBytes(*actualBytes)) {
+            return GetFailure(RenderProductFailure::ResourceRejected,
+                "The iso-surface product exceeded its resource lease.");
+        }
         if (!request.inputUse.GetIsPublished()) {
             return GetFailure(RenderProductFailure::StaleInput, "The product source retired while building.");
         }
@@ -450,12 +674,21 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         product->inputDimensions = request.key.outputDimensions;
         product->isoValue = request.key.isoValue;
         product->surface = std::move(surface);
-        product->actualBytes = actualBytes;
+        product->meshBytes = meshBytes;
+        if (triangleIndices) {
+            try {
+                product->triangleIndices = std::make_unique<IsoSurfaceIndexCache>(
+                    std::move(*triangleIndices), product,
+                    stopToken.GetProductBytesRelease(product, meshBytes));
+                product->triangleIndicesTime = product->surface->GetMeshMTime();
+            }
+            catch (...) { /* 可选缓存壳分配失败仍保留原网格。 */ }
+        }
         product->isPreview = request.isPreview;
 
         VtkDataResourceLease::AttachMesh(product->surface, product->inputUse.resource);
 
-        if (!stopToken.SetProductOwner(product, actualBytes)) {
+        if (!stopToken.SetProductOwner(product, product->GetActualBytes())) {
             return GetFailure(RenderProductFailure::ResourceRejected,
                 "The product allocation lease was rejected.");
         }

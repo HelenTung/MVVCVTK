@@ -28,6 +28,9 @@
 #include <vtkFlyingEdges3D.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkGPUVolumeRayCastMapper.h>
+#include <vtkOpenGLGPUVolumeRayCastMapper.h>
+#include <vtkVolumeInputHelper.h>
+#include <vtkVolumeTexture.h>
 #include <vtkIdTypeArray.h>
 #include <vtkImageResample.h>
 #include <vtkImageReslice.h>
@@ -782,9 +785,27 @@ int GetColdVolumeGpuFailCount()
             auto reloaded = vtkSmartPointer<vtkImageData>::New();
             reloaded->ShallowCopy(image);
             (void)strategy.SetProbeBytes(1024ULL * 1024ULL);
+            const auto getUploadTime = [mapper]() -> vtkMTimeType {
+                auto* gpu = vtkOpenGLGPUVolumeRayCastMapper::SafeDownCast(mapper);
+                if (!gpu) return 0;
+                const auto input = gpu->AssembledInputs.find(0);
+                return input != gpu->AssembledInputs.end() && input->second.Texture
+                    ? input->second.Texture->UploadTime.GetMTime() : 0;
+            };
+            const auto previousUpload = getUploadTime();
             valid = strategy.SetInputData(reloaded, nullptr) && valid;
+            const auto preloadUpload = getUploadTime();
             replacementWindow->Render();
             replacementWindow->WaitForCompletion();
+            const auto firstDrawUpload = getUploadTime();
+            const bool isUploadedOnce = previousUpload != 0 && preloadUpload > previousUpload
+                && firstDrawUpload == preloadUpload;
+            if (!isUploadedOnce) {
+                std::cerr << "VOLUME_UPLOAD_STAMPS previous=" << previousUpload
+                    << " preload=" << preloadUpload << " first_draw=" << firstDrawUpload << '\n';
+            }
+            failureCount += GetCaseResult(isUploadedOnce,
+                "Warm volume uploads a new input once and reuses it on the first draw") ? 0 : 1;
             valid = valid && strategy.GetGpuQueryCount() == 5
                 && strategy.GetGpuPartitions() == singleBlock
                 && strategy.GetMapperInputCount() == 2
@@ -989,7 +1010,8 @@ int GetRenderContractFailCount()
         if (quality == VolumeQuality::Ultra) {
             isUltraNative = dimensionMapper
                 && dimensionMapper->GetInput()
-                    == dimensionImage.GetPointer()
+                && dimensionMapper->GetInput()->GetPointData()->GetScalars()->GetVoidPointer(0)
+                    == dimensionImage->GetScalarPointer()
             && dimensionStrategy.GetResampleBuildCount()
                 == resampleCountBefore;
         }
@@ -1447,8 +1469,8 @@ int GetRenderContractFailCount()
         && qualityMask
         && qualityVolume
         && isNativeAuto
-        && qualityVolume == dimensionImage.GetPointer()
-        && qualityMask == cacheMask.GetPointer()
+        && qualityVolume->GetScalarPointer() == dimensionImage->GetScalarPointer()
+        && qualityMask->GetScalarPointer() == cacheMask->GetScalarPointer()
         && qualityInputCount == 1
         && qualityPlanCount == 1
         && qualityBuildCount == 0
@@ -1625,12 +1647,12 @@ int GetRenderContractFailCount()
             && isExtentKeyUpdated
             && firstKeyMask
             && nextKeyMask
-            && nextKeyMask == firstKeyMask.GetPointer()
+            && nextKeyMask->GetScalarPointer() == firstKeyMask->GetScalarPointer()
             && *static_cast<unsigned char*>(
                 nextKeyMask->GetScalarPointer()) == 0
             && failedClearMask == nullptr
             && keyStrategy.GetLodPlanCount() == 7,
-        "Same-pointer mutations rebuild plans while native aliases stay stable") ? 0 : 1;
+        "Same-pointer mutations rebuild private metadata while native storage stays shared") ? 0 : 1;
 
     auto image = BuildFloatImage(
         { 0.0f, 0.0f, 1.0f, 1.0f });
