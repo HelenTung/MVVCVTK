@@ -814,6 +814,67 @@ void CheckFileExports() {
     if(!evidence.isEmpty()){const auto shot=QDir(evidence).filePath("report-export-complete.png");Require(!QFileInfo::exists(shot)&&stress.grab().save(shot),"cannot save report export completion screenshot");}
     if(stress.isVisible())stress.close();
 }
+void CheckExportLifetimes() {
+    QTemporaryDir directory;Require(directory.isValid(),"export lifetime temp directory unavailable");
+    struct Gate final {
+        std::promise<void> release;std::shared_future<void> ready=release.get_future().share();
+        std::atomic<bool> entered{false},exited{false},opened{false};
+        void Open(){if(!opened.exchange(true))release.set_value();}
+    };
+    struct ReleaseOnExit final {std::shared_ptr<Gate> gate;~ReleaseOnExit(){gate->Open();}};
+    for(const bool closeWindow:{false,true}) {
+        ResultReport view;const auto gate=std::make_shared<Gate>();ReleaseOnExit release{gate};
+        auto original=Document("export-original","原始数量",0);auto* owner=QThread::currentThread();
+        auto source=std::make_shared<const int>(42);const std::weak_ptr<const int> sourceLease=source;
+        original.table=std::make_shared<ReportTable>(1000,[source,gate,owner](ReportRowId row){
+            if(row==300){
+                Require(QThread::currentThread()!=owner,"export body read on the owner thread");gate->entered=true;
+                if(gate->ready.wait_for(std::chrono::milliseconds(reportWaitTimeoutMs))!=std::future_status::ready)throw std::runtime_error("export lifetime fixture guard");
+                gate->exited=true;
+            }
+            return QStringList{QString::number(row),QString::number(*source+row)};
+        });
+        view.AddReport(original);view.show();const auto path=directory.filePath(closeWindow?"close.csv":"selected.csv");
+        view.ExportReportFile(path);original.table.reset();source.reset();Wait([&]{return !gate->entered.load();});
+        auto replacement=Document("export-replacement");replacement.source="data-b";
+        if(closeWindow) {
+            view.close();Require(!gate->exited.load(),"closing waited for the blocked export worker");
+            bool rejected=false;try{view.ExportReportFile(directory.filePath("closed.csv"));}catch(const std::runtime_error&){rejected=true;}
+            Require(rejected,"closed report window accepted another export");
+            view.show();view.RemoveReport(original.id);
+        }
+        view.AddReport(replacement);Require(view.SelectReport(replacement.id),"replacement report not selected");view.ShowReports("data-b");
+        Require(!sourceLease.expired()&&!gate->exited.load(),"selection or removal released the source while its export reader was running");
+        gate->Open();Wait([&]{return view.property("reportTaskBusy").toBool();});
+        Require(view.GetSelectedReport().id==replacement.id,"old export completion replaced a newer report selection");
+        Require(view.property("reportTaskError").toString().isEmpty(),"export lifetime transition reported a worker error");
+        if(closeWindow) {
+            Require(view.property("reportExportStatus").toString()=="cancelled"&&!QFile::exists(path)&&sourceLease.expired(),
+                "close/reopen published a partial export or retained the removed report source");
+            const auto retry=directory.filePath("reopened.csv");view.ExportReportFile(retry);Wait([&]{return view.property("reportTaskBusy").toBool();});
+            QFile file(retry);Require(file.open(QIODevice::ReadOnly),"reopened report export did not commit");const auto copy=ReadReportCsv(file,"reopened");
+            Require(copy.table->GetCount()==2&&SameCells(copy.table->Read(1),QStringList{"point-1","2"}),"old task corrupted the reopened report export");
+        } else {
+            QFile file(path);Require(file.open(QIODevice::ReadOnly),"frozen original export did not commit");const auto copy=ReadReportCsv(file,"original");
+            Require(copy.table->GetCount()==1000&&SameCells(copy.table->Read(0),QStringList{"0","42"})
+                &&SameCells(copy.table->Read(999),QStringList{"999","1041"}),"selection change replaced the frozen export source");
+            view.RemoveReport(original.id);Require(sourceLease.expired(),"completed export retained the removed source");
+        }
+        view.CancelTasks(true);QCoreApplication::processEvents();
+    }
+    // worker 尚在等 owner 物化时直接析构；取消必须唤醒 gate，且不能再调用原生来源。
+    std::weak_ptr<const int> sourceLease;auto reads=std::make_shared<int>(0);const auto path=directory.filePath("destroyed.csv");
+    {
+        auto view=std::make_unique<ResultReport>();auto doc=Document("export-destroy-before-prepare","原始数量",0);
+        auto source=std::make_shared<const int>(7);sourceLease=source;doc.table=std::make_shared<ReportTable>();
+        doc.table->SetRows(1000,[source,reads](ReportRowId row){++*reads;return QStringList{QString::number(row),QString::number(*source)};});
+        view->AddReport(doc);*reads=0;view->ExportReportFile(path);doc.table.reset();source.reset();
+        Require(view->property("reportTaskBusy").toBool(),"destruction fixture did not reserve the export task");view.reset();
+    }
+    Require(*reads==0&&sourceLease.expired()&&!QFile::exists(path),"destroying an unprepared export retained or read its source or published a file");
+    QCoreApplication::processEvents();
+    std::cout<<"PASS: report export freezes its source across selection, close/reopen, removal and destruction before preparation"<<std::endl;
+}
 void CheckSelectedUnmaterializedExports() {
     QTemporaryDir directory;Require(directory.isValid(),"selected lazy export temp directory unavailable");
     for(const bool failUnselected:{false,true}) {
@@ -894,7 +955,7 @@ void CheckReportNumericLocales() {
     compareView.hide();
 }
 void CheckReportRepairs() {
-    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();CheckFileExports();CheckSelectedUnmaterializedExports();CheckReportNumericLocales();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();CheckFileExports();CheckExportLifetimes();CheckSelectedUnmaterializedExports();CheckReportNumericLocales();
 #if defined(MANUAL_ALIGNMENT)
     CheckFrozenAlignmentParameters();CheckInspectionPreparation();
 #endif
