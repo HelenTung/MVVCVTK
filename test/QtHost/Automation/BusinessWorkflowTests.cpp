@@ -1,7 +1,9 @@
 // 文档中的阶段转换及统计来源回归，配合实际 Qt 业务操作检查。
 #include "BusinessWorkflowTests.h"
+#include "TestCaseRunner.h"
 #include "App/TestWindow.h"
 #include "Modules/ModulePanel.h"
+#include "Support/JsonInput.h"
 #include "Support/BusinessStep.h"
 #include "Support/BusinessStatistics.h"
 #include "Support/ReferenceDataSource.h"
@@ -9,6 +11,18 @@
 #include "Modules/AlignmentInput.h"
 #endif
 #include "Support/SceneGraph.h"
+#if defined(MANUAL_CROP)
+#include "Modules/ModuleFactories.h"
+#include "Host/CropHostFeature.h"
+#include <QVTKOpenGLNativeWidget.h>
+#include <vtkGenericOpenGLRenderWindow.h>
+#include <QGridLayout>
+#include <QTemporaryDir>
+#include <QThread>
+#include <atomic>
+#include <future>
+#include <iostream>
+#endif
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
@@ -55,9 +69,179 @@ void CheckPrimaryDispatch()
     }
 }
 }
+void CheckCropStartReadiness()
+{
+#if defined(MANUAL_CROP)
+    // future 可先被 owner 消费，worker 的纯完成门铃随后才到达；不伪造场景或就绪状态。
+    constexpr int gateTimeoutMs=5000;
+    struct CompletionGate final {
+        std::atomic<bool> armed{false},entered{false},returned{false},expired{false},released{false};
+        std::promise<void> release;
+        std::shared_future<void> ready=release.get_future().share();
+        void Release(){if(!released.exchange(true))release.set_value();}
+    };
+    const auto gate=std::make_shared<CompletionGate>();
+    QWidget views;
+    QGridLayout layout(&views);
+    TestSession runtime;
+    TestWorkflow workflow;
+    TestRecordWriter records;
+    QtHostPump pump;
+    std::vector<vtkSmartPointer<vtkGenericOpenGLRenderWindow>> windows;
+    std::unique_ptr<ModulePanel> panel;
+    const std::vector<std::string> ids{"primary-3d","slice-top-down","slice-front-back","slice-left-right"};
+    const HostRenderViewRole roles[]{HostRenderViewRole::Primary3D,HostRenderViewRole::TopDownSlice,
+        HostRenderViewRole::FrontBackSlice,HostRenderViewRole::LeftRightSlice};
+    const HostRenderMode modes[]{HostRenderMode::CompositeVolume,HostRenderMode::SliceTopDown,
+        HostRenderMode::SliceFrontBack,HostRenderMode::SliceLeftRight};
+    HostSessionConfig config;
+    for(std::size_t index=0;index<ids.size();++index) {
+        auto* widget=new QVTKOpenGLNativeWidget(&views);
+        const auto window=vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
+        widget->setRenderWindow(window);layout.addWidget(widget,int(index/2),int(index%2));windows.push_back(window);
+        HostRenderViewConfig view;view.id=ids[index];view.role=roles[index];view.renderWindow=window;
+        view.window.viewInit.viewMode=modes[index];config.renderViews.push_back(std::move(view));
+    }
+    pump.SetConfig(config);
+    const auto owner=QThread::currentThreadId();
+    config.onWorkAvailable=[gate,notify=config.onWorkAvailable,owner,gateTimeoutMs] {
+        const bool held=QThread::currentThreadId()!=owner && gate->armed.exchange(false);
+        if(held) {
+            gate->entered.store(true);
+            if(gate->ready.wait_for(std::chrono::milliseconds(gateTimeoutMs))!=std::future_status::ready)
+                gate->expired.store(true);
+        }
+        notify();
+        if(held)gate->returned.store(true);
+    };
+    views.resize(640,480);views.show();
+    try {
+        Require(runtime.BuildSession(std::move(config)),"crop work-notice fixture builds the real four-view Host");
+        const auto session=runtime.GetSession();pump.SetSession(session);
+        const auto feature=std::make_shared<CropHostFeature>();
+        Require(runtime.AttachFeature(feature),"crop work-notice fixture attaches the actual Crop feature");
+        workflow.getRenderPending=[&pump](const auto& id){return pump.GetIsRenderPending(id);};
+        workflow.getViewRenderPending=[&pump](const auto& id){return pump.GetIsViewPending(id);};
+        panel.reset(CreateCropTest({runtime,workflow,records},feature,nullptr));panel->resize(420,720);panel->show();
+        const QPointer<ModulePanel> observed(panel.get());
+        pump.onUpdated=[observed]{if(observed)observed->Observe();};
+        pump.onRendered=[observed]{if(observed)observed->Observe();};
+        pump.getVisible=[](const auto&){return true;};
+        const auto idle=[&] {
+            return panel->GetObservedState()["framesReady"].toBool()
+                && std::none_of(ids.begin(),ids.end(),[&](const auto& id){return pump.GetIsRenderPending(id);});
+        };
+        HostReloadRequest load;load.geometry={{16,16,16},{1.,1.,1.},{}};
+        load.metadata.identity.datasetId="crop-start-work-notice";load.metadata.source.kind=ImageSourceKind::Memory;
+        load.metadata.source.uri="memory://crop-start-work-notice";load.voxels.resize(16*16*16);
+        for(int z=0;z<16;++z)for(int y=0;y<16;++y)for(int x=0;x<16;++x)
+            load.voxels[x+16*(y+16*z)]=(x>=4&&x<12&&y>=4&&y<12&&z>=4&&z<12)?100.f:0.f;
+        const auto loaded=std::make_shared<bool>(false);
+        Require(session->SendRequest(std::move(load),[loaded](const auto& result){*loaded=result.isSucceeded;}).status==HostAdmissionStatus::Accepted
+            && Await([&]{return *loaded&&idle();}),"crop work-notice fixture presents its known input through real updates and renders");
+        auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+        Require(primary && primary->isVisible() && primary->isEnabled() && primary->property("businessAction")=="Start",
+            "ready actual crop input exposes Start");
+
+        // 真实重置产生绘制需求；暂停窗口的既有 ready 门控，确保不能把它当作普通完成门铃。
+        for(const auto& window:windows)window->SetReadyForRendering(false);
+        HostViewResetRequest reset;reset.targetView.viewId=ids.front();
+        Require(session->SendRequest(std::move(reset)).status==HostAdmissionStatus::Accepted,"real view reset is admitted");
+        pump.SendUpdates();
+        Require(std::any_of(ids.begin(),ids.end(),[&](const auto& id){return pump.GetIsViewPending(id);})
+            && !primary->isEnabled() && !primary->toolTip().isEmpty(),"actual pending rendering disables visible Crop.Start with a reason");
+        const auto blocked=panel->SendAction("Start",{{"shape","Box"},{"removalMode","KeepInside"}});
+        Require(records.GetRecord(blocked)["status"]=="Rejected" && records.GetRecord(blocked)["completeCount"].toInt()==1
+            && !feature->GetState().isActive,"actual pending rendering rejects Start before changing Crop");
+        for(const auto& window:windows)window->SetReadyForRendering(true);
+        pump.SetVisible();
+        Require(Await([&]{return idle()&&primary->isEnabled();}),"natural render completion restores visible Crop.Start");
+
+        QTemporaryDir output;Require(output.isValid(),"actual export has an isolated output directory");
+        HostDataExportRequest exportData;exportData.outputPath=output.path().toStdString();exportData.format=HostDataExportFormat::Raw;
+        const auto exported=std::make_shared<bool>(false);
+        gate->armed.store(true);
+        Require(session->SendRequest(std::move(exportData),[exported](const auto& result){*exported=result.isSucceeded;}).status==HostAdmissionStatus::Accepted,
+            "real background export is admitted");
+        Require(Await([&]{return gate->entered.load();}),"a real worker reaches its completed-task notification gate");
+        // 正常 HostDriven 更新已经可以消费 ready future，门铃本身不拥有该结果。
+        pump.SendUpdates();
+        Require(Await([&]{return *exported&&idle()&&primary->isEnabled();}) && !gate->expired.load(),
+            "owner consumes completed export and presents all views before its delayed notice is released");
+        const auto snapshot=[&] {
+            QJsonArray values;
+            for(const auto& scene:session->GetSceneViewStates())values.append(QJsonObject{{"id",QString::fromStdString(scene.id)},
+                {"available",scene.isAvailable},{"epoch",QString::number(scene.sceneEpoch)},{"rendered",QString::number(scene.renderedEpoch)},
+                {"presentation",QString::number(scene.presentationRevision)},
+                {"data",scene.presentation?GetRefText(scene.presentation->dataRevision):QString()},
+                {"interacting",scene.presentation&&scene.presentation->isInteracting}});
+            return values;
+        };
+        const auto before=snapshot();
+        gate->Release();
+        // 不驱动 owner 事件：确定性保留“晚到通知已排队，真实视图未改变”的合法窗口。
+        QElapsedTimer returned;returned.start();
+        while(!gate->returned.load() && returned.elapsed()<gateTimeoutMs)QThread::yieldCurrentThread();
+        Require(gate->returned.load() && !gate->expired.load(),"delayed real completion notice is delivered within the fixture guard");
+        Require(snapshot()==before && std::all_of(ids.begin(),ids.end(),[&](const auto& id){return !pump.GetIsViewPending(id)&&pump.GetIsRenderPending(id);})
+            && primary->isEnabled(),"only the general work notice is queued while exact view snapshots and visible Start remain ready");
+        const auto countBefore=records.GetRecords()["records"].toArray().size();
+        bool noticeConsumed=false;int earlyDispatches=0;
+        const auto update=pump.onUpdated;
+        pump.onUpdated=[&] {
+            if(!noticeConsumed) {
+                noticeConsumed=true;earlyDispatches=records.GetRecords()["records"].toArray().size()-countBefore;
+            }
+            update();
+        };
+        const auto next=ClickPreparedAction(panel.get(),"Start",gateTimeoutMs);
+        Require(Await([&]{return records.GetRecord(next)["isTerminal"].toBool();}),"late-notice Start reaches one terminal result");
+        const auto result=records.GetRecord(next);
+        std::cout<<"CROP_LATE_WORK status="<<result["status"].toString().toStdString()
+            <<" message="<<result["result"].toObject()["message"].toString().toStdString()
+            <<" completeCount="<<result["completeCount"].toInt()<<" sceneUnchangedBeforeClick=true viewPending=false completedExport=true"
+            <<" noticeConsumed="<<noticeConsumed<<" earlyDispatches="<<(noticeConsumed?earlyDispatches:records.GetRecords()["records"].toArray().size()-countBefore)<<std::endl;
+        Require(noticeConsumed && earlyDispatches==0 && result["status"]=="Succeeded" && result["completeCount"].toInt()==1
+            && result["parameters"].toObject()==QJsonObject{{"shape","Box"},{"removalMode","KeepInside"}}
+            && records.GetRecords()["records"].toArray().size()==int(next),
+            "actual Click waits for the late notice and sends Crop.Start exactly once successfully");
+        pump.onUpdated=update;
+
+        // 已接纳但尚未进入 Pump 的真实展示工作，旧 scene 仍可能看起来就绪。
+        Require(Await(idle),"the successful Start settles before the uncollected reset control");
+        for(const auto& window:windows)window->SetReadyForRendering(false);
+        const auto resetCount=records.GetRecords()["records"].toArray().size();
+        bool resetCollected=false;int resetEarlyDispatches=0;
+        HostViewResetRequest queuedReset;queuedReset.targetView.viewId=ids.front();
+        Require(session->SendRequest(std::move(queuedReset)).status==HostAdmissionStatus::Accepted
+            && pump.GetIsRenderPending(ids.front()) && !pump.GetIsViewPending(ids.front()),
+            "real reset has queued work before Pump has collected a render request");
+        pump.onUpdated=[&] {
+            update();
+            if(!resetCollected) {
+                resetCollected=true;resetEarlyDispatches=records.GetRecords()["records"].toArray().size()-resetCount;
+                for(const auto& window:windows)window->SetReadyForRendering(true);
+            }
+        };
+        const auto resumed=ClickPreparedAction(panel.get(),"Start",gateTimeoutMs);
+        Require(Await([&]{return records.GetRecord(resumed)["isTerminal"].toBool();}) && resetCollected && resetEarlyDispatches==0
+            && records.GetRecord(resumed)["status"]=="Succeeded" && records.GetRecord(resumed)["completeCount"].toInt()==1
+            && records.GetRecords()["records"].toArray().size()==resetCount+1,
+            "actual Click sends nothing before a queued real reset is collected and rendered, then sends exactly one successful Start");
+        pump.onUpdated=update;
+        Require(Await([&]{return runtime.Stop();}),"crop work-notice fixture stops the actual Host naturally");pump.Stop();
+    } catch(...) {
+        gate->Release();pump.onUpdated={};pump.onRendered={};
+        const bool stopped=Await([&]{return runtime.Stop();});pump.Stop();
+        if(!stopped)std::cerr<<"CROP_FIXTURE_CLEANUP Stop remained pending"<<std::endl;
+        throw;
+    }
+#endif
+}
 void CheckBusinessWorkflow(TestWindow& window)
 {
     CheckPrimaryDispatch();
+    CheckCropStartReadiness();
 #if defined(MANUAL_ALIGNMENT)
     AlignmentRegion selection;selection.vertexIds={1,3,8};
     DataRevisionRef mesh;mesh.entityId.bytes[0]=1;mesh.generation=1;
