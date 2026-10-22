@@ -615,45 +615,7 @@ std::uint64_t Click(TestWindow& window, const QString& module, const QString& ac
         auto* tree=panel->GetCatalogTree();ClickNode(tree,tree->topLevelItem(0));
     }
     panel->SetParameterPatch(action, patch);
-    // 导航与数据变更的页面状态异步刷新；仍检查真实按钮，不绕过入口直接发请求。
-    const bool ready = Wait([&] {
-        const auto* current = panel->findChild<QPushButton*>("action_" + action);
-        const auto* menu = panel->findChild<QToolButton*>("moreOperations")->menu();
-        const auto* command = menu->findChild<QAction*>("command_" + action);
-        const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
-        const bool atPrimary=primary && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
-        const auto* next=panel->findChild<QPushButton*>("next_"+action);
-        const auto* editor=panel->GetParameterEditor(action);
-        const bool atNext=next && next->isVisible() && next->isEnabled() && (!editor || !editor->GetHasInputs());
-        return atPrimary || atNext || (current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled())));
-    }, timeoutMs);
-    if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
-    Check(ready, "actual business button or classified menu command is available");
-    auto* button = panel->findChild<QPushButton*>("action_" + action);
-    auto* primary=panel->findChild<QPushButton*>("businessPrimary");
-    const bool atPrimary=primary && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
-    auto* next=panel->findChild<QPushButton*>("next_"+action);
-    const auto* editor=panel->GetParameterEditor(action);
-    const bool atNext=next && next->isVisible() && next->isEnabled() && (!editor || !editor->GetHasInputs());
-    Check(button && (atPrimary || atNext || button->isEnabled()), "actual business command is enabled");
-    const auto id = static_cast<std::uint64_t>(window.GetRecords().GetRecords()["records"].toArray().size()) + 1;
-    if(atPrimary)primary->click();
-    else if(atNext)next->click();
-    else if (button->isVisible()) button->click();
-    else {
-        auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
-        Check(command && command->isEnabled(), "direct command remains available in the classified menu");
-        command->trigger();
-    }
-    const bool dispatched=Wait([&] { return !window.GetRecords().GetRecord(id).isEmpty(); },timeoutMs);
-    if(!dispatched)std::cerr<<"ACTION DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
-        <<" primary="<<(primary?primary->property("businessAction").toString().toStdString():"missing")
-        <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
-    Check(dispatched,"actual command click creates its operation record");
-    const auto record=window.GetRecords().GetRecord(id);
-    Check(record["module"].toString()==module && record["action"].toString()==action,
-        "actual command dispatch preserves the requested module and action");
-    return id;
+    return ClickPreparedAction(panel,action,timeoutMs);
 }
 std::uint64_t ClickCurrentPrimary(TestWindow& window,const QString& module,const QString& expected)
 {
@@ -3258,6 +3220,7 @@ QJsonObject CheckPartDisplay(TestWindow& window)
 void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeoutMs)
 {
     const auto script = LoadJson(path);
+    if(script["checkCropStartReadiness"].toBool())CheckCropStartReadiness();
     const auto audit=script["uiAudit"].toObject();
     if(!audit.isEmpty()){
         if(audit.contains("fontPoints")){auto font=qApp->font();font.setPointSizeF(GetNumber(audit,"fontPoints"));qApp->setFont(font);}
@@ -4088,6 +4051,59 @@ void StartSequence(TestWindow& window, const QString& path, int& shutdownTimeout
         Check(GetId(diagnostics["pendingUpdateFailures"]) == 0, "input transition finishes without pending update failures");
     }
 }
+}
+std::uint64_t ClickPreparedAction(ModulePanel* panel,const QString& action,int timeoutMs)
+{
+    const auto module=panel->GetName();auto& records=panel->GetContext().records;
+    // 导航与数据变更的页面状态异步刷新；仍检查真实按钮，不绕过入口直接发请求。
+    const bool ready = Wait([&] {
+        if(module=="Crop" && action=="Start") {
+            const auto state=panel->GetObservedState();
+            if(!panel->isVisible() || !state["framesReady"].toBool() || state["isBusy"].toBool()
+                || !state["disabled"].toObject()["Start"].toString().isEmpty())return false;
+            // worker 门铃可晚于最后一次按钮投影；等待自然更新，不主动 Observe，也不重发已拒绝的请求。
+            // Start 能为新输入建文档，不要求旧文档的 appliedHead/renderedHead 相等。
+            const auto& workflow=panel->GetContext().workflow;
+            for(const auto& id:GetAllViews().viewIds)
+                if(workflow.getRenderPending && workflow.getRenderPending(id))return false;
+        }
+        const auto* current = panel->findChild<QPushButton*>("action_" + action);
+        const auto* menu = panel->findChild<QToolButton*>("moreOperations")->menu();
+        const auto* command = menu->findChild<QAction*>("command_" + action);
+        const auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+        const bool atPrimary=primary && primary->isVisible() && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
+        const auto* next=panel->findChild<QPushButton*>("next_"+action);
+        const auto* editor=panel->GetParameterEditor(action);
+        const bool atNext=next && next->isVisible() && next->isEnabled() && (!editor || !editor->GetHasInputs());
+        return atPrimary || atNext || (current && current->isEnabled() && (current->isVisible() || (command && command->isEnabled())));
+    }, timeoutMs);
+    if (!ready) std::cerr << "Button unavailable: " << module.toStdString() << '.' << action.toStdString() << '\n';
+    Check(ready, "actual business button or classified menu command is available");
+    auto* button = panel->findChild<QPushButton*>("action_" + action);
+    auto* primary=panel->findChild<QPushButton*>("businessPrimary");
+    const bool atPrimary=primary && primary->isVisible() && primary->isEnabled() && primary->property("businessAction")==action && !primary->property("usesOutput").toBool();
+    auto* next=panel->findChild<QPushButton*>("next_"+action);
+    const auto* editor=panel->GetParameterEditor(action);
+    const bool atNext=next && next->isVisible() && next->isEnabled() && (!editor || !editor->GetHasInputs());
+    Check(button && (atPrimary || atNext || button->isEnabled()), "actual business command is enabled");
+    const auto id = static_cast<std::uint64_t>(records.GetRecords()["records"].toArray().size()) + 1;
+    if(atPrimary)primary->click();
+    else if(atNext)next->click();
+    else if (button->isVisible()) button->click();
+    else {
+        auto* command = panel->findChild<QToolButton*>("moreOperations")->menu()->findChild<QAction*>("command_" + action);
+        Check(command && command->isEnabled(), "direct command remains available in the classified menu");
+        command->trigger();
+    }
+    const bool dispatched=Wait([&] { return !records.GetRecord(id).isEmpty(); },timeoutMs);
+    if(!dispatched)std::cerr<<"ACTION DISPATCH MISSING: "<<module.toStdString()<<"."<<action.toStdString()
+        <<" primary="<<(primary?primary->property("businessAction").toString().toStdString():"missing")
+        <<" state="<<GetJsonText(panel->GetObservedState()).toStdString()<<std::endl;
+    Check(dispatched,"actual command click creates its operation record");
+    const auto record=records.GetRecord(id);
+    Check(record["module"].toString()==module && record["action"].toString()==action,
+        "actual command dispatch preserves the requested module and action");
+    return id;
 }
 int StartTestCase(TestWindow& window, const QString& path, const QString& recordPath, bool selfTest)
 {
