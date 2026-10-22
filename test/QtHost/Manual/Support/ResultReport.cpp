@@ -31,6 +31,7 @@
 #include <QComboBox>
 #include <QFileDialog>
 #include <QHeaderView>
+#include <QScrollBar>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -75,7 +76,11 @@ public:
     explicit ReportLineLabel(const QString& text,QWidget* parent) : QLabel(text,parent) {
         setTextFormat(Qt::PlainText);setWordWrap(false);setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
     }
-    QSize minimumSizeHint() const override {auto size=QLabel::minimumSizeHint();size.setWidth(0);return size;}
+    QSize sizeHint() const override {
+        auto size=QLabel::sizeHint();const auto margins=contentsMargins();
+        size.setHeight(fontMetrics().height()+2*margin()+margins.top()+margins.bottom());return size;
+    }
+    QSize minimumSizeHint() const override {auto size=sizeHint();size.setWidth(0);return size;}
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);QStyleOption option;option.initFrom(this);style()->drawPrimitive(QStyle::PE_Widget,&option,&painter,this);
@@ -88,6 +93,17 @@ protected:
             QToolTip::showText(static_cast<QHelpEvent*>(event)->globalPos(),text(),this);return true;
         }
         return QLabel::event(event);
+    }
+};
+
+// 停靠布局压缩时仍保留表头、完整首行及横向滚动条，尺寸随当前字体和样式计算。
+class ReportTableView final : public QTableView {
+public:
+    using QTableView::QTableView;
+    QSize minimumSizeHint() const override {
+        auto size=QTableView::minimumSizeHint();
+        size.setHeight(horizontalHeader()->sizeHint().height()+verticalHeader()->defaultSectionSize()
+            +horizontalScrollBar()->sizeHint().height()+2*frameWidth());return size;
     }
 };
 
@@ -288,13 +304,13 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     auto* associate=actions->addAction("关联到数据…");associate->setObjectName("associateReportSource");
     auto* saveConditions=actions->addAction("保存汇总与条件…");saveConditions->setObjectName("saveReportConditions");
     auto* remove=actions->addAction("移除报告");remove->setObjectName("removeReport");
-    toolbar->addStretch(1);
     m_cancelTask=new QPushButton("取消报告任务",this);m_cancelTask->setObjectName("cancelReportTask");toolbar->addWidget(m_cancelTask);
     layout->addLayout(toolbar);
     auto* taskFeedback=new QHBoxLayout;
     m_taskStatus=new ReportLineLabel(QString(),this);m_taskStatus->setObjectName("reportTaskStatus");taskFeedback->addWidget(m_taskStatus,1);
     m_exportProgress=new QProgressBar(this);m_exportProgress->setObjectName("reportExportProgress");m_exportProgress->setAccessibleName("报告导出进度");m_exportProgress->setLocale(QLocale::c());m_exportProgress->setRange(0,1000);m_exportProgress->setMaximumWidth(160);m_exportProgress->hide();taskFeedback->addWidget(m_exportProgress);
     m_openExportFolder=new QPushButton("打开所在文件夹",this);m_openExportFolder->setObjectName("openReportExportFolder");m_openExportFolder->hide();taskFeedback->addWidget(m_openExportFolder);
+    toolbar->insertLayout(toolbar->count()-1,taskFeedback,1);
     connect(m_openExportFolder,&QPushButton::clicked,this,[this]{
         const auto path=property("reportExportPath").toString();
         if(!path.isEmpty()&&!QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath())))m_taskStatus->setText("无法打开所在文件夹，请从保存位置查看报告。");
@@ -346,7 +362,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     connect(m_scanTimer,&QTimer::timeout,this,[this]{ContinueRows();});
     connect(m_cancelScan,&QPushButton::clicked,this,[this]{CancelRows();m_range->setText("筛选 / 排序已停止");});
     auto* tabs = new QTabWidget(content); body->addWidget(tabs,1);
-    m_table = new QTableView(tabs); m_table->setObjectName("reportTable"); m_table->setAlternatingRowColors(true);
+    m_table = new ReportTableView(tabs); m_table->setObjectName("reportTable"); m_table->setAlternatingRowColors(true);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows); m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers); m_table->horizontalHeader()->setSectionsClickable(true);
     m_table->horizontalHeader()->setSortIndicatorShown(true); tabs->addTab(m_table,"明细 / 比较");
@@ -393,7 +409,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
         catch(const std::exception& e){SetReadFailure(QString::fromUtf8(e.what()));return;}
         try{onLocate(m_selected,original);}catch(const std::exception& e){QMessageBox::warning(this,"无法定位",QString::fromUtf8(e.what()));}
     });
-    split->setStretchFactor(0,0);split->setStretchFactor(1,1);split->setSizes({220,780});layout->addLayout(taskFeedback);RefreshPage();
+    split->setStretchFactor(0,0);split->setStretchFactor(1,1);split->setSizes({220,780});RefreshPage();
     connect(m_table->selectionModel(),&QItemSelectionModel::selectionChanged,this,[this]{RefreshExportActions();});
 }
 void ResultReport::SetRecord(const QJsonObject& record)

@@ -688,17 +688,22 @@ void CheckFileExports() {
     auto* table=view.findChild<QTableView*>("reportTable");Require(table&&table->model()->rowCount()==4,"export fixture page did not load");
     Require(!view.findChild<QPushButton*>("copyReportCsv")&&table->actions().size()==1
         &&table->actions().first()->objectName()=="exportSelectedReportAction","report context menu retained clipboard or whole-report actions");
-    auto* tools=view.findChild<QToolButton*>("reportActions");Require(tools&&tools->menu(),"report command menu is missing");view.show();
+    auto* tools=view.findChild<QToolButton*>("reportActions");Require(tools&&tools->menu(),"report command menu is missing");view.resize(1000,300);view.show();QCoreApplication::processEvents();
+    Require(table->viewport()->height()>=table->rowHeight(0),"narrow report clips its first data row");
     bool menuSeen=false;DrivePopupInteraction([&]{tools->showMenu();},[&]{
         auto* menu=tools->menu();if(!menu->isVisible())return false;
         for(const auto* name:{"setReportBaseline","compareReports","exportFilteredReport","associateReportSource","saveReportConditions","removeReport"}) {
             auto* action=view.findChild<QAction*>(name);Require(action&&action->isVisible()&&menu->actions().contains(action),"secondary report action is not reachable through the visible menu");
         }
         view.findChild<QAction*>("setReportBaseline")->trigger();menuSeen=true;menu->close();return true;
-    },"report command menu did not open");Require(menuSeen,"report command menu was not inspected");view.hide();
+    },"report command menu did not open");Require(menuSeen,"report command menu was not inspected");
     const auto allPath=directory.filePath("all.csv");ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return allPath;});
     view.findChild<QPushButton*>("exportReportCsv")->click();Require(view.property("reportTaskBusy").toBool(),"all-row export did not admit asynchronously");Wait([&]{return view.property("reportTaskBusy").toBool();});
     Require(view.findChild<QLabel*>("reportTaskStatus")->text()=="已导出 4 行 · all.csv","completed export row count is not displayed as exact decimal digits");
+    QCoreApplication::processEvents();
+    auto* status=view.findChild<QLabel*>("reportTaskStatus");
+    Require(status&&status->isVisible()&&view.rect().contains(QRect(status->mapTo(&view,QPoint()),status->size()))
+        &&table->viewport()->height()>=table->rowHeight(0),"completed export feedback or first table row leaves the narrow report bounds");view.hide();
     QFile allFile(allPath);Require(allFile.open(QIODevice::ReadOnly),"all-row export target unreadable");const auto allBytes=allFile.readAll();
     Require(allBytes.startsWith(QByteArray("\xef\xbb\xbf"))&&allBytes.contains("\r\n")
         &&allBytes.contains(("mvvcvtk-result="+doc.identityResult).toUtf8()),"export lost UTF-8 BOM, CRLF or result identity header annotation");
