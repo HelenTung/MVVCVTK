@@ -209,6 +209,15 @@ void CheckCropStartReadiness()
 
         // 已接纳但尚未进入 Pump 的真实展示工作，旧 scene 仍可能看起来就绪。
         Require(Await(idle),"the successful Start settles before the uncollected reset control");
+        const auto editing=feature->GetState();const auto history=feature->GetHistory();
+        Require(editing.isActive && !editing.history.isDragging && !editing.history.pendingRequestCount
+            && history.appliedHead==history.rootNodeId,"first Start leaves an idle active Root that legally supports resuming Start");
+        // Start 清理 BuildResult 草稿会切走参数卡；在触发重置之前一次性准备实际入口。
+        panel->SetParameterPatch("Start",{{"shape","Box"},{"removalMode","KeepInside"}});
+        const auto* startButton=panel->findChild<QPushButton*>("action_Start");
+        Require(panel->GetParameterAction()=="Start" && startButton && startButton->isVisible() && startButton->isEnabled()
+            && panel->GetActionParameters("Start")==QJsonObject{{"shape","Box"},{"removalMode","KeepInside"}},
+            "uncollected reset control starts from the exact visible enabled Start form");
         for(const auto& window:windows)window->SetReadyForRendering(false);
         const auto resetCount=records.GetRecords()["records"].toArray().size();
         bool resetCollected=false;int resetEarlyDispatches=0;
@@ -228,8 +237,11 @@ void CheckCropStartReadiness()
             && records.GetRecord(resumed)["status"]=="Succeeded" && records.GetRecord(resumed)["completeCount"].toInt()==1
             && records.GetRecords()["records"].toArray().size()==resetCount+1,
             "actual Click sends nothing before a queued real reset is collected and rendered, then sends exactly one successful Start");
+        std::cout<<"CROP_QUEUED_RESET collected="<<resetCollected<<" earlyDispatches="<<resetEarlyDispatches
+            <<" status="<<records.GetRecord(resumed)["status"].toString().toStdString()<<" completeCount="<<records.GetRecord(resumed)["completeCount"].toInt()<<std::endl;
         pump.onUpdated=update;
         Require(Await([&]{return runtime.Stop();}),"crop work-notice fixture stops the actual Host naturally");pump.Stop();
+        std::cout<<"CROP_START_FIXTURE_STOP stopped=true"<<std::endl;
     } catch(...) {
         gate->Release();pump.onUpdated={};pump.onRendered={};
         const bool stopped=Await([&]{return runtime.Stop();});pump.Stop();
