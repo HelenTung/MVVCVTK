@@ -2202,7 +2202,7 @@ void CheckReadTaskStop()
     auto* data=closing.GetModule("Data");
     std::promise<void> started,resume;auto release=resume.get_future().share();
     const auto id=closing.GetRecords().StartRecord("Data","ReadRoi",{},{});
-    data->StartReadTask(id,"Observed",[&](const ReadTaskContext& context) {
+    data->StartReadTask(id,"Observed",[&started,release](const ReadTaskContext& context) {
         started.set_value();release.wait();context.checkpoint();return QJsonObject{};
     });
     const bool reached=started.get_future().wait_for(std::chrono::seconds(5))==std::future_status::ready;
