@@ -6,6 +6,7 @@
 #include "App/AppState.h"
 #include "App/AppStateEvents.h"
 #include "Data/DataManager.h"
+#include "Data/DataPayloads.h"
 #include "Host/HostCommandRouter.h"
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/VtkAppHostSession.h"
@@ -17,7 +18,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 
@@ -513,7 +517,7 @@ struct RealCandidateFixture final {
     std::shared_ptr<CandidateViewDirectory> directory;
     std::unique_ptr<HostCommandRouter> router;
     VtkImageGridSnapshot original;
-    bool Build() {
+    bool Build(const bool hasExplicitIso = true) {
         ImageMetadata metadata;
         metadata.identity.datasetId = "real-app-candidate-failure";
         metadata.source.kind = ImageSourceKind::Memory;
@@ -541,7 +545,7 @@ struct RealCandidateFixture final {
             if (!ports[index].renderBind->SetRenderTarget(window, renderer)) return false;
             AppViewUpdate initial;
             initial.mode = VizMode::SliceTop_down;
-            initial.isoThreshold = 0.5;
+            if (hasExplicitIso) initial.isoThreshold = 0.5;
             if (!ports[index].app.view->SendViewUpdate(initial)) return false;
             auto& view = views[index];
             view.config.id = std::to_string(index);
@@ -594,6 +598,93 @@ struct RealCandidateFixture final {
     }
     ~RealCandidateFixture() { if (!Stop()) std::cerr << "Real candidate fixture did not stop its workers\n"; }
 };
+
+bool GetInvalidAutoIsoRangeValid(const HostRenderMode mode)
+{
+    const auto check = [](const bool value, const char* reason) {
+        if (!value) std::cerr << "Invalid auto-iso range: " << reason << '\n';
+        return value;
+    };
+    RealCandidateFixture f;
+    if (!check(f.Build(false), "fixture without an explicit iso")) return false;
+    const auto previous = f.frames.GetSceneStates();
+    const auto epoch = f.coordinator->GetCommittedEpoch();
+    const auto oldStrategy = f.strategies[0].back();
+    const auto payload = std::dynamic_pointer_cast<const ImageGrid3DPayload>(f.original->data->payload);
+    if (!payload) return false;
+    std::array<float, 8> values;
+    values.fill((std::numeric_limits<float>::quiet_NaN)());
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>(sizeof(values));
+    std::memcpy(bytes->data(), values.data(), sizeof(values));
+    // 外部值字节未带 VTK 已核验范围；摘要有效不代表全 NaN 数据有可用的等值面范围。
+    auto invalid = std::make_shared<const ImageGrid3DPayload>(payload->GetGeometry(),
+        ImageValueType::Float32, 1, bytes);
+    if (!check(invalid->GetValid(), "published payload precondition")) return false;
+    const DataRevisionRef next{f.data->CreateDataEntityId(), 1};
+    DataTransaction transaction;
+    transaction.outputs.push_back({next.entityId, 0, DataTypes::imageGrid3D, {}, invalid, {}});
+    transaction.bindings.push_back({std::string(primaryVolumeBinding), f.original->binding->revision,
+        true, f.original->data->self, next});
+    PrimaryDataActivation activation(*f.data, *f.state);
+    if (!check(activation.SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded,
+        "invalid scalar data publication")) return false;
+    DataReadyState ready;
+    if (!check(PrimaryDataActivation::GetDataReadyState(f.data->GetPrimaryImage(), f.state.get(), ready)
+        && std::isfinite(ready.scalarRange[0]) && std::isfinite(ready.scalarRange[1])
+        && ready.scalarRange[0] > ready.scalarRange[1], "finite reversed VTK range precondition")) return false;
+    int failedCompletions = 0, retryCompletions = 0;
+    bool failedSucceeded = true, retrySucceeded = false;
+    const auto display = [&](auto applied, auto complete) {
+        return f.coordinator->SendDisplayComplete(std::move(applied), std::move(complete));
+    };
+    HostViewSetRequest request;
+    request.targetView.viewId = "0";
+    request.mode = mode;
+    if (!check(f.router->Dispatch(std::move(request), [&](const bool success) {
+        ++failedCompletions; failedSucceeded = success;
+    }, display), "auto-iso request admission")) return false;
+    std::cout << "[TRACE] invalid auto-iso refresh mode=" << static_cast<int>(mode) << std::endl;
+    const auto failedStatus = f.coordinator->SendUpdates();
+    const auto failedState = f.ports[0].app.view->GetViewState();
+    if (!check(failedStatus == HostFrameCoordinator::FlushStatus::Failed
+        && failedCompletions == 1 && !failedSucceeded
+        && f.coordinator->GetCommittedEpoch() == epoch
+        && f.strategies[0].back() == oldStrategy
+        && failedState.hasPresentationFailed && !failedState.isPresentationPending,
+        "range failure did not finish once while preserving the active strategy")) {
+        std::cerr << "range status=" << static_cast<int>(failedStatus)
+            << " callbacks=" << failedCompletions << " success=" << failedSucceeded
+            << " epoch=" << epoch << "->" << f.coordinator->GetCommittedEpoch()
+            << " oldStrategy=" << (f.strategies[0].back() == oldStrategy)
+            << " failed=" << failedState.hasPresentationFailed
+            << " pending=" << failedState.isPresentationPending << '\n';
+        return false;
+    }
+    const auto scenes = f.frames.GetSceneStates();
+    for (std::size_t index = 0; index < scenes.size(); ++index) {
+        if (!check(scenes[index].sceneEpoch == previous[index].sceneEpoch
+            && scenes[index].presentation && previous[index].presentation
+            && scenes[index].presentation->dataRevision == previous[index].presentation->dataRevision
+            && scenes[index].presentation->bindingRevision == previous[index].presentation->bindingRevision,
+            "range failure changed the committed scene")) return false;
+    }
+    (void)f.coordinator->SendUpdates();
+    if (!check(failedCompletions == 1, "failure callback repeated")) return false;
+    const auto restored = f.Select(false, f.original->data->self);
+    if (!check(static_cast<bool>(restored), "healthy input restoration")) return false;
+    HostViewSetRequest retry;
+    retry.targetView.viewId = "0";
+    retry.opacity = 0.8;
+    if (!check(f.router->Dispatch(std::move(retry), [&](const bool success) {
+        ++retryCompletions; retrySucceeded = success;
+    }, display), "healthy retry admission")) return false;
+    if (!check(f.coordinator->SendUpdates() == HostFrameCoordinator::FlushStatus::Completed
+        && retryCompletions == 1 && retrySucceeded && failedCompletions == 1
+        && f.coordinator->GetCommittedEpoch() == epoch + 1
+        && !f.ports[0].app.view->GetViewState().hasPresentationFailed,
+        "healthy request failed to recover after the range rejection")) return false;
+    return check(f.Stop(), "worker stop after range rejection and retry");
+}
 
 bool GetRealCandidateFailureValid(const RenderProductStatus terminal, const bool hasReadyPeer,
     const bool rejectsCleanup = false)
@@ -954,6 +1045,8 @@ int main(int argc, char** argv)
         if (!value) ++failures;
     };
     check(GetResourceLifetimeTests(), "queued readers and derived allocation retirement");
+    for (const auto mode : {HostRenderMode::IsoSurface, HostRenderMode::CompositeIsoSurface})
+        check(GetInvalidAutoIsoRangeValid(mode), "invalid auto-iso range fails without locking and recovers on a new input");
     check(GetDataTransitionTests(), "candidate input transition and publication rollback");
     check(GetRulerCopyValid(), "draw publishes ruler without copying full presentation state");
     check(GetFrameFailuresValid(), "apply barrier and dirty recovery");

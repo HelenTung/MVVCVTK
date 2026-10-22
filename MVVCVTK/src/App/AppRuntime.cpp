@@ -2646,14 +2646,17 @@ DataStageStatus AppRuntime::StartDataStage(
     stage.nextParams.scalarRange[0] = stage.readyState.scalarRange[0];
     stage.nextParams.scalarRange[1] = stage.readyState.scalarRange[1];
     {
-        std::lock_guard<std::mutex> lock(m_transitionMutex);
+        std::unique_lock<std::mutex> lock(m_transitionMutex);
         if (!m_hasExplicitIso && m_isoSource != snapshot->data->self
             && (stage.mode == VizMode::IsoSurface
                 || stage.mode == VizMode::CompositeIsoSurface)) {
             const auto low = stage.readyState.scalarRange[0];
             const auto high = stage.readyState.scalarRange[1];
-            if (!std::isfinite(low) || !std::isfinite(high) || low > high)
+            if (!std::isfinite(low) || !std::isfinite(high) || low > high) {
+                // 失败归属核验会再次取转场锁，必须先释放当前锁。
+                lock.unlock();
                 return finish(DataStageStatus::Failed);
+            }
             // 统计尚未完成时保持原同步默认；后台结果不进入数据准备关键路径。
             stage.previousIso = stage.nextParams.isoValue;
             stage.nextParams.isoValue = GetAutoDisplayIso(snapshot).value_or(low * 0.5 + high * 0.5);
