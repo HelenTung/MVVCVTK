@@ -330,6 +330,67 @@ void CheckNonblockingRowLifecycle() {
     auto completion=std::async(std::launch::async,[gate]{gate->Release();});view.reset();completion.get();
     Require(gate->exited.load()&&!gate->guarded.load(),"report dependencies were released before the worker exited");QCoreApplication::processEvents();
 }
+void CheckGatedImports() {
+    struct Gate final {
+        std::promise<void> release;
+        std::shared_future<void> ready=release.get_future().share();
+        std::atomic<bool> entered{false},opened{false},exited{false};
+        void Open(){if(!opened.exchange(true))release.set_value();}
+        void Hold(){entered=true;if(ready.wait_for(std::chrono::milliseconds(reportWaitTimeoutMs))!=std::future_status::ready)throw std::runtime_error("import fixture guard expired");}
+    };
+    struct ReleaseOnExit final {std::shared_ptr<Gate> gate;~ReleaseOnExit(){gate->Open();}};
+    constexpr int rows=257;
+    QByteArray expected("sample_id,thickness_mm,validity\n");
+    for(int row=0;row<rows;++row)expected+=QString("%1,%2,%3\n").arg(row).arg(row*3+7).arg(row%2).toUtf8();
+    QTemporaryDir directory;Require(directory.isValid(),"import fixture directory unavailable");
+    const auto path=directory.filePath("import.csv");
+    {QFile file(path);Require(file.open(QIODevice::WriteOnly)&&file.write(expected)==expected.size(),"import fixture CSV write failed");}
+    const auto checkFile=[&]{QFile file(path);Require(file.open(QIODevice::ReadOnly)&&file.readAll()==expected,"import changed the original CSV");};
+    for(int point=0;point<2;++point)for(const bool changeSource:{false,true}) {
+        ResultReport view;view.resize(1000,720);
+        auto original=Document("import-source-a"),other=Document("import-source-b");other.source="data-b";
+        const std::weak_ptr<ReportTable> source=original.table;
+        view.AddReport(original);view.AddReport(other,false);view.ShowReports("data-a");view.SelectReport(original.id);view.show();
+        original.table.reset();auto expectedIds=view.GetReportIds();
+        const auto gate=std::make_shared<Gate>();ReleaseOnExit release{gate};
+        // 与 ImportReport 共用 QFile/ReadReportCsv 和整个任务链；仅用 checkpoint 控制合法取消时点。
+        // gate 和取消检查按值持有；异常退出先放行，再由 view 的既有析构等待收口。
+        ReportTaskTestAccess::Start(view,[gate,path,point](const ReportCheckpoint& check){
+            struct MarkExit final {std::shared_ptr<Gate> gate;~MarkExit(){gate->exited=true;}} mark{gate};
+            QFile file(path);if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("import fixture CSV open failed");
+            const ReportCheckpoint checkpoint=[gate,check,point,seen=0]() mutable {
+                // 小文件单次读取：块读取前、表头、首数据行依次到达检查点。
+                check();if(point==0&&++seen==3)gate->Hold();check();
+            };
+            auto document=ReadReportCsv(file,QFileInfo(path).fileName(),checkpoint);
+            if(point==1)gate->Hold();check();return document;
+        });
+        Wait([&]{return !gate->entered.load();});
+        Require(!gate->opened.load()&&!gate->exited.load()&&ReportTaskTestAccess::HasTask(view),"import gate did not retain the active worker");
+        if(changeSource) {
+            view.hide();view.show();view.ShowReports("data-b");view.SelectReport(other.id);view.RemoveReport(original.id);
+            expectedIds.remove(original.id);
+            Require(source.expired(),"removed native source was retained by the unrelated import");
+        } else view.CancelTasks();
+        Require(!gate->exited.load()&&ReportTaskTestAccess::HasTask(view)&&view.property("reportTaskBusy").toBool(),"cancel or source change dropped the blocked import owner");
+        bool rejected=false;try{view.ImportReport(path);}catch(const std::runtime_error&){rejected=true;}
+        Require(rejected&&view.GetReportIds()==expectedIds,"blocked import admitted a replacement or published partial rows");
+        gate->Open();Wait([&]{return ReportTaskTestAccess::HasTask(view);});
+        Require(gate->exited.load()&&!view.property("reportTaskBusy").toBool()&&view.property("reportTaskError").toString().isEmpty(),"cancelled import did not retire cleanly");
+        Require(view.GetReportIds()==expectedIds&&view.GetSelectedReport().id==(changeSource?other.id:original.id),"cancelled import published late rows or replaced the newer selection");checkFile();
+        // 重试走实际公开入口，独立公式逐格核对，不用导入器输出生成预期。
+        view.ShowReports();view.ImportReport(path);Wait([&]{return ReportTaskTestAccess::HasTask(view);});
+        auto imported=view.GetSelectedReport();
+        Require(view.property("reportTaskError").toString().isEmpty()&&imported.category=="导入报告"&&imported.table&&imported.table->GetCount()==rows&&imported.columns.size()==3,"public import retry lost its complete document");
+        auto retryIds=expectedIds;retryIds.insert(imported.id);
+        Require(!expectedIds.contains(imported.id)&&view.GetReportIds()==retryIds,"public import retry published duplicate or unrelated documents");
+        for(int row=0;row<rows;++row)Require(SameCells(imported.table->Read(row),QStringList{QString::number(row),QString::number(row*3+7),QString::number(row%2)}),"public import retry changed an independent CSV cell");
+        const auto importedId=imported.id;imported.table.reset();view.RemoveReport(importedId);checkFile();
+        Wait([&]{return ReportTaskTestAccess::HasTask(view)||ReportTaskTestAccess::HasScan(view)||ReportTaskTestAccess::HasPendingScan(view);});
+        Require(view.GetReportIds()==expectedIds&&view.CancelTasks(true),"import fixture could not stop after retiring its task and scans");view.close();
+        std::cout<<"PASS: gated import checkpoint="<<(point==0?"first-row":"parsed")<<" sourceChange="<<changeSource<<" rows="<<rows<<" public retry cells="<<rows*3<<std::endl;
+    }
+}
 void CheckGenerationAndTasks() {
     ResultReport view;int prepared=0,readRows=0;std::weak_ptr<int> lease;
     const QJsonObject record{{"operationId","lazy"},{"module","Wall"},{"source",QJsonObject{{"dataRevision","data-a"}}},{"result",QJsonObject{{"result","lazy-result"},{"mesh","input-mesh"}}}};
@@ -1043,7 +1104,7 @@ void CheckReportStop(TestWindow& window) {
 }
 void CheckReportRepairs() {
     CheckBoundedReportStop();
-    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();CheckFileExports();CheckExportLifetimes();CheckSelectedUnmaterializedExports();CheckReportNumericLocales();
+    CheckSemanticRoundtrip();CheckWorkerStartupAndRecovery();CheckReopenedGeneration(false);CheckReopenedGeneration(true);CheckComparisonGenerationAdmission();CheckNonblockingRowLifecycle();CheckAssociationsAndClearing();CheckSpatialEvidence();CheckGenerationAndTasks();CheckGatedImports();CheckFailureIsolation();CheckVolumeCompleteness();CheckConcurrentReportReads();CheckWideRowAddressing();CheckDiskIndexPages();CheckIndexReadRecovery();CheckPageReadFailures();CheckSlowScanCancellation();CheckFileExports();CheckExportLifetimes();CheckSelectedUnmaterializedExports();CheckReportNumericLocales();
 #if defined(MANUAL_ALIGNMENT)
     CheckFrozenAlignmentParameters();CheckInspectionPreparation();
 #endif
