@@ -1,2 +1,2 @@
 #pragma once
-namespace Manual { class TestWindow; void CheckBusinessWorkflow(TestWindow& window); }
+namespace Manual { class TestWindow; void CheckBusinessWorkflow(TestWindow& window); void CheckCropStartReadiness(); }
