@@ -45,8 +45,9 @@ public:
     bool GetGenerationPending() const;
     void RemoveReport(QString id);
     void SetReportSource(const QString& id, const QString& source);
-    // 普通取消立即返回；最终关闭先等读者退出，再释放会话结果与临时文件。
-    void CancelTasks(bool waitForExit = false);
+    // 不等待后台任务；最终停止拒绝新任务，未退净返回 false 并保留 owner/timer，调用方须重试成功后才销毁。
+    // 直接 C++ 析构仍有安全等待兜底，不承诺能中断任意同步 reader。
+    bool CancelTasks(bool finalStop = false);
     const ReportDocument& GetSelectedReport() const { return m_selected; }
     QSet<QString> GetReportIds() const;
     QVector<ReportDocument> GetReports(const QString& module, const QSet<QString>& results) const;
@@ -102,7 +103,7 @@ private:
     class Task;
     std::unique_ptr<Task> m_task;
     std::uint64_t m_taskRequest=0,m_rowsRequest=0;
-    bool m_acceptingRequests=true,m_comparisonMapping=false;
+    bool m_acceptingRequests=true,m_comparisonMapping=false,m_stopRequested=false;
     QLabel* m_taskStatus = nullptr;
     QProgressBar* m_exportProgress = nullptr;
     QPushButton* m_openExportFolder = nullptr;

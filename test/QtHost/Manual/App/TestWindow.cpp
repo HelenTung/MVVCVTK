@@ -221,9 +221,9 @@ TestWindow::TestWindow(std::uint64_t budgetMiB)
     m_report = new ResultReport(reportContent); reportLayout->addWidget(m_report);
     auto* showDiagnostics=toolMenu->addAction("会话诊断");showDiagnostics->setObjectName("showDiagnostics");
     connect(showDiagnostics,&QAction::triggered,this,[this]{m_showStatistics->setChecked(true);m_resultTabs->setCurrentIndex(1);});
-    m_workflow.onShowReports=[this,reports](const QString& source,const QString& result){m_report->ShowReports(source,result);if(!m_reportOpened){m_reportOpened=true;reports->setFloating(true);reports->resize(1180,720);}reports->show();reports->raise();reports->activateWindow();};
+    m_workflow.onShowReports=[this,reports](const QString& source,const QString& result){if(m_isClosing)return;m_report->ShowReports(source,result);if(!m_reportOpened){m_reportOpened=true;reports->setFloating(true);reports->resize(1180,720);}reports->show();reports->raise();reports->activateWindow();};
     m_workflow.getReportAvailable=[this](const QString& module,const QString& result){return m_report->GetReportAvailable(module,result);};
-    m_workflow.onShowBusinessReport=[this,reports](const QString& module,const QString& result){m_report->ShowReports({},result,module);if(!m_reportOpened){m_reportOpened=true;reports->setFloating(true);reports->resize(1180,720);}reports->show();reports->raise();reports->activateWindow();};
+    m_workflow.onShowBusinessReport=[this,reports](const QString& module,const QString& result){if(m_isClosing)return;m_report->ShowReports({},result,module);if(!m_reportOpened){m_reportOpened=true;reports->setFloating(true);reports->resize(1180,720);}reports->show();reports->raise();reports->activateWindow();};
     m_objects->onReport=m_workflow.onShowReports;
     m_report->onReadReports=[this](const QJsonObject& record,const QSet<QString>& known){
         if(m_isClosing)return QVector<ReportDocument>{};
@@ -871,7 +871,7 @@ bool TestWindow::StopSession()
     if (!m_isClosing) AppendLog("正在关闭测试会话，停止计算并释放视图资源。");
     if(!m_isClosing)SaveLayout();m_layoutTimer.stop();
     m_isClosing = true; m_openVolume->setEnabled(false); m_stop->setEnabled(false); m_workflow.Stop(); m_pump.Stop();
-    m_report->CancelTasks(true);
+    if(!m_report->CancelTasks(true)) { ShowMessage("正在结束报告任务，资源已保留；请稍候再关闭。"); return false; }
     // 原生报告和分页目录持有正式结果，须先释放才能退休其 OwnerRetirement 作用域。
     for(const auto& id:m_report->GetReportIds())m_report->RemoveReport(id);
     bool readsPending=false;

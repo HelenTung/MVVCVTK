@@ -432,7 +432,7 @@ bool ResultReport::eventFilter(QObject* object,QEvent* event)
         &&static_cast<QKeyEvent*>(event)->matches(QKeySequence::Copy)) {event->accept();return true;}
     return QWidget::eventFilter(object,event);
 }
-void ResultReport::showEvent(QShowEvent* event) { m_acceptingRequests=true;QWidget::showEvent(event); if(!m_rowsReady && m_selected.table)RefreshRows();else Refresh(); if(!m_pendingReports.isEmpty())m_buildTimer->start(0); }
+void ResultReport::showEvent(QShowEvent* event) { QWidget::showEvent(event);if(m_stopRequested)return;m_acceptingRequests=true; if(!m_rowsReady && m_selected.table)RefreshRows();else Refresh(); if(!m_pendingReports.isEmpty())m_buildTimer->start(0); }
 void ResultReport::hideEvent(QHideEvent* event) { CancelTasks(); QWidget::hideEvent(event); }
 void ResultReport::closeEvent(QCloseEvent* event) {m_acceptingRequests=false;CancelTasks();QWidget::closeEvent(event);}
 void ResultReport::Refresh()
@@ -852,8 +852,9 @@ void ResultReport::CancelRows()
     if(m_rowScan)m_scanTimer->start(20);else m_scanTimer->stop();
     setProperty("reportRowsBusy",false);m_rows={};m_allRows=false;m_rowsReady=false;RefreshPage();
 }
-void ResultReport::CancelTasks(bool waitForExit)
+bool ResultReport::CancelTasks(bool finalStop)
 {
+    if(finalStop){m_stopRequested=true;m_acceptingRequests=false;}
     if(m_rowScan || m_pendingRowScan){
         const bool hasCurrentScan=m_pendingRowScan || !m_rowScan->cancelled->load();
         if(hasCurrentScan)CancelRows();
@@ -861,14 +862,13 @@ void ResultReport::CancelTasks(bool waitForExit)
     m_buildTimer->stop();m_buildingReports.clear();m_buildingOperation.clear();m_buildingIndex=0;
     setProperty("reportGenerationBusy",false);++m_taskRequest;
     if(m_task)m_task->Cancel();
-    if(waitForExit){
-        // 只有最终关闭收尾等待；普通取消和查询切换保留在途读者，由轮询回收。
-        m_acceptingRequests=false;m_scanTimer->stop();m_taskTimer->stop();
-        if(m_rowScan && m_rowScan->future.valid())m_rowScan->future.wait();
-        m_rowScan.reset();m_pendingRowScan.reset();
-        if(m_task){if(m_task->future.valid()){m_task->future.wait();ContinueTask();}else m_task.reset();}
+    if(finalStop){
+        // 共用零阻塞等待预算；未就绪 future 连同来源留在原 owner，继续由现有 timer 回收。
+        if(m_rowScan && m_rowScan->future.wait_for(std::chrono::milliseconds(0))==std::future_status::ready)ContinueRows();
+        if(m_task && m_task->future.wait_for(std::chrono::milliseconds(0))==std::future_status::ready)ContinueTask();
     }
     m_cancelTask->setEnabled(false);
+    return !m_task && !m_rowScan && !m_pendingRowScan;
 }
 void ResultReport::RemoveReport(QString id)
 {

@@ -4095,7 +4095,7 @@ int StartTestCase(TestWindow& window, const QString& path, const QString& record
         Check(window.GetIsReady(), window.GetFailure().toStdString().c_str());
         Check(window.findChild<QLabel*>("businessMeasurements") != nullptr, "manual business measurements panel exists");
         Check(window.GetRecords().GetMeasurements()["memory"].toObject()["available"].toBool(), "OS process resource measurement is available");
-        if (selfTest) StartSelfTest(window); else StartSequence(window, path,shutdownTimeoutMs);
+        if (selfTest) { StartSelfTest(window); CheckReportStop(window); } else StartSequence(window, path,shutdownTimeoutMs);
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << std::endl; GrabWindow(window).save("scene-ui-failure.png"); result = 1; }
     const auto businessDiagnostics = window.GetDiagnostics();
     QElapsedTimer stopClock; stopClock.start(); int stopAttempts = 0;
