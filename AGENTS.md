@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> **开工加载入口**：先读取 `AGENTS.core.md` 第 0 节并完成其正文加载要求，再开展工程动作。下方文件分工只是导航，不能代替对应正文的加载。
+
 > 适用范围：MVVCVTK 仓库根目录及全部子目录。子目录里更近的 `AGENTS.md` 只覆盖它明确声明的规则。
 >
 > 文件分工：本文件定义项目细则；对话与加载见 `AGENTS.core.md`；工程原则见 `core/ENGINEERING.core.md`；工作推进见 `core/LOOP.core.md`；Git 通用模型见 `core/GIT_WORKFLOW.core.md`；三层协作见 `core/COLLABORATION.core.md`；测试证据见 `core/TESTING.core.md`；Git、分支、工作树与合并流程见 `md/development/GIT_WORKFLOW.md`；命名见 `md/development/NAMING.md`；Feature 开发见 `md/development/FEATURE_DEVELOPMENT.md`；测试与验收见 `md/development/TESTING.md`；SDK 交付见 `md/development/SDK_DELIVERY.md`；Loop 工作方式与任务进度文件见 `md/development/LOOP.md`；派发平台适配见 `platform/paseo/DISPATCH.md`；会话运行时适配见 `platform/runtime/CLAUDE_CODE.md`、`platform/runtime/CODEX.md`。
