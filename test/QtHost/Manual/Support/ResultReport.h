@@ -120,12 +120,13 @@ private:
     QPlainTextEdit* m_conditions = nullptr;
     QLabel *m_range = nullptr, *m_baselineLabel = nullptr;
     QPushButton *m_first = nullptr, *m_previous = nullptr, *m_next = nullptr, *m_last = nullptr;
-    QPushButton* m_locate = nullptr;
+    QAction* m_locate = nullptr;
     ReportRows m_rows;
     class RowScan;
     std::unique_ptr<RowScan> m_rowScan,m_pendingRowScan;
     QTimer* m_scanTimer = nullptr;
-    QPushButton *m_cancelScan = nullptr, *m_exportFiltered = nullptr;
+    QPushButton* m_cancelScan = nullptr;
+    QAction* m_exportFiltered = nullptr;
     bool m_allRows = false;
     bool m_rowsReady = false;
     bool m_pageReady = false;

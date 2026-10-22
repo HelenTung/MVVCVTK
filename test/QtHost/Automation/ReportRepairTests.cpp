@@ -37,6 +37,8 @@
 #include <QTableView>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QToolButton>
+#include <QMenu>
 #include <QThread>
 #include <condition_variable>
 #include <mutex>
@@ -159,7 +161,7 @@ void CheckAssociationsAndClearing() {
     auto* conditions=view.findChild<QPlainTextEdit*>("reportConditions");Require(conditions->toPlainText().contains("阈值"),"fixture did not display calculation conditions");
     view.ShowReports("data-b");
     Require(!view.GetSelectedReport().table && conditions->toPlainText().isEmpty() && view.findChild<QLineEdit*>("reportSearch")->text().isEmpty(),"source switch kept old conditions, details or filters");
-    Require(!view.findChild<QPushButton*>("locateReportRow")->isEnabled(),"cleared selection can still locate an old row");
+    Require(!view.findChild<QAction*>("locateReportRow")->isEnabled(),"cleared selection can still locate an old row");
     view.ShowReports("data-a");Require(Visible(view,result.id),"same-source comparison hidden from data entry");
     view.ShowReports({},b.relatedResults.first());Require(Visible(view,result.id),"comparison hidden from original related result entry");
     b.source="data-b";auto cross=CompareReports(a,b,Options(a,b));view.AddReport(cross);
@@ -170,7 +172,7 @@ void CheckAssociationsAndClearing() {
     view.ShowReports({},b.result,"Wall");Require(Visible(view,crossModule.id),"comparison missing from the other business module entry");
     auto imported=Read("item_id,volume_mm3\nexternal,7\n");view.AddReport(imported);view.SelectReport(imported.id);
     view.getSources=[]{return QMap<QString,QString>{{"data-b","测试体数据"}};};
-    DrivePopupInteraction([&]{view.findChild<QPushButton*>("associateReportSource")->click();},[&]{
+    DrivePopupInteraction([&]{view.findChild<QAction*>("associateReportSource")->trigger();},[&]{
         auto* dialog=qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
         if(!dialog || dialog->parentWidget()!=&view)return false;
         dialog->findChild<QComboBox*>()->setCurrentIndex(1);dialog->accept();return true;
@@ -178,7 +180,7 @@ void CheckAssociationsAndClearing() {
     view.ShowReports("data-b");Require(Visible(view,imported.id),"explicit imported report association was not used by filtering");
     view.SetReportSource(imported.id,{});view.ShowReports("data-b");Require(!Visible(view,imported.id),"removing association left stale source membership");
     auto removable=Document("remove");std::weak_ptr<ReportTable> storage=removable.table;view.AddReport(removable);view.SelectReport(removable.id);
-    view.findChild<QPushButton*>("setReportBaseline")->click();removable.table.reset();view.RemoveReport(removable.id);
+    view.findChild<QAction*>("setReportBaseline")->trigger();removable.table.reset();view.RemoveReport(removable.id);
     Require(storage.expired() && !view.GetReportIds().contains("remove") && !view.GetSelectedReport().table,"removed report retained page, scan or document storage");
 }
 void CheckSpatialEvidence() {
@@ -250,7 +252,7 @@ void CheckComparisonGenerationAdmission() {
         ResultReport view;auto baseline=Document("mapping-baseline"),current=Document("mapping-current");
         const auto native=Document("mapping-pending-native");int preparations=0,launches=0;
         view.AddReport(baseline);Require(view.SelectReport(baseline.id),"comparison baseline fixture selection failed");
-        view.findChild<QPushButton*>("setReportBaseline")->click();view.AddReport(current);
+        view.findChild<QAction*>("setReportBaseline")->trigger();view.AddReport(current);
         Require(view.SelectReport(current.id)&&view.GetSelectedReport().id!=baseline.id,"comparison current fixture selection failed");view.show();
         view.onPrepareReports=[&](const QJsonObject&,const QSet<QString>&)->ReportPreparation {
             ++preparations;return [native](const ReportCheckpoint& check){check();return QVector<ReportDocument>{native};};
@@ -360,9 +362,9 @@ void CheckGenerationAndTasks() {
     Wait([&]{return view.property("reportTaskBusy").toBool();});
     Require(!view.GetSelectedReport().table,"late import stole a newer source-filtered selection");
     view.ShowReports();
-    view.SelectReport("lazy");view.findChild<QPushButton*>("setReportBaseline")->click();
+    view.SelectReport("lazy");view.findChild<QAction*>("setReportBaseline")->trigger();
     auto current=Document("current","聚合节点厚度场值",50000);view.AddReport(current);view.SelectReport(current.id);
-    DrivePopupInteraction([&]{view.findChild<QPushButton*>("compareReports")->click();},[&]{
+    DrivePopupInteraction([&]{view.findChild<QAction*>("compareReports")->trigger();},[&]{
         auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
         if(!dialog || dialog->parentWidget()!=&view || !dialog->findChild<QComboBox*>("reportMatchMode"))return false;
         dialog->accept();return true;
@@ -458,7 +460,7 @@ void CheckWideRowAddressing() {
     ResultReport view;ReportRowId located=-1;view.onLocate=[&](const ReportDocument&,ReportRowId row){located=row;};view.AddReport(doc);view.show();
     view.findChild<QPushButton*>("reportLast")->click();QCoreApplication::processEvents();auto* table=view.findChild<QTableView*>("reportTable");
     const int local=table->model()->rowCount()-1;Require(local>=0 && table->model()->data(table->model()->index(local,0)).toString()==QString::number(count-1),"last report page truncates a 64-bit row");
-    table->selectRow(local);view.findChild<QPushButton*>("locateReportRow")->click();Require(located==count-1,"locate callback truncates a 64-bit global row");
+    table->selectRow(local);view.findChild<QAction*>("locateReportRow")->trigger();Require(located==count-1,"locate callback truncates a 64-bit global row");
     view.findChild<QPushButton*>("reportFirst")->click();Require(table->model()->data(table->model()->index(0,0)).toString()=="0","first report page lost original order");view.hide();
 }
 void CheckDiskIndexPages() {
@@ -523,7 +525,8 @@ void CheckPageReadFailures() {
     auto index=std::make_shared<FaultingRows>();index->original=ReportTaskTestAccess::Rows(view);ReportTaskTestAccess::SetRows(view,ReportRows(index));
     view.findChild<QPushButton*>("reportLast")->click();
     Require(table->model()->rowCount()==0&&!view.property("reportRowsError").toString().isEmpty(),"failed page showed stale or partial data");
-    for(const auto* action:{"exportSelectedReport","locateReportRow","exportFilteredReport"})Require(!view.findChild<QPushButton*>(action)->isEnabled(),"failed page retained an action using invalid row mapping");
+    Require(!view.findChild<QPushButton*>("exportSelectedReport")->isEnabled(),"failed page retained selected export using invalid row mapping");
+    for(const auto* action:{"locateReportRow","exportFilteredReport"})Require(!view.findChild<QAction*>(action)->isEnabled(),"failed page retained an action using invalid row mapping");
     bool rejected=false;try{view.ExportReportFile(directory.filePath("invalid.csv"),true);}catch(const std::runtime_error&){rejected=true;}
     Require(rejected&&!QFile::exists(directory.filePath("invalid.csv"))&&located==-1&&view.GetSelectedReport().table==doc.table,"page failure changed formal report or allowed filtered export");
     index->fail=false;
@@ -546,8 +549,8 @@ void CheckPageReadFailures() {
     Require(reads-exportReads==2 && view.property("reportRowsError").toString()=="正文短读","selected export did not read both selected rows and reach injected row 201");
     const auto taskError=view.property("reportTaskError").toString();
     Require(taskError=="正文短读" && view.findChild<QLabel*>("reportTaskStatus")->text().contains(taskError),"selected export read failure reason is not visible");
-    Require(!QFile::exists(failurePath)&&table->model()->rowCount()==0&&!view.findChild<QPushButton*>("locateReportRow")->isEnabled(),"failed selected export committed a partial file or left a usable stale page");
-    Require(!exportSelected->isEnabled()&&!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"failed selected export left actions enabled on the invalidated page");
+    Require(!QFile::exists(failurePath)&&table->model()->rowCount()==0&&!view.findChild<QAction*>("locateReportRow")->isEnabled(),"failed selected export committed a partial file or left a usable stale page");
+    Require(!exportSelected->isEnabled()&&!view.findChild<QAction*>("exportFilteredReport")->isEnabled(),"failed selected export left actions enabled on the invalidated page");
     QDir residue(directory.path());Require(residue.entryList({"*failure.csv*"},QDir::Files|QDir::Hidden).isEmpty(),"failed selected export left a QSaveFile temporary artifact");
     Require(!view.findChild<QPushButton*>("copyReportCsv")&&!table->findChild<QAction*>("copyReportCsvAction"),"clipboard copy action remains available");
     std::cout<<"PASS: selected export failure reached row 201 after exactly 2 selected-row reads; target absent and page invalidated"<<std::endl;
@@ -685,6 +688,14 @@ void CheckFileExports() {
     auto* table=view.findChild<QTableView*>("reportTable");Require(table&&table->model()->rowCount()==4,"export fixture page did not load");
     Require(!view.findChild<QPushButton*>("copyReportCsv")&&table->actions().size()==1
         &&table->actions().first()->objectName()=="exportSelectedReportAction","report context menu retained clipboard or whole-report actions");
+    auto* tools=view.findChild<QToolButton*>("reportActions");Require(tools&&tools->menu(),"report command menu is missing");view.show();
+    bool menuSeen=false;DrivePopupInteraction([&]{tools->showMenu();},[&]{
+        auto* menu=tools->menu();if(!menu->isVisible())return false;
+        for(const auto* name:{"setReportBaseline","compareReports","exportFilteredReport","associateReportSource","saveReportConditions","removeReport"}) {
+            auto* action=view.findChild<QAction*>(name);Require(action&&action->isVisible()&&menu->actions().contains(action),"secondary report action is not reachable through the visible menu");
+        }
+        view.findChild<QAction*>("setReportBaseline")->trigger();menuSeen=true;menu->close();return true;
+    },"report command menu did not open");Require(menuSeen,"report command menu was not inspected");view.hide();
     const auto allPath=directory.filePath("all.csv");ReportTaskTestAccess::ChooseExportPath(view,[&](const QString&){return allPath;});
     view.findChild<QPushButton*>("exportReportCsv")->click();Require(view.property("reportTaskBusy").toBool(),"all-row export did not admit asynchronously");Wait([&]{return view.property("reportTaskBusy").toBool();});
     Require(view.findChild<QLabel*>("reportTaskStatus")->text()=="已导出 4 行 · all.csv","completed export row count is not displayed as exact decimal digits");
@@ -914,7 +925,7 @@ void CheckSelectedUnmaterializedExports() {
         "filtered export fixture did not complete the full-table filter scan");
     const auto hits=filterView.GetFilteredRows();Require(hits.size()==3&&hits[0]==2&&hits[1]==7&&hits[2]==11,"filter scan did not retain original matching row identities");
     filterReads=0;ownerReads=0;unmatchedExportReads=0;const auto filteredPath=directory.filePath("filtered-lazy.csv");ReportTaskTestAccess::ChooseExportPath(filterView,[&](const QString&){return filteredPath;});
-    filterView.findChild<QPushButton*>("exportFilteredReport")->click();Wait([&]{return filterView.property("reportTaskBusy").toBool();});
+    filterView.findChild<QAction*>("exportFilteredReport")->trigger();Wait([&]{return filterView.property("reportTaskBusy").toBool();});
     Require(filterReads==3&&ownerReads==0&&unmatchedExportReads==0,"filtered export reread unselected source rows after the full filter scan");
     QFile filteredFile(filteredPath);Require(filteredFile.open(QIODevice::ReadOnly),"filtered lazy output unreadable");QBuffer filteredBuffer;filteredBuffer.setData(filteredFile.readAll());filteredBuffer.open(QIODevice::ReadOnly);
     const auto filteredCopy=ReadReportCsv(filteredBuffer,"filtered lazy export");Require(filteredCopy.table->GetCount()==3,"filtered lazy export row count changed");
@@ -934,7 +945,7 @@ void CheckReportNumericLocales() {
     auto baseline=Document("locale-baseline","metric",1),currentDoc=Document("locale-current","metric",1);
     baseline.title="Baseline";currentDoc.title="Current";
     ResultReport compareView;compareView.AddReport(baseline);compareView.AddReport(currentDoc);
-    Require(compareView.SelectReport(baseline.id),"locale comparison baseline selection failed");compareView.findChild<QPushButton*>("setReportBaseline")->click();
+    Require(compareView.SelectReport(baseline.id),"locale comparison baseline selection failed");compareView.findChild<QAction*>("setReportBaseline")->trigger();
     Require(compareView.SelectReport(currentDoc.id),"locale comparison current selection failed");compareView.show();
     bool popupSeen=false;DrivePopupInteraction([&]{ReportTaskTestAccess::Compare(compareView);},[&]{
         auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());

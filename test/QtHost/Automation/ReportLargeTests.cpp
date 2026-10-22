@@ -4,6 +4,7 @@
 #include "Support/ReportStorage.h"
 #include "Support/JsonInput.h"
 #include <QApplication>
+#include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -56,8 +57,8 @@ void CheckMidTaskCancel(ResultReport& view,const std::function<void()>& start,in
     std::cout<<"PASS: real mid-task cancel "<<phase<<" checkpoints="<<progress<<" cancelMs="<<cancellation.elapsed()<<std::endl;
 }
 void StartComparison(ResultReport& view,const ReportDocument& native,const ReportDocument& imported,int mode) {
-    view.SelectReport(native.id);view.findChild<QPushButton*>("setReportBaseline")->click();view.SelectReport(imported.id);
-    DrivePopupInteraction([&]{view.findChild<QPushButton*>("compareReports")->click();},[mode,&view]{
+    view.SelectReport(native.id);view.findChild<QAction*>("setReportBaseline")->trigger();view.SelectReport(imported.id);
+    DrivePopupInteraction([&]{view.findChild<QAction*>("compareReports")->trigger();},[mode,&view]{
         auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
         if(!dialog || dialog->parentWidget()!=&view || !dialog->findChild<QComboBox*>("reportMatchMode"))return false;
         dialog->findChild<QComboBox*>("reportMatchMode")->setCurrentIndex(mode);
@@ -169,7 +170,7 @@ void CheckLargeReportOperations(ResultReport& view,const ReportDocument& input,c
         const auto progress=view.property("reportRowsProgress").toLongLong();QElapsedTimer elapsed;elapsed.start();
         view.findChild<QPushButton*>("cancelReportRows")->click();QCoreApplication::processEvents();
         Require(view.property("reportRowsError").toString().isEmpty(),"row processing failure was misreported as cancellation");
-        Require(view.GetFilteredCount()==0 && !view.property("reportRowsBusy").toBool() && !view.findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"cancelled real scan exposed partial or exportable rows");
+        Require(view.GetFilteredCount()==0 && !view.property("reportRowsBusy").toBool() && !view.findChild<QAction*>("exportFilteredReport")->isEnabled(),"cancelled real scan exposed partial or exportable rows");
         std::cout<<"PASS: real mid-scan cancel "<<phase<<" rows="<<progress<<" cancelMs="<<elapsed.elapsed()<<std::endl;
     };
     view.SelectReport(native.id);search->setText("__cancel_full_real_scan__");cancelScan("search");

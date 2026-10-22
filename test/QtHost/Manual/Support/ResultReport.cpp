@@ -35,7 +35,16 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QLabel>
+#include <QMenu>
 #include <QMessageBox>
+#include <QToolButton>
+#include <QToolTip>
+#include <QHelpEvent>
+#include <QPainter>
+#include <QFontMetrics>
+#include <QSizePolicy>
+#include <QStyle>
+#include <QStyleOption>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QShowEvent>
@@ -59,6 +68,28 @@
 #include <algorithm>
 namespace Manual {
 namespace {
+
+// QLabel 保留完整原文供自动化和辅助技术读取，只在绘制时省略，避免状态撑高停靠面板。
+class ReportLineLabel final : public QLabel {
+public:
+    explicit ReportLineLabel(const QString& text,QWidget* parent) : QLabel(text,parent) {
+        setTextFormat(Qt::PlainText);setWordWrap(false);setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+    }
+    QSize minimumSizeHint() const override {auto size=QLabel::minimumSizeHint();size.setWidth(0);return size;}
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);QStyleOption option;option.initFrom(this);style()->drawPrimitive(QStyle::PE_Widget,&option,&painter,this);
+        const auto line=QString(text()).replace('\n',QStringLiteral(" · "));
+        style()->drawItemText(&painter,contentsRect(),alignment()|Qt::TextSingleLine,palette(),isEnabled(),
+            fontMetrics().elidedText(line,Qt::ElideRight,contentsRect().width()),foregroundRole());
+    }
+    bool event(QEvent* event) override {
+        if(event->type()==QEvent::ToolTip&&!text().isEmpty()) {
+            QToolTip::showText(static_cast<QHelpEvent*>(event)->globalPos(),text(),this);return true;
+        }
+        return QLabel::event(event);
+    }
+};
 
 QString CsvCell(QString value)
 {
@@ -243,25 +274,27 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     auto* layout = new QVBoxLayout(this);
     auto* toolbar = new QHBoxLayout;
     auto* import = new QPushButton("导入 CSV…",this); import->setObjectName("importReportCsv"); toolbar->addWidget(import);
-    auto* baseline = new QPushButton("设为基准 A",this); baseline->setObjectName("setReportBaseline"); toolbar->addWidget(baseline);
-    auto* compare = new QPushButton("与基准比较…",this); compare->setObjectName("compareReports"); toolbar->addWidget(compare);
     m_export = new QPushButton("导出全部…",this); m_export->setObjectName("exportReportCsv"); m_export->setProperty("primaryCommand",true); toolbar->addWidget(m_export);
     m_exportSelection = new QPushButton("导出选中行…",this); m_exportSelection->setObjectName("exportSelectedReport"); toolbar->addWidget(m_exportSelection);
     m_exportSelection->setToolTip("将当前页选中的行保存为 CSV，保留表头、单位和原始值");
     m_export->setToolTip("将当前报告的全部行保存为 CSV，不受分页和筛选影响");
-    m_exportFiltered = new QPushButton("导出筛选结果…",this);m_exportFiltered->setObjectName("exportFilteredReport");toolbar->addWidget(m_exportFiltered);
-    m_locate=new QPushButton("定位到视图",this);m_locate->setObjectName("locateReportRow");m_locate->hide();toolbar->addWidget(m_locate);
+    auto* tools=new QToolButton(this);tools->setObjectName("reportActions");tools->setText("报告操作");tools->setFocusPolicy(Qt::StrongFocus);
+    tools->setToolTip("比较报告、导出筛选结果、关联数据与保存汇总");tools->setPopupMode(QToolButton::InstantPopup);
+    auto* actions=new QMenu(tools);tools->setMenu(actions);toolbar->addWidget(tools);
+    auto* baseline=actions->addAction("设为基准 A");baseline->setObjectName("setReportBaseline");
+    auto* compare=actions->addAction("与基准比较…");compare->setObjectName("compareReports");actions->addSeparator();
+    m_exportFiltered=actions->addAction("导出筛选结果…");m_exportFiltered->setObjectName("exportFilteredReport");
+    m_locate=actions->addAction("定位到视图");m_locate->setObjectName("locateReportRow");m_locate->setVisible(false);actions->addSeparator();
+    auto* associate=actions->addAction("关联到数据…");associate->setObjectName("associateReportSource");
+    auto* saveConditions=actions->addAction("保存汇总与条件…");saveConditions->setObjectName("saveReportConditions");
+    auto* remove=actions->addAction("移除报告");remove->setObjectName("removeReport");
+    toolbar->addStretch(1);
+    m_cancelTask=new QPushButton("取消报告任务",this);m_cancelTask->setObjectName("cancelReportTask");toolbar->addWidget(m_cancelTask);
     layout->addLayout(toolbar);
-    auto* reportActions=new QHBoxLayout;
-    auto* associate=new QPushButton("关联到数据…",this);associate->setObjectName("associateReportSource");reportActions->addWidget(associate);
-    auto* remove=new QPushButton("移除报告",this);remove->setObjectName("removeReport");reportActions->addWidget(remove);
-    auto* saveConditions=new QPushButton("保存汇总与条件…",this);saveConditions->setObjectName("saveReportConditions");reportActions->addWidget(saveConditions);
-    m_cancelTask=new QPushButton("取消报告任务",this);m_cancelTask->setObjectName("cancelReportTask");reportActions->addWidget(m_cancelTask);
-    layout->addLayout(reportActions);
     auto* taskFeedback=new QHBoxLayout;
-    m_taskStatus=new QLabel(this);m_taskStatus->setObjectName("reportTaskStatus");m_taskStatus->setWordWrap(true);taskFeedback->addWidget(m_taskStatus,1);
-    m_exportProgress=new QProgressBar(this);m_exportProgress->setObjectName("reportExportProgress");m_exportProgress->setAccessibleName("报告导出进度");m_exportProgress->setLocale(QLocale::c());m_exportProgress->setRange(0,1000);m_exportProgress->hide();taskFeedback->addWidget(m_exportProgress);
-    m_openExportFolder=new QPushButton("打开所在文件夹",this);m_openExportFolder->setObjectName("openReportExportFolder");m_openExportFolder->hide();taskFeedback->addWidget(m_openExportFolder);layout->addLayout(taskFeedback);
+    m_taskStatus=new ReportLineLabel(QString(),this);m_taskStatus->setObjectName("reportTaskStatus");taskFeedback->addWidget(m_taskStatus,1);
+    m_exportProgress=new QProgressBar(this);m_exportProgress->setObjectName("reportExportProgress");m_exportProgress->setAccessibleName("报告导出进度");m_exportProgress->setLocale(QLocale::c());m_exportProgress->setRange(0,1000);m_exportProgress->setMaximumWidth(160);m_exportProgress->hide();taskFeedback->addWidget(m_exportProgress);
+    m_openExportFolder=new QPushButton("打开所在文件夹",this);m_openExportFolder->setObjectName("openReportExportFolder");m_openExportFolder->hide();taskFeedback->addWidget(m_openExportFolder);
     connect(m_openExportFolder,&QPushButton::clicked,this,[this]{
         const auto path=property("reportExportPath").toString();
         if(!path.isEmpty()&&!QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath())))m_taskStatus->setText("无法打开所在文件夹，请从保存位置查看报告。");
@@ -282,30 +315,30 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     connect(m_taskTimer,&QTimer::timeout,this,[this]{ContinueTask();});
     connect(m_cancelTask,&QPushButton::clicked,this,[this]{CancelTasks();m_taskStatus->setText("已请求取消，正在回收后台任务…");});
     m_cancelTask->setEnabled(false);
-    connect(remove,&QPushButton::clicked,this,[this]{RemoveReport(m_selected.id);});
-    connect(associate,&QPushButton::clicked,this,[this]{
+    connect(remove,&QAction::triggered,this,[this]{RemoveReport(m_selected.id);});
+    connect(associate,&QAction::triggered,this,[this]{
         if(m_selected.category!="导入报告" || !getSources)return;
         const auto sources=getSources();QStringList labels{"独立报告（解除关联）"};QStringList refs{QString()};
         for(auto it=sources.cbegin();it!=sources.cend();++it){labels.append(it.value()+" · "+it.key());refs.append(it.key());}
         bool accepted=false;const auto label=QInputDialog::getItem(this,"仅设置报告归属，不改变工作输入","数据修订",labels,0,false,&accepted);
         if(accepted)SetReportSource(m_selected.id,refs.value(labels.indexOf(label)));
     });
-    connect(saveConditions,&QPushButton::clicked,this,[this]{
+    connect(saveConditions,&QAction::triggered,this,[this]{
         if(!m_selected.table)return;const auto path=QFileDialog::getSaveFileName(this,"保存业务汇总与计算条件",{},"文本 (*.txt)");if(path.isEmpty())return;
         QSaveFile file(path);const auto bytes=(m_selected.title+"\n"+m_selected.description+"\n"+QString::fromUtf8(QJsonDocument(m_selected.conditions).toJson(QJsonDocument::Indented))).toUtf8();
         if(!file.open(QIODevice::WriteOnly) || file.write(bytes)!=bytes.size() || !file.commit())QMessageBox::warning(this,"保存失败","无法保存汇总与计算条件");
     });
-    auto* choices = new QHBoxLayout;
-    auto* all = new QPushButton("全部报告",this); all->setObjectName("showAllReports"); choices->addWidget(all);
-    m_follow = new QCheckBox("跟随最新结果",this); m_follow->setObjectName("followLatestReport"); choices->addWidget(m_follow);
-    m_baselineLabel = new QLabel("尚未选择基准",this); choices->addWidget(m_baselineLabel,1); layout->addLayout(choices);
-    auto* split = new QSplitter(this); layout->addWidget(split,1);
-    m_reports = new QTreeWidget(split); m_reports->setObjectName("reportList"); m_reports->setHeaderLabels({"报告"}); m_reports->setMinimumWidth(200);
+    auto* split = new QSplitter(this);split->setChildrenCollapsible(false);layout->addWidget(split,1);
+    auto* list=new QWidget(split);auto* choices=new QVBoxLayout(list);choices->setContentsMargins(0,0,0,0);
+    auto* all=new QPushButton("全部报告",list);all->setObjectName("showAllReports");choices->addWidget(all);
+    m_reports=new QTreeWidget(list);m_reports->setObjectName("reportList");m_reports->setHeaderLabels({"报告"});m_reports->setMinimumWidth(160);choices->addWidget(m_reports,1);
+    m_follow=new QCheckBox("跟随最新结果",list);m_follow->setObjectName("followLatestReport");choices->addWidget(m_follow);
+    m_baselineLabel=new ReportLineLabel("尚未选择基准",list);choices->addWidget(m_baselineLabel);
     auto* content = new QWidget(split); auto* body = new QVBoxLayout(content); body->setContentsMargins(0,0,0,0);
-    m_summary = new QLabel("可直接导入并查看报告，无需加载体数据。",content); m_summary->setWordWrap(true); body->addWidget(m_summary);
+    m_summary = new ReportLineLabel("可直接导入并查看报告，无需加载体数据。",content);body->addWidget(m_summary);
     auto* filters = new QHBoxLayout;
-    m_search = new QLineEdit(content); m_search->setObjectName("reportSearch"); m_search->setPlaceholderText("搜索整个报告"); m_search->setClearButtonEnabled(true); filters->addWidget(m_search,1);
-    m_filterColumn = new QComboBox(content); m_filterColumn->setObjectName("reportFilterColumn"); filters->addWidget(m_filterColumn);
+    m_search = new QLineEdit(content); m_search->setObjectName("reportSearch"); m_search->setPlaceholderText("搜索整个报告"); m_search->setClearButtonEnabled(true);m_search->setMinimumWidth(60);filters->addWidget(m_search,1);
+    m_filterColumn = new QComboBox(content); m_filterColumn->setObjectName("reportFilterColumn");m_filterColumn->setMinimumContentsLength(8);m_filterColumn->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);filters->addWidget(m_filterColumn);
     m_minimum = new QLineEdit(content); m_minimum->setPlaceholderText("数值下限"); m_minimum->setMaximumWidth(95); filters->addWidget(m_minimum);
     m_maximum = new QLineEdit(content); m_maximum->setPlaceholderText("数值上限"); m_maximum->setMaximumWidth(95); filters->addWidget(m_maximum); body->addLayout(filters);
     m_cancelScan=new QPushButton("停止筛选 / 排序",content);m_cancelScan->setObjectName("cancelReportRows");filters->addWidget(m_cancelScan);
@@ -322,7 +355,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     auto* pages = new QHBoxLayout;
     m_first=new QPushButton("首页",content);m_first->setObjectName("reportFirst");pages->addWidget(m_first);
     m_previous = new QPushButton("上一页",content); m_previous->setObjectName("reportPrevious"); pages->addWidget(m_previous);
-    m_range = new QLabel(content); m_range->setObjectName("reportRange"); pages->addWidget(m_range,1);
+    m_range = new ReportLineLabel(QString(),content); m_range->setObjectName("reportRange"); pages->addWidget(m_range,1);
     m_next = new QPushButton("下一页",content); m_next->setObjectName("reportNext"); pages->addWidget(m_next); body->addLayout(pages);
     m_last=new QPushButton("末页",content);m_last->setObjectName("reportLast");pages->addWidget(m_last);
     connect(m_reports,&QTreeWidget::currentItemChanged,this,[this]{SelectCurrent();});
@@ -331,8 +364,8 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
         const auto path = QFileDialog::getOpenFileName(this,"导入 UTF-8 CSV 报告",{},"CSV (*.csv);;所有文件 (*)"); if(path.isEmpty())return;
         try { ImportReport(path); } catch(const std::exception& e){QMessageBox::warning(this,"导入失败",QString::fromUtf8(e.what()));}
     });
-    connect(baseline,&QPushButton::clicked,this,[this]{if(!m_selected.table)return;m_baseline=m_selected.id;m_baselineLabel->setText("基准 A · "+m_selected.title);});
-    connect(compare,&QPushButton::clicked,this,[this]{try{CompareSelected();}catch(const std::exception& e){QMessageBox::warning(this,"无法比较",QString::fromUtf8(e.what()));}});
+    connect(baseline,&QAction::triggered,this,[this]{if(!m_selected.table)return;m_baseline=m_selected.id;m_baselineLabel->setText("基准 A · "+m_selected.title);});
+    connect(compare,&QAction::triggered,this,[this]{try{CompareSelected();}catch(const std::exception& e){QMessageBox::warning(this,"无法比较",QString::fromUtf8(e.what()));}});
     connect(m_search,&QLineEdit::textChanged,this,[this]{RefreshRows();});
     connect(m_filterColumn,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{RefreshRows();});
     connect(m_minimum,&QLineEdit::editingFinished,this,[this]{RefreshRows();});
@@ -346,13 +379,13 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
     });
     connect(m_export,&QPushButton::clicked,this,[this]{SelectExportPath(false);});
     connect(m_exportSelection,&QPushButton::clicked,this,[this]{SelectExportPath(true);});
-    connect(m_exportFiltered,&QPushButton::clicked,this,[this]{SelectExportPath(false,true);});
+    connect(m_exportFiltered,&QAction::triggered,this,[this]{SelectExportPath(false,true);});
     // 表格上下文只提供与选中行有关的操作，整份报告从工具栏导出。
     m_exportSelectionAction=new QAction("导出选中行…",m_table);m_exportSelectionAction->setObjectName("exportSelectedReportAction");
     m_table->addAction(m_exportSelectionAction);m_table->setContextMenuPolicy(Qt::ActionsContextMenu);
     m_table->installEventFilter(this);m_table->viewport()->installEventFilter(this);
     connect(m_exportSelectionAction,&QAction::triggered,this,[this]{SelectExportPath(true);});
-    connect(m_locate,&QPushButton::clicked,this,[this]{
+    connect(m_locate,&QAction::triggered,this,[this]{
         if(!m_pageReady || !onLocate || !m_table->selectionModel())return;const auto selected=m_table->selectionModel()->selectedRows();
         if(selected.size()!=1){QMessageBox::information(this,"定位","请选择一条可定位记录。");return;}
         ReportRowId original;
@@ -360,7 +393,7 @@ ResultReport::ResultReport(QWidget* parent) : QWidget(parent)
         catch(const std::exception& e){SetReadFailure(QString::fromUtf8(e.what()));return;}
         try{onLocate(m_selected,original);}catch(const std::exception& e){QMessageBox::warning(this,"无法定位",QString::fromUtf8(e.what()));}
     });
-    split->setStretchFactor(1,1); RefreshPage();
+    split->setStretchFactor(0,0);split->setStretchFactor(1,1);split->setSizes({220,780});layout->addLayout(taskFeedback);RefreshPage();
     connect(m_table->selectionModel(),&QItemSelectionModel::selectionChanged,this,[this]{RefreshExportActions();});
 }
 void ResultReport::SetRecord(const QJsonObject& record)

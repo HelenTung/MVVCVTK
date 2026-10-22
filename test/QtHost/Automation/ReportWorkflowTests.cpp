@@ -221,8 +221,8 @@ void WaitTasks(ResultReport& view,int timeoutMs=0,bool success=true) {
 void CheckVolumeColumns(ResultReport& view,const ReportDocument& native,const ReportDocument& copy,int timeoutMs) {
     Require(native.validityColumn==-1 && copy.validityColumn==-1,"volume completeness became a whole-row validity filter");
     for(int column=0;column<native.columns.size();++column)if(native.columns[column].numeric) {
-        view.SelectReport(native.id);view.findChild<QPushButton*>("setReportBaseline")->click();view.SelectReport(copy.id);
-        DrivePopupInteraction([&]{view.findChild<QPushButton*>("compareReports")->click();},[column,&view]{
+        view.SelectReport(native.id);view.findChild<QAction*>("setReportBaseline")->trigger();view.SelectReport(copy.id);
+        DrivePopupInteraction([&]{view.findChild<QAction*>("compareReports")->trigger();},[column,&view]{
             auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
             if(!dialog || dialog->parentWidget()!=&view || !dialog->findChild<QComboBox*>("reportMatchMode"))return false;
             dialog->findChild<QComboBox*>("reportBaselineValueColumn")->setCurrentIndex(column+1);
@@ -372,7 +372,7 @@ void CheckMixedSortAndCancellation() {
     Require(view.property("reportRowsBusy").toBool() && view.GetFilteredRows().empty(),"sorting blocks admission or exposes partial rows");
     bool yielded=false;QTimer::singleShot(0,&view,[&]{yielded=view.property("reportRowsBusy").toBool();});WaitRows(view);
     Require(yielded && view.GetFilteredRows().size()==50000 && table->model()->data(table->model()->index(0,0)).toString()=="row-49999","complete sorting did not yield to owner events or lost rows");
-    table->selectRow(0);view.findChild<QPushButton*>("locateReportRow")->click();Require(located==49999,"sorted page location did not map to original row");
+    table->selectRow(0);view.findChild<QAction*>("locateReportRow")->trigger();Require(located==49999,"sorted page location did not map to original row");
     std::cout<<"Reports: 50000-row sort elapsedMs="<<elapsed.elapsed()<<std::endl;
     auto* search=view.findChild<QLineEdit*>("reportSearch");search->setText("row-");search->setText("row-49999");WaitRows(view);
     Require(SameIndices(view.GetFilteredRows(),{49999}),"superseded search committed stale rows");
@@ -386,7 +386,7 @@ void CheckMixedSortAndCancellation() {
     search->setText("row-");bool cancelledWhileBusy=false;
     QTimer::singleShot(0,&view,[&]{cancelledWhileBusy=view.property("reportRowsBusy").toBool();view.findChild<QPushButton*>("cancelReportRows")->click();});WaitRows(view);
     Require(cancelledWhileBusy && view.GetFilteredRows().empty(),"cancelled scan published partial or late results");
-    Require(!view.findChild<QPushButton*>("exportFilteredReport")->isEnabled() && !view.findChild<QPushButton*>("exportSelectedReport")->isEnabled(),"cancelled scan is presented as an exportable complete result");
+    Require(!view.findChild<QAction*>("exportFilteredReport")->isEnabled() && !view.findChild<QPushButton*>("exportSelectedReport")->isEnabled(),"cancelled scan is presented as an exportable complete result");
     search->setText("row-4");view.SelectReport(ties.id);QCoreApplication::processEvents();
     Require(view.GetSelectedReport().id==ties.id && view.GetFilteredRows().size()==8,"old report scan overwrote a new selection");
     ReportDocument virtualRows;virtualRows.id="64-bit-native";virtualRows.title="64 位原生页";virtualRows.category="本次会话结果";
@@ -545,8 +545,8 @@ void CheckReportWorkflow()
     std::cout<<"Reports: comparison dialog"<<std::endl;
     ResultReport compareView;
     auto nativeA=Read("sample_id,thickness_mm,validity\nA,1,0\nB,2,0\n"),nativeB=Read("sample_id,thickness_mm,validity\nB,3,0\nA,4,0\n");
-    compareView.AddReport(nativeA);compareView.findChild<QPushButton*>("setReportBaseline")->click();compareView.AddReport(nativeB);compareView.SelectReport(nativeB.id);
-    DrivePopupInteraction([&]{compareView.findChild<QPushButton*>("compareReports")->click();},[&]{
+    compareView.AddReport(nativeA);compareView.findChild<QAction*>("setReportBaseline")->trigger();compareView.AddReport(nativeB);compareView.SelectReport(nativeB.id);
+    DrivePopupInteraction([&]{compareView.findChild<QAction*>("compareReports")->trigger();},[&]{
         auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());
         if(!dialog || dialog->parentWidget()!=&compareView || !dialog->findChild<QComboBox*>("reportMatchMode"))return false;
         dialog->findChild<QComboBox*>("reportMatchMode")->setCurrentIndex(1);dialog->findChild<QCheckBox*>("reportMatchConfirmed")->setChecked(true);dialog->accept();return true;
@@ -667,7 +667,7 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         auto* reportTable=view->findChild<QTableView*>("reportTable");
         if(reportTable->selectionModel()->selectedRows().isEmpty() && reportTable->model()->rowCount()>0)reportTable->selectRow(0);
         Require(view->findChild<QPushButton*>("exportSelectedReport")->isEnabled()==(reportTable->model()->rowCount()>0) && view->findChild<QPushButton*>("exportReportCsv")->isEnabled()
-            && view->findChild<QPushButton*>("exportFilteredReport")->isEnabled(),"report preview actions do not reflect the complete page and full report");
+            && view->findChild<QAction*>("exportFilteredReport")->isEnabled(),"report preview actions do not reflect the complete page and full report");
         Require(!view->findChild<QPushButton*>("copyReportCsv")&&!reportTable->findChild<QAction*>("copyReportCsvAction"),"clipboard copy action remains available");
         Require(view->GetSelectedReport().table->GetCount()==doc.table->GetCount(),"native business full row count");
         if(module=="Alignment" && action=="EvaluateVoxelVolume" && record["parameters"].toObject()["requireEnclosedSelection"].toBool()) {
@@ -843,8 +843,8 @@ void CheckBusinessReport(TestWindow& window,const QJsonObject& record,bool check
         bool comparisonPerformed=false;
         if(value<0)for(int c=0;c<doc.columns.size();++c)if(doc.columns[c].numeric){value=c;break;}
         if(value>=0 && !doc.columns[value].quantity.isEmpty() && !doc.columns[value].unit.startsWith("model")) {
-            view->SelectReport(doc.id);view->findChild<QPushButton*>("setReportBaseline")->click();view->SelectReport(copy.id);
-            const auto compare=[&]{DrivePopupInteraction([&]{view->findChild<QPushButton*>("compareReports")->click();},[view]{
+            view->SelectReport(doc.id);view->findChild<QAction*>("setReportBaseline")->trigger();view->SelectReport(copy.id);
+            const auto compare=[&]{DrivePopupInteraction([&]{view->findChild<QAction*>("compareReports")->trigger();},[view]{
                 auto* mapping=qobject_cast<QDialog*>(QApplication::activeModalWidget());
                 if(!mapping || mapping->parentWidget()!=view || !mapping->findChild<QComboBox*>("reportMatchMode"))return false;
                 mapping->accept();return true;

@@ -19,6 +19,7 @@
 #include <QFocusEvent>
 #include <QHideEvent>
 #include <QFontMetrics>
+#include <QSizePolicy>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QFocusEvent>
@@ -212,7 +213,8 @@ private:
 BusinessStatistics::BusinessStatistics(QWidget* parent):QWidget(parent)
 {
     setObjectName("businessStatistics");auto* layout=new QVBoxLayout(this);layout->setContentsMargins(8,4,8,4);layout->setSpacing(4);
-    m_title=new QLabel(this);m_title->setObjectName("statisticsTitle");m_description=new QLabel(this);m_description->setWordWrap(false);m_description->setObjectName("statisticsProvenance");m_description->setMaximumHeight(20);
+    m_title=new QLabel(this);m_title->setObjectName("statisticsTitle");m_description=new QLabel(this);m_description->setWordWrap(false);m_description->setObjectName("statisticsProvenance");
+    m_description->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);m_description->setMaximumHeight(m_description->fontMetrics().height()+2);
     layout->addWidget(m_title);layout->addWidget(m_description);
     m_tabs=new QTabWidget(this);m_tabs->setObjectName("statisticsContentTabs");m_tabs->setTabBarAutoHide(true);layout->addWidget(m_tabs,1);
     auto* chart=new QWidget(m_tabs);auto* chartLayout=new QVBoxLayout(chart);chartLayout->setContentsMargins(0,0,0,0);chartLayout->setSpacing(2);
@@ -314,6 +316,7 @@ void BusinessStatistics::focusOutEvent(QFocusEvent* event){CancelInteraction();Q
 void BusinessStatistics::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);if(!m_markerValue)return;
+    m_description->setMaximumHeight(m_description->fontMetrics().height()+2);
     const auto description=m_description->toolTip();m_description->setText(m_description->fontMetrics().elidedText(description,Qt::ElideRight,std::max(1,width()-20)));
     const bool inlineValue=width()>=560;if(inlineValue==m_inlineMarker)return;
     CancelInteraction();m_controls->removeWidget(m_markerValue);m_controls->removeWidget(m_applyMarker);m_markerLayout->removeWidget(m_markerValue);m_markerLayout->removeWidget(m_applyMarker);
