@@ -50,7 +50,7 @@
 ## 0. 项目具体值
 
 - 工程主题的触发、角色身份与会话关系见 md/development/core/AGENTS.core.md 第 0 节；本文件只提供本项目的具体值与实施细则。
-- 风险等级唯一定义见 md/development/core/ENGINEERING.core.md 第 11 节；本文件第 11 节只列本项目具体判级细则与最低验证，既有门槛不降低。完成级别仍按第 12 节。
+- 变更风险与验证等级唯一定义见 md/development/core/ENGINEERING.core.md 第 11 节；本文件第 11 节只列本项目具体判级细则与最低验证，既有门槛不降低。完成级别仍按第 12 节。
 
 | 配置名 | 本项目值 |
 | --- | --- |
@@ -226,14 +226,14 @@
 
 等级定义与通用判级方法见 md/development/core/ENGINEERING.core.md 第 11 节。本节只补充本项目的具体命中条件与最低验证，不重新定义等级。涉及 CMake 修改时，configure 与解决方案完整性核对的适用范围另见 本文件第 11.1 节；该节同时指明测试注册与纯注释的既有例外。
 
-- L0 的本项目范围：Markdown 文档或纯注释，包含 CMake 注释；通用验证见 md/development/core/ENGINEERING.core.md 第 11 节，Git 跟踪状态对应的文件检查见 md/development/core/TESTING.core.md 第 0 节。
-- L1：外部契约不变、影响局限且可恢复的私有实现，包括往已有 target 加源文件（只调整私有源码列表）；仅给已有 target 增加或修改测试注册及测试属性（`add_test`、`set_tests_properties` 等，不新增 target、不改 target 属性和依赖）也属 L1。受影响 target 必须完成 Debug x64 构建、相关真实小数据回归和无关 diff 审查；Release 敏感路径补 Release。直接相关测试与失败路径审查按 core 的 L1 要求执行。
-- L1 的测试注册例外：仅有上述测试注册或测试属性改动时，最低验证改为重新 configure，确认目标用例已注册（`ctest -N` 只用于注册确认，不算通过），构建该已有 target，并实际运行受影响的用例。
-- **L2、L3 共同的最低验证**：Debug/Release 相关构建和测试；只验证实际受影响的 Feature 开关、Host 独立构建和消费者边界。
-- L2：公共头、HostAPI/FeatureSPI、新增 target，或改变现有 target 的类型、对外编译接口、依赖传播、构建开关、导出或安装行为；header surface、PUBLIC 依赖、安装/package 均按 L2。最低验证按本节上述共同要求执行。
-- L3：Host 核心机制、线程/停止、数据发布、渲染资源、第三方 bridge/runtime 按 L3。除 core 的 L3 完整测试与独立复核要求外，在本节上述 L2、L3 共同最低验证基础上，执行并发、取消、回滚、负例专项和真实数据或质量审计。三层协作中的独立复核按 md/development/core/COLLABORATION.core.md 第 13.2 节执行。
-- 性能改动按实际改动范围判级，须提供改动前后可比较的测量；不把性能主题本身作为自动升入 L3 的理由。
-- 只调整已有 target 的私有源码列表按 L1；命中本项目其他 L2/L3 条件时升级。各级验证仍按实际受影响的范围选择，不把级别继承理解为重跑无关模块。
+- D0 的本项目范围：普通 Markdown 文档或纯注释，包含 CMake 注释；现行规范的专门定级与通用验证见 md/development/core/ENGINEERING.core.md 第 11 节，Git 跟踪状态对应的文件检查见 md/development/core/TESTING.core.md 第 0 节。
+- R1：外部契约不变、影响局限且可恢复的私有实现，包括往已有 target 加源文件（只调整私有源码列表）；仅给已有 target 增加或修改测试注册及测试属性（`add_test`、`set_tests_properties` 等，不新增 target、不改 target 属性和依赖）也属 R1。受影响 target 必须完成 Debug x64 构建、相关真实小数据回归和无关 diff 审查；Release 敏感路径补 Release。直接相关测试与失败路径审查按 core 的 R1 要求执行。
+- R1 的测试注册例外：仅有上述测试注册或测试属性改动时，最低验证改为重新 configure，确认目标用例已注册（`ctest -N` 只用于注册确认，不算通过），构建该已有 target，并实际运行受影响的用例。
+- **R2、R3 共同的最低验证**：Debug/Release 相关构建和测试；只验证实际受影响的 Feature 开关、Host 独立构建和消费者边界。
+- R2：公共头、HostAPI/FeatureSPI、新增 target，或改变现有 target 的类型、对外编译接口、依赖传播、构建开关、导出或安装行为；header surface、PUBLIC 依赖、安装/package 均按 R2。最低验证按本节上述共同要求执行。
+- R3：Host 核心机制、线程/停止、数据发布、渲染资源、第三方 bridge/runtime 按 R3。除 core 的 R3 完整测试与独立复核要求外，在本节上述 R2、R3 共同最低验证基础上，执行并发、取消、回滚、负例专项和真实数据或质量审计。三层协作中的独立复核按 md/development/core/COLLABORATION.core.md 第 13.2 节执行。
+- 性能改动按实际改动范围判级，须提供改动前后可比较的测量；不把性能主题本身作为自动升入 R3 的理由。
+- 只调整已有 target 的私有源码列表按 R1；命中本项目其他 R2/R3 条件时升级。各级验证仍按实际受影响的范围选择，不把级别继承理解为重跑无关模块。
 - 缺少环境或数据时，列出未执行项和可复现的命令。
 
 ### 11.1. CMake 修改的配置与解决方案完整性核对（唯一定义）
