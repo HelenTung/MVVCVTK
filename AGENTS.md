@@ -2,29 +2,42 @@
 
 ## 开工闸门（唯一定义）
 
-本节是开工前规范读取与加载确认的唯一定义，按顺序完成以下四步。规范路径均相对仓库根，必须读取全部 16 份文件：
+本节是规范加载与开工动作检查的唯一定义。路径均相对仓库根；常驻与专项的划分只决定加载时机，不改变各文件条款的适用范围或授权。
+
+**常驻规则（每次开工必读）**
 
 - `AGENTS.md`
 - `md/development/core/AGENTS.core.md`
-- `md/development/core/ENGINEERING.core.md`
-- `md/development/core/LOOP.core.md`
-- `md/development/core/GIT_WORKFLOW.core.md`
 - `md/development/core/COLLABORATION.core.md`
-- `md/development/core/TESTING.core.md`
+- `md/development/core/LOOP.core.md`
 - `md/development/platform/paseo/DISPATCH.md`
 - `md/development/platform/runtime/CLAUDE_CODE.md`
 - `md/development/platform/runtime/CODEX.md`
-- `md/development/GIT_WORKFLOW.md`
-- `md/development/NAMING.md`
-- `md/development/FEATURE_DEVELOPMENT.md`
-- `md/development/TESTING.md`
-- `md/development/SDK_DELIVERY.md`
-- `md/development/LOOP.md`
 
-1. 每个文件用 UTF-8 分段读取，取得完整可见正文，直到看到该文件末尾的固定结束标记 `<!-- 规范文件结束：<相对仓库根路径> -->`；路径引用、文件清单或单独读取末行不算读完整个文件。
-2. 出现乱码、`truncated` 或其他截断、省略标记时，先补读缺失区间；未补齐前，不依赖该文件的规则行动。
-3. 全部读完后，先发一条加载确认，逐项列出每个文件的相对仓库根路径及实际看到的结束标记。
-4. 发出加载确认后，才判断角色权限、调用 Paseo 或做其他动作。
+**专项正文索引**
+
+任务明确要求理解、审查或修改某份专项正文时直接命中；其他情况按下表判断。排除条件只在未命中触发条件时适用。文件间的导航引用本身不触发全部专项；相关动作实际依赖某专项条款时，须先完整读取该专项。
+
+| 专项路径 | 触发条件 | 排除条件 |
+| --- | --- | --- |
+| `md/development/core/ENGINEERING.core.md` | 对具体工程资产作事实取证、调研或审查，制定或执行修改、风险判级，或涉及代码、状态与生命周期、性能、技能与图谱、命名语义的工程判断。 | 纯闲聊或泛技术问答，不作具体工程资产的事实、修改或风险判断。 |
+| `md/development/core/GIT_WORKFLOW.core.md` | Git现状核对、暂存、提交、fetch、分支与工作树选择、集成、合并或删除、baseline写入、规范初始化或文档维护位置判断。 | 不进行Git操作，也不涉及分支、工作树、集成、删除、baseline写入或规范初始化。 |
+| `md/development/GIT_WORKFLOW.md` | Git、分支、工作树、合并、发行、删除或清理的项目实施流程，以及临时输出与非系统盘存放安排。 | 无Git、工作树与分支、集成与清理或临时输出安排的任务。 |
+| `md/development/core/TESTING.core.md` | 测试、验证或验收（含文档静态验证）、完成声明、用例有效性、证据口径与复用、失败处理或恢复。 | 不作测试、验证、验收、完成声明或证据判断的交流。 |
+| `md/development/TESTING.md` | Host、Feature、SDK及其数据、算法、渲染、线程、构建或安装的测试与验收，以及对应真实数据、性能、用例工程和安装态验证。 | 仅文档路径、编码或排版的静态核对，且不涉及上述测试或业务验收。 |
+| `md/development/FEATURE_DEVELOPMENT.md` | 开发、扩展、调研或审查具体Feature，或为其修改Host API、Feature SPI、CMake、测试；Host新增业务能力的CMake接入。 | 与Feature无关的Host私有修复、普通文档或独立应用修改，且不涉及Host新增业务的CMake接入。 |
+| `md/development/SDK_DELIVERY.md` | 修改CMake、安装、导出或包配置，或涉及SDK构建与交付、公开契约、依赖与运行时闭包、SDK边界授权或验收。 | 仅私有实现或文档维护，不改CMake、安装、导出或包配置，也不涉及SDK契约、交付或边界。 |
+| `md/development/NAMING.md` | 新增、重命名或对外暴露项目类型、函数、变量、字段、枚举或别名；Feature、target、分支或目录命名；明确进行命名审查。 | 沿用现有名称，不新增、重命名或对外暴露对象，也未要求命名审查。 |
+| `md/development/LOOP.md` | 工程任务分类、工作推进、任务进度文件、续接或收尾，以及纯文档、纯注释改动的项目适用细则。 | 非工程对话，或不需项目工作流、记录及纯注释判定的独立问答。 |
+
+**执行顺序**
+
+1. 用UTF-8分段读完常驻规则，取得完整可见正文，直到看到每个文件末尾的 `<!-- 规范文件结束：<相对仓库根路径> -->`。出现乱码、`truncated`或其他截断、省略标记时先补读，未补齐前不依赖该文件规则行动；文件清单或单独读取末行不算读完整个文件。
+2. 按专项索引判断本任务命中的专项，在相关动作前按第1步的方法完整读到结束标记。
+3. 发一条加载确认：列出已读文件及实际看到的结束标记、命中的专项、未命中的专项。
+4. 加载命令只读规范，不在同一工具调用中夹带Git、Paseo、进程检查、写入、配置查询或其他命令。
+5. 此后每次工具调用和回复前，先确认该动作属于当前角色允许的范围；角色职责按 `md/development/core/COLLABORATION.core.md` 第13节执行。
+6. 任务中范围扩大、命中新专项时，在转入新动作前先按第1、2步补读。
 
 > 适用范围：MVVCVTK 仓库根目录及全部子目录。子目录里更近的 `AGENTS.md` 只覆盖它明确声明的规则。
 >
