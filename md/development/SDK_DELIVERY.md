@@ -448,3 +448,4 @@ component、导出 target、产品库、公开物理头、依赖、runtime、目
 - 未完成项、失败、限制及外部交接条件。
 
 报告不进入 ZIP；数量、指标和异常保留必要解释，不复制逐文件哈希或完整环境。
+<!-- 规范文件结束：md/development/SDK_DELIVERY.md -->

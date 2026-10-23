@@ -186,3 +186,4 @@
 - 状态处于 candidate、pending、active、applied 还是 published？
 
 - 是否制造了第二套同义词？是否改变了 API、SPI、target 或 SDK 契约？
+<!-- 规范文件结束：md/development/NAMING.md -->

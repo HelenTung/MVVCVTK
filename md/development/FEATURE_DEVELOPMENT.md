@@ -531,3 +531,4 @@ SDK 准入及安装、导出和发布配置的限制按 `SDK_DELIVERY.md` 第 3�
 - 想通过删除或放宽有效测试来掩盖产品错误。
 
 重新设计涉及的方向选择按根 `AGENTS.md` 第 13.2 节处理；建议优先考虑缩小 Feature、收敛公开面、明确所有权和失败事务，避免再加一层抽象。
+<!-- 规范文件结束：md/development/FEATURE_DEVELOPMENT.md -->

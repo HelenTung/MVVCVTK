@@ -81,3 +81,4 @@
 - 位于哪一层，是否跨边界？
 
 - 去掉所在的文件路径，名字是否仍然能看懂？
+<!-- 规范文件结束：md/development/core/ENGINEERING.core.md -->
