@@ -10,25 +10,25 @@
 - `md/development/core/AGENTS.core.md`
 - `md/development/core/COLLABORATION.core.md`
 - `md/development/core/LOOP.core.md`
+- `md/development/core/TESTING.core.md`
 - `md/development/platform/paseo/DISPATCH.md`
 - `md/development/platform/runtime/CLAUDE_CODE.md`
 - `md/development/platform/runtime/CODEX.md`
 
 **专项正文索引**
 
-任务明确要求理解、审查或修改某份专项正文时直接命中；其他情况按下表判断。排除条件只在未命中触发条件时适用。文件间的导航引用本身不触发全部专项；相关动作实际依赖某专项条款时，须先完整读取该专项。
+任务明确要求理解、审查或修改某份专项正文时直接命中；仅对文件作行数或字面匹配统计不属于理解或审查正文。其他情况按下表判断，排除条件只在未命中触发条件时适用。文件间的导航引用本身不触发全部专项；常驻已自足定义的固定动作按常驻执行，不因同主题导航重复加载；相关动作实际依赖专项独有条款时，仍须先完整读取该专项。任务转入修改、工程语义判断、额外 Git 操作、产物安排或其他新动作时，按执行顺序第6步重新判断并补读。
 
 | 专项路径 | 触发条件 | 排除条件 |
 | --- | --- | --- |
-| `md/development/core/ENGINEERING.core.md` | 对具体工程资产作事实取证、调研或审查，制定或执行修改、风险判级，或涉及代码、状态与生命周期、性能、技能与图谱、命名语义的工程判断。 | 纯闲聊或泛技术问答，不作具体工程资产的事实、修改或风险判断。 |
-| `md/development/core/GIT_WORKFLOW.core.md` | Git现状核对、暂存、提交、fetch、分支与工作树选择、集成、合并或删除、baseline写入、规范初始化或文档维护位置判断。 | 不进行Git操作，也不涉及分支、工作树、集成、删除、baseline写入或规范初始化。 |
-| `md/development/GIT_WORKFLOW.md` | Git、分支、工作树、合并、发行、删除或清理的项目实施流程，以及临时输出与非系统盘存放安排。 | 无Git、工作树与分支、集成与清理或临时输出安排的任务。 |
-| `md/development/core/TESTING.core.md` | 测试、验证或验收（含文档静态验证）、完成声明、用例有效性、证据口径与复用、失败处理或恢复。 | 不作测试、验证、验收、完成声明或证据判断的交流。 |
+| `md/development/core/ENGINEERING.core.md` | 调研或审查代码、构建或依赖配置、脚本、接口、状态与生命周期、性能、算法或几何、命名语义，并据此判断工程行为、正确性、边界或风险；制定或执行工程资产修改（含文档与纯注释）、进行风险判级；维护或使用技能、图谱来形成上述工程判断。 | 仅做路径存在性、文件清单、行数或字面匹配统计、原文摘录，不解释工程行为、不评价正确性、边界或风险，也不制定或执行修改；纯闲聊或泛技术问答。 |
+| `md/development/core/GIT_WORKFLOW.core.md` | 开工固定四项之外的 Git 现状核对、diff、log 或 fetch；暂存、提交、分支与工作树选择、集成、合并或删除、baseline 写入、规范初始化或文档维护位置判断。 | 仅在已指定工作树执行常驻 LOOP.core 第0节固定四项检查，不作其他 Git 操作，也不作分支、工作树或文档维护位置判断。 |
+| `md/development/GIT_WORKFLOW.md` | 需要项目特有的 Git 实施流程，或涉及项目分支与工作树布局或选择、集成、合并、发行、删除清理、构建或测试输出隔离、stage、clean-room、SDK 产物或其他任务产物的位置安排。 | 仅执行常驻规定的固定四项检查、就地读取检索或内存统计，以及按常驻要求设置 TEMP/TMP；不安排任务报告、日志或其他产物，不涉及上述项目实施流程。 |
 | `md/development/TESTING.md` | Host、Feature、SDK及其数据、算法、渲染、线程、构建或安装的测试与验收，以及对应真实数据、性能、用例工程和安装态验证。 | 仅文档路径、编码或排版的静态核对，且不涉及上述测试或业务验收。 |
 | `md/development/FEATURE_DEVELOPMENT.md` | 开发、扩展、调研或审查具体Feature，或为其修改Host API、Feature SPI、CMake、测试；Host新增业务能力的CMake接入。 | 与Feature无关的Host私有修复、普通文档或独立应用修改，且不涉及Host新增业务的CMake接入。 |
 | `md/development/SDK_DELIVERY.md` | 修改CMake、安装、导出或包配置，或涉及SDK构建与交付、公开契约、依赖与运行时闭包、SDK边界授权或验收。 | 仅私有实现或文档维护，不改CMake、安装、导出或包配置，也不涉及SDK契约、交付或边界。 |
-| `md/development/NAMING.md` | 新增、重命名或对外暴露项目类型、函数、变量、字段、枚举或别名；Feature、target、分支或目录命名；明确进行命名审查。 | 沿用现有名称，不新增、重命名或对外暴露对象，也未要求命名审查。 |
-| `md/development/LOOP.md` | 工程任务分类、工作推进、任务进度文件、续接或收尾，以及纯文档、纯注释改动的项目适用细则。 | 非工程对话，或不需项目工作流、记录及纯注释判定的独立问答。 |
+| `md/development/NAMING.md` | 新增、重命名或对外暴露项目类型、函数、变量、字段、枚举、常量、宏、构建开关或别名；Feature、target、分支或目录命名；明确进行命名审查。 | 沿用现有名称，不新增、重命名或对外暴露对象，也未要求命名审查。 |
+| `md/development/LOOP.md` | 只写文档或纯注释改动的项目分类（Markdown 范围、CMake 注释例外），或需要判断这些项目分类细则在开发、实验、续接或收尾中的适用性。 | 仅只读任务，或已确定属于非注释代码、构建配置或脚本的开发、验证、续接或收尾，且不涉及本文件的项目分类细则；通用工作推进与记录按常驻 LOOP.core 执行。 |
 
 **执行顺序**
 
@@ -83,6 +83,7 @@
 | 项目工作推进规范 | md/development/LOOP.md |
 | 本项目现行规范路径示例 | 根 `AGENTS.md`、`md/development/*.md` 及实际被会话加载生效的其他规范 |
 | 临时位置存放策略 | 工作树、临时文件与日志使用非系统盘；具体位置见 md/development/GIT_WORKFLOW.md 第 2.1、2.3 节 |
+| 临时环境变量 | 执行构建、测试和脚本前，把 `TEMP` 和 `TMP` 指向本工作树的 `out/tmp`（不存在就先创建），让 CMake、MSBuild、CTest 等工具的临时文件不写到系统盘。 |
 | 短文件名映射 | `GIT_WORKFLOW.md` → `md/development/GIT_WORKFLOW.md`；`LOOP.md` → `md/development/LOOP.md`；`NAMING.md` → `md/development/NAMING.md`；`FEATURE_DEVELOPMENT.md` → `md/development/FEATURE_DEVELOPMENT.md`；`TESTING.md` → `md/development/TESTING.md`；`SDK_DELIVERY.md` → `md/development/SDK_DELIVERY.md` |
 ## 1. 优先级与规则强度
 
@@ -136,7 +137,7 @@
 
 ## 6. Git 权限一览
 
-常规提交权限、主干与远端操作权限、提交前的暂存边界统一见 md/development/core/GIT_WORKFLOW.core.md 第 0 节；提交范围与说明见其第 3 节。
+开工固定四项检查及其权限见 md/development/core/LOOP.core.md 第 0 节；其他 Git 权限、主干与远端操作权限、提交前的暂存边界见 md/development/core/GIT_WORKFLOW.core.md 第 0 节；提交范围与说明见其第 3 节。
 
 本项目存放位置见 md/development/GIT_WORKFLOW.md 第 2.1、2.3 节，清理与笔记归档见其第 6.6 节。
 
@@ -294,7 +295,7 @@ CMake 修改合入目标工作树（包括用户日常打开的工作树）后�
 | 层级 | 模型与思考强度 |
 | --- | --- |
 | 协调者 | — |
-| 执行者 | Codex `gpt-6.1-sol`，思考强度 max |
+| 执行者 | Codex `gpt-6.1-sol`，思考强度 high |
 | 子代理 | Codex `gpt-6-luna`，思考强度 low |
 
 通用定义见 md/development/core/COLLABORATION.core.md 第 13.1 节。

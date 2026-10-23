@@ -6,7 +6,7 @@
 
 | 操作 | 默认权限 |
 | --- | --- |
-| 只读检查、diff、log、fetch | 可以直接执行 |
+| 除 md/development/core/LOOP.core.md 第0节固定四项检查外的只读检查、diff、log、fetch | 可以直接执行 |
 | **非主分支上本任务的 add/commit** | **可以直接执行**，须只含本任务内容 |
 | 已批准集成批次内的 baseline 合并与冲突修复 | 可以直接执行，按 md/development/core/GIT_WORKFLOW.core.md 逐步验证 |
 | 主干实现的提交与合并 | 授权按 md/development/core/LOOP.core.md 第 14.1 节 |
