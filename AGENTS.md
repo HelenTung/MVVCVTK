@@ -1,6 +1,30 @@
 # AGENTS.md
 
-> **开工加载入口**：先读取 `md/development/core/AGENTS.core.md` 第 0 节并完成其正文加载要求，再开展工程动作。下方文件分工只是导航，不能代替对应正文的加载。
+## 开工闸门（唯一定义）
+
+本节是开工前规范读取与加载确认的唯一定义，按顺序完成以下四步。规范路径均相对仓库根，必须读取全部 16 份文件：
+
+- `AGENTS.md`
+- `md/development/core/AGENTS.core.md`
+- `md/development/core/ENGINEERING.core.md`
+- `md/development/core/LOOP.core.md`
+- `md/development/core/GIT_WORKFLOW.core.md`
+- `md/development/core/COLLABORATION.core.md`
+- `md/development/core/TESTING.core.md`
+- `md/development/platform/paseo/DISPATCH.md`
+- `md/development/platform/runtime/CLAUDE_CODE.md`
+- `md/development/platform/runtime/CODEX.md`
+- `md/development/GIT_WORKFLOW.md`
+- `md/development/NAMING.md`
+- `md/development/FEATURE_DEVELOPMENT.md`
+- `md/development/TESTING.md`
+- `md/development/SDK_DELIVERY.md`
+- `md/development/LOOP.md`
+
+1. 每个文件用 UTF-8 分段读取，取得完整可见正文，直到看到该文件末尾的固定结束标记 `<!-- 规范文件结束：<相对仓库根路径> -->`；路径引用、文件清单或单独读取末行不算读完整个文件。
+2. 出现乱码、`truncated` 或其他截断、省略标记时，先补读缺失区间；未补齐前，不依赖该文件的规则行动。
+3. 全部读完后，先发一条加载确认，逐项列出每个文件的相对仓库根路径及实际看到的结束标记。
+4. 发出加载确认后，才判断角色权限、调用 Paseo 或做其他动作。
 
 > 适用范围：MVVCVTK 仓库根目录及全部子目录。子目录里更近的 `AGENTS.md` 只覆盖它明确声明的规则。
 >
@@ -293,3 +317,4 @@ CMake 修改合入目标工作树（包括用户日常打开的工作树）后�
 协调者给用户的裁决、通知与回复模板见 md/development/core/LOOP.core.md 第 14 节；执行者报告与子代理回执见 md/development/core/COLLABORATION.core.md 第 13.3、13.4 节。
 
 本项目报告中的主要修改还须说明 CMake 接入方式及 SDK 边界实际变化；SDK 具体边界引用 md/development/SDK_DELIVERY.md 第 3 节。
+<!-- 规范文件结束：AGENTS.md -->

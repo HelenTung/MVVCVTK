@@ -366,3 +366,4 @@ git branch -d "<devBranch>"
 ## 7. 主干上的纯文档维护
 
 只写文档任务按 md/development/core/LOOP.core.md 开头的任务分类选择工作树，是 md/development/core/GIT_WORKFLOW.core.md 第 2.1 节派生工作树要求的例外。用户明确要求的规范和说明维护，默认直接在主工作树的主分支上进行。主干上的 commit 仍然需要授权。按 md/development/core/ENGINEERING.core.md 第 11 节及项目风险细则的 L0 要求核对，工作与记录方式见 md/development/core/LOOP.core.md。发现超出 md/development/core/LOOP.core.md 开头只写文档任务范围的工作时，这部分另外按开发分支流程处理，不夹带在文档维护里。
+<!-- 规范文件结束：md/development/core/GIT_WORKFLOW.core.md -->

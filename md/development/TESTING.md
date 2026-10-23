@@ -583,3 +583,4 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 ### 19.3. 职责与协作
 
 负责人在已确定的任务范围内安排测试并对测试结论负责；方向决策按根 `AGENTS.md` 第 13.2 节执行。实现者提供可运行入口，复核者核对证据与边界。L3 和关键 SDK 边界需要独立复核。skill、图谱和多 Agent 规则见根 `AGENTS.md` 第 13 节；工具报告或子代理 摘要不能代替本次必需验证。
+<!-- 规范文件结束：md/development/TESTING.md -->

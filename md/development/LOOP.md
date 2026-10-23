@@ -27,3 +27,4 @@
 ## 6. `TASK_LOOP.md` 模板
 
 通用定义见 md/development/core/LOOP.core.md 第 6 节。
+<!-- 规范文件结束：md/development/LOOP.md -->

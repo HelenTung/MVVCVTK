@@ -163,3 +163,4 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 ## 7. 主干上的纯文档维护
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 7 节。
+<!-- 规范文件结束：md/development/GIT_WORKFLOW.md -->

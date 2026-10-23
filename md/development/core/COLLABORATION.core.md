@@ -147,3 +147,4 @@
 ## 14. 工程提问转报
 
 工程裁决、通知、必要输入阻塞与协调者给用户的回复模板，唯一定义见 md/development/core/LOOP.core.md 第 14 节。执行者的向上报告与子代理回执分别按第 13.3、13.4 节，不使用用户回复模板。
+<!-- 规范文件结束：md/development/core/COLLABORATION.core.md -->
