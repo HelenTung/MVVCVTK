@@ -10,7 +10,7 @@
 
 新名称按以下顺序决定：同一类或同一接口族已有的写法 → 同层同动作的既有名称 → 本文 → 一般 C++ 习惯。
 
-通用定义见 core/ENGINEERING.core.md 第 20 节。
+通用定义见 md/development/core/ENGINEERING.core.md 第 20 节。
 
 - 公开 SDK 符号的任何重命名、别名或迁移都属于 SDK 契约变化，需要针对具体符号的授权。
 
@@ -75,7 +75,7 @@
 
 结构是：**动词 + 核心对象 + 必要限定**，例如 `BuildSession`、`GetImageReadChunk`、`SetCurrentFromPending`、`SendOwnerComplete`。
 
-通用定义见 core/ENGINEERING.core.md 第 20 节。
+通用定义见 md/development/core/ENGINEERING.core.md 第 20 节。
 
 - `By` 表示查找键，`From` 表示来源，`To` 表示目标，`For` 表示适用对象。
 
@@ -179,7 +179,7 @@
 
 新增或改名之前，确认能回答以下问题：
 
-通用定义见 core/ENGINEERING.core.md 第 20 节。
+通用定义见 md/development/core/ENGINEERING.core.md 第 20 节。
 
 - 返回值表示接纳、最终结果，还是简单的成功/失败？
 

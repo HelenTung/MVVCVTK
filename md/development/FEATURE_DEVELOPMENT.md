@@ -109,7 +109,7 @@ Qt 由接收方宿主提供，Feature 不负责 Qt 的版本、部署、DLL 或�
 
 ### 4.5 第三方供应商
 
-引入或扩展非公共的第三方 SDK 之前，先确认：为什么 VTK/OpenCV/标准库不够用；Debug/Release、x64、MSVC 运行库、iterator debug level 是否一致；public/private 链接传播；运行时定位、校验和错误语义（不做 fallback）；固定宽度的 POD/C 边界是否足以隔离 ABI；失败时能否保持原状态并释放资源。第三方依赖变化按 core/ENGINEERING.core.md 第 11 节判级，裁决与通知按 core/LOOP.core.md 第 14.1 节；涉及 SDK 边界时另按交付规范第 3 节核对。
+引入或扩展非公共的第三方 SDK 之前，先确认：为什么 VTK/OpenCV/标准库不够用；Debug/Release、x64、MSVC 运行库、iterator debug level 是否一致；public/private 链接传播；运行时定位、校验和错误语义（不做 fallback）；固定宽度的 POD/C 边界是否足以隔离 ABI；失败时能否保持原状态并释放资源。第三方依赖变化按 md/development/core/ENGINEERING.core.md 第 11 节判级，裁决与通知按 md/development/core/LOOP.core.md 第 14.1 节；涉及 SDK 边界时另按交付规范第 3 节核对。
 
 ## 5. 目录与公开面
 
@@ -214,7 +214,7 @@ Feature 读取 Host 数据并可能发布新状态时，默认流程是：
 
 ### 6.5 破坏性收敛
 
-破坏性收敛按根 `AGENTS.md` 第 8 节执行。需要外部迁移窗口时，按 core/LOOP.core.md 第 14.1 节决定兼容范围、移除条件和验证方式；涉及 SDK 边界时核对独立授权。
+破坏性收敛按根 `AGENTS.md` 第 8 节执行。需要外部迁移窗口时，按 md/development/core/LOOP.core.md 第 14.1 节决定兼容范围、移除条件和验证方式；涉及 SDK 边界时核对独立授权。
 
 ## 7. 生命周期、线程与所有权
 
@@ -330,7 +330,7 @@ input binding 使用唯一稳定的 Feature ID 和明确的目标 View 集合；
 
 ### 9.5 渲染效率
 
-渲染资源复用与空闲行为见根 `AGENTS.md` 第 10.5 节；刷新请求的合并语义见 core/ENGINEERING.core.md 第 10.4 节，显示质量的显式策略见本文件第 9.2 节。
+渲染资源复用与空闲行为见根 `AGENTS.md` 第 10.5 节；刷新请求的合并语义见 md/development/core/ENGINEERING.core.md 第 10.4 节，显示质量的显式策略见本文件第 9.2 节。
 
 ## 10. CMake 与 SDK 接入
 
@@ -420,7 +420,7 @@ SDK 准入及安装、导出和发布配置的限制按 `SDK_DELIVERY.md` 第 3�
 **公共契约**
 - [ ] 列出要新增或修改的全部公开头、类型和方法，说明每个字段为什么必要；
 - [ ] 引入 VTK 类型时说明为什么不能用值类型；Qt、DefX 和私有类型不进入公开签名；
-- [ ] 破坏性变化的判级、决定与通知按 core/LOOP.core.md 第 14.1 节完成；涉及 SDK 边界时核对具体授权；兼容与旧入口处理引用 core/ENGINEERING.core.md 第 8 节。
+- [ ] 破坏性变化的判级、决定与通知按 md/development/core/LOOP.core.md 第 14.1 节完成；涉及 SDK 边界时核对具体授权；兼容与旧入口处理引用 md/development/core/ENGINEERING.core.md 第 8 节。
 
 **依赖与构建**
 - [ ] 不依赖 Host 私有 include，不依赖其他 Feature，Host 也不新增对具体 Feature 的依赖；
@@ -428,7 +428,7 @@ SDK 准入及安装、导出和发布配置的限制按 `SDK_DELIVERY.md` 第 3�
 - [ ] 新功能列出 CMake 接入方案（要改的文件和配置项，或者沿用哪个 target）、受影响的 target 和验证方式；
 - [ ] Feature 关闭时 Host 和其他 Feature 的预期明确；
 - [ ] 新 Feature 的业务名、target、alias、开关和测试方案明确，SDK 准入写明“未批准、不安装”或已批准的最小变化；
-- [ ] 第三方变化的来源、配置矩阵、私有 bridge、runtime 定位和失败策略已明确；决定与通知按 core/LOOP.core.md 第 14.1 节完成，SDK 边界授权另行核对。
+- [ ] 第三方变化的来源、配置矩阵、私有 bridge、runtime 定位和失败策略已明确；决定与通知按 md/development/core/LOOP.core.md 第 14.1 节完成，SDK 边界授权另行核对。
 
 **生命周期与线程**
 - [ ] Attach、重复 Attach、部分失败、Detach、重复 Detach、Stop、析构的语义明确；
