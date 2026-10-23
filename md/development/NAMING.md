@@ -4,7 +4,7 @@
 >
 > 目标：只看符号和所在类型，就能判断它是什么、做什么、是否跨边界、是否改变状态、处在哪个生命周期阶段。
 
-> 通用定义按以下同号转接；本文件保留本项目的具体实施要求。
+> 通用定义按各节引用转接；本文件保留本项目的具体实施要求。
 
 ## 1. 依据与迁移
 
@@ -74,8 +74,6 @@
 ## 4. 函数名
 
 结构是：**动词 + 核心对象 + 必要限定**，例如 `BuildSession`、`GetImageReadChunk`、`SetCurrentFromPending`、`SendOwnerComplete`。
-
-通用定义见 md/development/core/ENGINEERING.core.md 第 20 节。
 
 - `By` 表示查找键，`From` 表示来源，`To` 表示目标，`For` 表示适用对象。
 
@@ -178,8 +176,6 @@
 ## 10. 新名称自查
 
 新增或改名之前，确认能回答以下问题：
-
-通用定义见 md/development/core/ENGINEERING.core.md 第 20 节。
 
 - 返回值表示接纳、最终结果，还是简单的成功/失败？
 

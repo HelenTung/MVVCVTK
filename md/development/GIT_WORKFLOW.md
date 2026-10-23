@@ -2,7 +2,7 @@
 
 > 本文件是项目实施细则与通用规则入口。权限总表见根 `AGENTS.md` 第 6 节；集成时的测试范围见 `TESTING.md` 第 3.2、19.2 节。
 
-> 通用定义按以下同号转接；本文件保留本项目的具体实施要求。
+> 通用定义按各节引用转接；本文件保留本项目的具体实施要求。
 
 ## 1. 基本约定
 
@@ -148,7 +148,7 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 6.6 节。
 
-- **baseline 临时输出**：本条只适用于第 2.1 节规定的发行与合并，只回收本任务独占的临时目录。baseline 原有的 preset 构建目录、用户日常打开的解决方案和共享输出按原用途保留。
+- **baseline 保留对象**：本项目需按原用途保留的对象包括 preset 构建目录、用户日常打开的解决方案和共享输出；清理条件见[baseline 临时输出规则](core/GIT_WORKFLOW.core.md#baseline-output-cleanup)。
 
 ### 6.7. 过时 SDK、构建与对应输出
 
