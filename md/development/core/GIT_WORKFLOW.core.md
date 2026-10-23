@@ -228,7 +228,7 @@ git -C "<pendingWorktree>" merge-base --is-ancestor "<verifiedIntegrationSHA>" H
 
 - B 吸收 E1 之后，B 里已经包含 A。之后如果单独把 B 合入主干，必须披露 A 的内容，不能当作只有 B。
 
-- 冲突修复只覆盖本批次授权的范围。涉及超出任务既定范围的业务或依赖、契约时，暂停这一部分并按 md/development/core/LOOP.core.md 第 14.1 节裁决；不将 L2 本身变成额外授权门禁。
+- 冲突修复只覆盖本批次授权的范围。涉及超出任务既定范围的业务或依赖、契约时，暂停这一部分并按 md/development/core/LOOP.core.md 第 14.1 节裁决；不将 L2 决定级本身变成额外授权门禁。
 
 ### 4.6. 失败与阻塞
 
@@ -365,5 +365,5 @@ git branch -d "<devBranch>"
 
 ## 7. 主干上的纯文档维护
 
-只写文档任务按 md/development/core/LOOP.core.md 开头的任务分类选择工作树，是 md/development/core/GIT_WORKFLOW.core.md 第 2.1 节派生工作树要求的例外。用户明确要求的规范和说明维护，默认直接在主工作树的主分支上进行。主干上的 commit 仍然需要授权。按 md/development/core/ENGINEERING.core.md 第 11 节及项目风险细则的 L0 要求核对，工作与记录方式见 md/development/core/LOOP.core.md。发现超出 md/development/core/LOOP.core.md 开头只写文档任务范围的工作时，这部分另外按开发分支流程处理，不夹带在文档维护里。
+只写文档任务按 md/development/core/LOOP.core.md 开头的任务分类选择工作树，是 md/development/core/GIT_WORKFLOW.core.md 第 2.1 节派生工作树要求的例外。用户明确要求的规范和说明维护，默认直接在主工作树的主分支上进行。主干上的 commit 仍然需要授权。按 md/development/core/ENGINEERING.core.md 第 11 节及项目风险细则的适用等级要求核对，工作与记录方式见 md/development/core/LOOP.core.md。发现超出 md/development/core/LOOP.core.md 开头只写文档任务范围的工作时，这部分另外按开发分支流程处理，不夹带在文档维护里。
 <!-- 规范文件结束：md/development/core/GIT_WORKFLOW.core.md -->
