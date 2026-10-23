@@ -2,13 +2,15 @@
 
 > 加载范围与角色身份见 md/development/core/AGENTS.core.md 第 0 节；文件路径以规范包根为基准。参数只承接目录、格式、命令、模型和预算等具体值；本文件不要求任何特定项目架构。
 
+<a id="load-startup"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-startup -->
 ## 0. 任务分类与开工
 
 工程开工按以下顺序执行。工作树选择与 baseline 授权按 md/development/core/GIT_WORKFLOW.core.md 第 2.1 节执行。
 
 **第一步：完成开工闸门。** 规范读取、补读、加载确认与后续动作的先后顺序，统一按根 AGENTS.md 的“开工闸门”执行。
 
-**第二步：核对现状。** 必须先看清现状：Git 仓库使用以下四项检查，这四项固定只读检查可以直接执行，其权限由本节定义；其他资产按实际情况核对，不虚构 Git 仓库。只在已指定工作树执行这四项，不因此加载 Git 专项；超出四项的 Git 操作，以及分支、工作树、baseline 或文档维护位置判断，先按根开工闸门完整读取相应 Git 专项。
+**第二步：核对现状。** 必须先看清现状：Git 仓库使用以下四项检查，这四项固定只读检查可以直接执行，其权限由本节定义；其他资产按实际情况核对，不虚构 Git 仓库。只在已指定工作树执行这四项，不因此加载 Git 专项；超出四项的 Git 操作，以及分支、工作树、baseline 或文档维护位置判断，先按根开工闸门读取该动作对应的 Git 单元。
 
 ```text
 git rev-parse --show-toplevel
@@ -42,7 +44,10 @@ git diff --cached --stat
 - **baseline 上的发行与合并**：适用范围见 md/development/core/GIT_WORKFLOW.core.md 第 2.1 节。不建立 任务进度文件，收尾时也不生成；恢复信息只写在会话报告中，包括当前提交、改动、最近一次验证和下一步，收尾只按本文件第 3 节写归纳笔记。
 
 - **记录与授权**：记录方式不改变文档修改位置和操作权限，仍须遵守本文件第 7 节和 md/development/core/GIT_WORKFLOW.core.md 的授权边界。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-startup -->
 
+<a id="load-startup-check"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-startup-check -->
 <a id="startup-check"></a>
 
 ### 0.1. 会话启动自检
@@ -52,7 +57,10 @@ git diff --cached --stat
 实际设置以运行时可信元数据或派发方已经核实的实际快照为依据，不能拿创建请求参数代替实际结果。自身快照由派出自己的上级核实并提供，不把它变成每次都要反问上级的固定流程，也不为自检越权查询其他会话。发现不一致或无法核实，先向直接上级报告，暂停依赖正确配置的工程动作；纠正并重新核实后再开工。该自检不改变授权门禁。
 
 执行者与子代理回执第一行写“启动自检：通过 / 未通过 / 未核实”，并简述角色、实际模型/思考强度/模式、必需配置核验结果与证据来源。未验证的配置如实标为未核实，不能把文件声明当成运行态生效。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-startup-check -->
 
+<a id="load-work-loop"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-work-loop -->
 <a id="work-loop"></a>
 
 ## 1. 工作方式
@@ -66,7 +74,10 @@ Loop 是明确目标、执行、核对、处理缺口和收尾的工作方式，
 执行者根据当前缺口调查、修改或验证。发现问题就修正原因，回到出问题的环节，补齐受影响的证据；已有的有效证据直接复用，没有新依据时不重复同一个失败动作。满足验收范围后交回协调者；缺少必要输入、需要新增授权或返工轮次用完时，报告当前结果和具体阻塞。验证范围和证据复用见 md/development/core/TESTING.core.md 第 3.2 节、md/development/core/TESTING.core.md 第 19.2 节，职责与报告见 md/development/core/COLLABORATION.core.md 第 13.3 节。
 
 形成可以独立审查的改动切片后，按 Git 权限提交；未完成的验证如实写明。提交规定见 md/development/core/GIT_WORKFLOW.core.md 第 3 节。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-work-loop -->
 
+<a id="load-task-record"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-task-record -->
 <a id="task-record"></a>
 
 ## 2. 任务进度文件规则
@@ -94,7 +105,10 @@ Loop 是明确目标、执行、核对、处理缺口和收尾的工作方式，
 - 最小恢复信息写在“当前状态”：当前分支和提交、未提交改动的归属、最近一次有效验证及必要的启动、环境恢复或复现命令；已完成任务的详细证据通过“证据索引”的位置读取，需要脚本时沿用现有 脚本工具。
 
 - 已有任务文档的收尾处理见本文件第 3 节。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-task-record -->
 
+<a id="load-dispatch-record"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-dispatch-record -->
 <a id="dispatch-dag-record"></a>
 
 ### 2.1. 派发前的 DAG 与批次记录（唯一定义）
@@ -118,11 +132,17 @@ Loop 是明确目标、执行、核对、处理缺口和收尾的工作方式，
 派发后由执行者及时汇报实际会话和配置核实结果；任务完成、失败或依赖变化时，各层更新自己的当前记录，任务进度文件仍只由协调者按第 2 节更新。由 md/development/core/COLLABORATION.core.md 第 13.1 节确定的上级重新评估就绪任务，再派发。协调者验收时对照实际派发与结果，检查依赖、批次、并发、配置核实和归档是否相符；缺记录或矛盾须退回补查，发现遗漏如实报告偏离，不能补造事前计划。
 
 派发记录的已填表单见项目配置“协作示例材料”，不另定义义务。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-dispatch-record -->
 
+<a id="load-handoff"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-handoff -->
 ### 2.2. 持久任务状态与新会话接手
 
 需要任务进度文件的目标，按第 2 节保留当前状态与证据索引；协调者层级 DAG 及执行者下级记录的载体见第 2.1 节，不依赖某个会话的记忆。不建文件的任务仍按第 0 节使用适用工作记录，不新增分类例外。新会话接手本目标时，规范加载与确认按根 AGENTS.md 的“开工闸门”执行，再读当前记录并按第 0.1 节自检后推进；核对现有结果与缺口，不从旧对话摘要推定完成或重启已结束任务。执行者把状态变化汇报给协调者，任务进度文件的维护只按第 2 节“写入者”。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-handoff -->
 
+<a id="load-record-transfer"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-record-transfer -->
 <a id="record-handoff"></a>
 
 ## 3. 存放与写回
@@ -162,7 +182,10 @@ Loop 是明确目标、执行、核对、处理缺口和收尾的工作方式，
 - 写回记录不构成清理授权；分支和工作树删除仍遵守 md/development/core/GIT_WORKFLOW.core.md 第 6 节的授权和保护条件。
 
 收尾记录的填写示例见项目配置“协作示例材料”，不改变本节的计数与转移规则。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-record-transfer -->
 
+<a id="load-continuation"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-continuation -->
 <a id="task-continuation"></a>
 
 ## 4. 续接与优先级
@@ -190,7 +213,10 @@ Loop 是明确目标、执行、核对、处理缺口和收尾的工作方式，
 - baseline 上的发行与合并按开头的分类用会话报告续接，收尾记录按本文件第 3 节留存。
 
 协调者最新的派发内容优先于记录中的“下一步”，执行者按新派发推进并汇报，协调者更新适用的任务进度文件；不建文件的任务由执行者更新会话回执或指定工作记录。方向决策与派发职责见 md/development/core/COLLABORATION.core.md 第 13.2 节；写回按本文件第 3 节执行，提交按 md/development/core/GIT_WORKFLOW.core.md 第 3 节执行。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-continuation -->
 
+<a id="load-baseline-coordination"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-baseline-coordination -->
 <a id="baseline-coordination"></a>
 
 ## 5. 多协调者
@@ -208,13 +234,19 @@ Loop 是明确目标、执行、核对、处理缺口和收尾的工作方式，
 - 写入过程中发现冲突（例如构建报告文件被占用、Git 拒绝写入、结果被其他会话改动）时，立即停止这一部分，上报所属协调者，不强行继续。
 
 - baseline 冲突由协调者在授权范围内自主仲裁；需要用户裁决或单独授权时，按本文件第 14 节 执行。归属不明的内容保持原样，不扩大他人的写入范围。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-baseline-coordination -->
 
+<a id="load-record-examples"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-record-examples -->
 <a id="task-record-examples"></a>
 
 ## 6. 任务进度文件模板
 
 已填模板见项目配置“协作示例材料”，由协调者按需读取；当前记录的结构仍以第 2 节为准。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-record-examples -->
 
+<a id="load-documents"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-documents -->
 ## 7. 文档规则
 
 本节规定默认的文档工作流；用户对本次任务的分支、文件和操作已有明确指示时，按 md/development/core/AGENTS.core.md 第 1.1 节的优先级执行。
@@ -240,7 +272,10 @@ Loop 是明确目标、执行、核对、处理缺口和收尾的工作方式，
 - 功能实际合入主干后，才在主工作树按最终结果更新相关文档。用户明确要求的纯文档维护，可以按 md/development/core/GIT_WORKFLOW.core.md 第 7 节直接在主工作树上修改；主干上的 commit 仍需要授权。
 
 - 状态要分开说：“实验已集成，文档待主干同步”和“主干已集成，文档已同步”是两种状态。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-documents -->
 
+<a id="load-results"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-results -->
 ### 7.1. 结果文件与报告
 
 - 只写理解、复现、比较和决策需要的信息。普通报告不写绝对路径、文件哈希、机器名、生成时间、工具调用流水或完整环境快照；也不要把这些挪进另建的 metadata/manifest 文件。
@@ -256,11 +291,17 @@ Loop 是明确目标、执行、核对、处理缺口和收尾的工作方式，
 - JSON：只在程序要读取、保存配置或交换数据时生成；必须能直接解析，不用 `NaN`、注释或尾随逗号。
 
 - Markdown：段落内不手动换行；修订时直接替换冲突内容，不追加“补充说明”；不适用的章节直接省略，不写“无”“不适用”。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-results -->
 
+<a id="load-report-routing"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-report-routing -->
 ## 14. 提问与完成报告
 
 本节是裁决、通知与协调者给用户回复的唯一定义；风险按 md/development/core/ENGINEERING.core.md 第 11 节判定，角色分工见 md/development/core/COLLABORATION.core.md 第 13 节。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-report-routing -->
 
+<a id="load-decision-authorization"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-decision-authorization -->
 <a id="decision-authorization"></a>
 
 ### 14.1. 裁决、通知与独立授权
@@ -295,7 +336,10 @@ L0–L3 定义谁来决定，D0、R1–R3 定义变更风险与验证要求，�
 先完成必要调研再提交 L3 裁决或请求独立授权。事实问题中能自行取得的信息由协调者在动作边界内调研或派执行者调研；确实只能由用户提供的必要输入，调研后可由协调者向用户提问，在回复的“待办与风险”中标明“需要你提供”，说明缺什么、影响和下一步。这是取得事实输入，不是把决定交给用户；不虚构输入，只暂停依赖该输入的部分，继续其他可独立推进的工作。
 
 执行者和子代理不直接向用户提问；分别按 md/development/core/COLLABORATION.core.md 第 13.3、13.4 节向上报告需要协调者裁决的事项。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-decision-authorization -->
 
+<a id="load-coordinator-reply"></a>
+<!-- 规范节开始：md/development/core/LOOP.core.md#load-coordinator-reply -->
 ### 14.2. 协调者给用户的回复模板
 
 本模板只用于协调者回复用户；工程触发条件按 md/development/core/AGENTS.core.md 第 0 节执行。执行者向协调者、子代理向执行者的汇报分别按 md/development/core/COLLABORATION.core.md 第 13.3、13.4 节，不使用本模板。
@@ -337,4 +381,6 @@ L0–L3 定义谁来决定，D0、R1–R3 定义变更风险与验证要求，�
 状态行与每个节标题单独成行并加粗。结论为一段话。所有运行环境统一使用扁平版：所有列表只用一层，不用嵌套子项；每项只写一条，以加粗短标签及冒号开头，后接一句或几句完整说明。处理方式中执行者的任务与状态按本节专门要求写在同一条中。是否省略各节只按上述事实条件判断，不把“事项小”或“本轮暂不处理”当作没有内容。进度更新和完成回复都使用本模板，不另设“状态、结论、处理方式、下一步”的四项格式。使用平实、专业、整齐有条理的中文，不用英文缩写；角色编号写作“执行者1”，必要的产品名、文件名、代码标识符、命令、路径、模型名和错误码按 md/development/core/AGENTS.core.md 第 1.3 节原样保留。
 
 协调者在本会话首次按本模板回复用户之前，必须读取[已填回复示例](../../agent-guides/协作记录与回复示例.md#coordinator-reply-example)；可复用本会话已读且未变化的该示例，示例与历史材料不定义当前义务、任务状态或额外授权。
+<!-- 规范节结束：md/development/core/LOOP.core.md#load-coordinator-reply -->
+
 <!-- 规范文件结束：md/development/core/LOOP.core.md -->

@@ -2,6 +2,8 @@
 
 > 加载范围与角色身份见 md/development/core/AGENTS.core.md 第 0 节；文件路径以规范包根为基准。参数只承接目录、格式、命令、模型和预算等具体值；本文件不要求任何特定项目架构。
 
+<a id="load-permissions"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-permissions -->
 ## 0. Git 权限
 
 | 操作 | 默认权限 |
@@ -20,7 +22,10 @@
 - 不回退、不格式化与本任务无关的改动。
 
 提交说明按本文件第 3 节 执行；删除条件见本文件第 6 节。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-permissions -->
 
+<a id="load-baselines"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-baselines -->
 ## 1. 基本约定
 
 具体条款见以下子节。
@@ -57,11 +62,17 @@ baseline 树指任务从中派生、或者要合回去的那棵工作树，可�
 分支集成任务按需记录这些字段；`devStartCommit` 的记录见本文件第 2.1 节。字段放在会话或任务记录中，不另建登记文件；记录方式见 md/development/core/LOOP.core.md。文中同名的尖括号占位符沿用表中含义。
 
 `<verifiedIntegrationSHA>` 是当前已验证的集成提交 SHA。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-baselines -->
 
+<a id="load-worktrees"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-worktrees -->
 ## 2. 工作树
 
 具体条款见以下子节。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-worktrees -->
 
+<a id="load-worktree-create"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-worktree-create -->
 ### 2.1. 目录与创建
 
 - **工作树选择**：验证、开发、构建和测试类工作一律新建派生工作树。只读和只写文档任务不建树，分类按 md/development/core/LOOP.core.md 执行，纯文档维护见本文件第 7 节。
@@ -131,7 +142,10 @@ git worktree add "<worktreePath>" "<devBranch>"
 ```
 
 创建或重新挂载后，用 `git worktree list --porcelain` 核对分支和 HEAD。各工作树共享分支引用，不要从别的目录移动、reset 或删除正在使用的分支。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-worktree-create -->
 
+<a id="load-rule-init"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-rule-init -->
 ### 2.2. 规范文件的初始化
 
 - 规范文件随基准提交正常检出，不另外复制。
@@ -141,7 +155,10 @@ git worktree add "<worktreePath>" "<devBranch>"
 - 目标文件已存在但内容不同、来源不可读或版本无法确认时，保留原文件并报告，不覆盖。不用软链接、修改 ignore 或隐藏 index 标志绕过检查。
 
 - 初始化之后，规范文件在这个工作树里默认只读；维护按 md/development/core/LOOP.core.md 第 7 节执行，优先级按 md/development/core/AGENTS.core.md 第 1.1 节执行。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-rule-init -->
 
+<a id="load-output-isolation"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-output-isolation -->
 <a id="output-isolation"></a>
 
 ### 2.3. 构建隔离
@@ -153,7 +170,10 @@ git worktree add "<worktreePath>" "<devBranch>"
 - **临时输出**：PNG、CSV 和日志默认放在派生工作树的 临时输出目录 下，随工作树删除。本文件第 2.1 节规定的发行与合并可以使用 baseline 的输出目录；收尾回收范围按本文件第 6.6 节执行，删除失败按本文件第 6.4 节处理。
 
 - 用户明确要求保留输出时，由协调者在派发中写明保留文件和位置。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-output-isolation -->
 
+<a id="load-commit"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-commit -->
 ## 3. 开发分支上的提交
 
 - 一个分支只做已声明的任务，不顺带吸收别的功能、格式化或历史清理。
@@ -167,7 +187,10 @@ git worktree add "<worktreePath>" "<devBranch>"
 - 本地提交的许可不包括 push、tag、release、PR、主干提交、无关分支合并、amend 或 rebase。
 
 - **提交说明使用中文**，包括合并提交和冲突修复提交：标题一句话说明做了什么，需要时空一行写正文。代码标识符、文件名、路径、命令和错误码原样保留；不使用 `feat:`、`fix:` 这类英文前缀，也不保留 Git 默认生成的 `Merge branch ...` 英文说明。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-commit -->
 
+<a id="load-integration"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-integration -->
 ## 4. 实验集成
 
 具体条款见以下子节。
@@ -242,7 +265,10 @@ git -C "<pendingWorktree>" merge-base --is-ancestor "<verifiedIntegrationSHA>" H
 | 需要改变批准的分支名单 | 说明原因和继承关系，按 md/development/core/LOOP.core.md 第 14.1 节裁决；不越过用户锁定范围 |
 
 恢复中断的集成前，先核对目标工作树的实际合并状态（是否有未完成的合并、未提交的冲突修复）。不默认 rebase、squash、cherry-pick、自动 stash 或 reset。中止合并前，确认要中止的确实是当前这次合并。受阻的分支保留在本轮的状态记录中，不能说成整批通过。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-integration -->
 
+<a id="load-mainline"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-mainline -->
 ## 5. 合入主干
 
 - “继续开发”“合并支线”都不等于合入主干。只有用户明确指定主分支和要合入的范围，才能推进主干。
@@ -256,7 +282,10 @@ git -C "<pendingWorktree>" merge-base --is-ancestor "<verifiedIntegrationSHA>" H
 - 合并后从实际主干结果派生验证树，补测主干差异；复用的实验结果要注明，不能写成主干本次执行的结果。然后按最终结果同步文档。
 
 - push 需要另外的授权。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-mainline -->
 
+<a id="load-cleanup"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-cleanup -->
 ## 6. 合并后的文档转移与回收
 
 适用删除条件与保护要求只在本节定义。满足适用条件并完成本节检查、协调者验收与删除派发时，视为已获默认授权，可以执行，无需另行请示用户；不满足任一适用条件时仍需用户明确授权。默认授权不改变工具策略拒绝时停止、不绕过保护及精确范围要求。
@@ -366,8 +395,13 @@ git branch -d "<devBranch>"
 - 共享的只读输入、真实数据和参考结果不删除。本地分支仍按本文件第 6.4 节处理。
 
 - **记录归档**：收尾记录的根 baseline、写回时机、内容和子任务结果汇总按 md/development/core/LOOP.core.md 第 3 节执行；需要转移时按本文件第 6.2 节执行。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-cleanup -->
 
+<a id="load-document-maintenance"></a>
+<!-- 规范节开始：md/development/core/GIT_WORKFLOW.core.md#load-document-maintenance -->
 ## 7. 主干上的纯文档维护
 
 只写文档任务按 md/development/core/LOOP.core.md 开头的任务分类选择工作树，是本文件第 2.1 节派生工作树要求的例外。用户明确要求的规范和说明维护，默认直接在主工作树的主分支上进行。主干上的 commit 仍然需要授权。按 md/development/core/ENGINEERING.core.md 第 11 节及项目风险细则的适用等级要求核对，工作与记录方式见 md/development/core/LOOP.core.md。发现超出 md/development/core/LOOP.core.md 开头只写文档任务范围的工作时，这部分另外按开发分支流程处理，不夹带在文档维护里。
+<!-- 规范节结束：md/development/core/GIT_WORKFLOW.core.md#load-document-maintenance -->
+
 <!-- 规范文件结束：md/development/core/GIT_WORKFLOW.core.md -->

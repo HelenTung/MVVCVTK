@@ -4,6 +4,8 @@
 
 > 通用定义按各节引用转接；本文件保留本项目的具体实施要求。
 
+<a id="load-baselines"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-baselines -->
 ## 1. 基本约定
 
 本节条款见以下子节。
@@ -23,11 +25,17 @@
 ### 1.3. baseline 与基线字段
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 1.3 节。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-baselines -->
 
+<a id="load-worktrees"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-worktrees -->
 ## 2. 工作树
 
 本节条款见以下子节。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-worktrees -->
 
+<a id="load-worktree-create"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-worktree-create -->
 ### 2.1. 目录与创建
 
 ```text
@@ -46,11 +54,17 @@
 - 工具自身数据例外：系统盘上只允许存在工具自身的安装、配置和会话数据（例如会话工具的用户目录），它们不属于任务产物。
 
 - `<worktreePath>` 是创建前解析好的绝对路径，取 `<repoParent>/MVVCVTK-worktrees/<branchKey>`，不依赖 shell 当前目录。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-worktree-create -->
 
+<a id="load-rule-init"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-rule-init -->
 ### 2.2. 规范文件的初始化
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 2.2 节。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-rule-init -->
 
+<a id="load-output-isolation"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-output-isolation -->
 ### 2.3. 构建隔离
 
 本项目的构建隔离对象按下表逐项核对；本表只列项目对象，隔离动作仍见下文转接的 core 定义，位置范围见本文件第 2.1 节“不使用系统盘”。
@@ -69,11 +83,17 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 2.3 节。
 
 - **临时文件留在工作树内**：TEMP/TMP 的设置要求见根 AGENTS.md 第0节“临时环境变量”；任务产物的隔离对象和位置范围仍按本节及第2.1节执行。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-output-isolation -->
 
+<a id="load-commit"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-commit -->
 ## 3. 开发分支上的提交
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 3 节。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-commit -->
 
+<a id="load-integration"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-integration -->
 ## 4. 实验集成
 
 本节条款见以下子节。
@@ -109,11 +129,17 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 ### 4.6. 失败与阻塞
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 4.6 节。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-integration -->
 
+<a id="load-mainline"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-mainline -->
 ## 5. 合入主干
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 5 节。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-mainline -->
 
+<a id="load-cleanup"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-cleanup -->
 ## 6. 合并后的文档转移与回收
 
 本节条款见以下子节。
@@ -159,8 +185,13 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 - **清理范围**：达到门槛后，清理该来源的 SDK（含对应包）、构建目录及能确认归属于该构建或 SDK 的输出，覆盖 `out/` 或约定的其他构建、包及输出位置。不得扫删整个 `out/`，不得删除其他工作树、任务或正式交付仍需保留的产物。
 
 - **沿用删除约束**：清理前核对具体路径、归属和占用，保留共享输入及必要证据，按第 6.3、6.4、6.6 节、`TESTING.md` 第 16.4 节及根 `AGENTS.md` 第 6、14 节的适用约束执行。本条不扩大通用删除授权。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-cleanup -->
 
+<a id="load-document-maintenance"></a>
+<!-- 规范节开始：md/development/GIT_WORKFLOW.md#load-document-maintenance -->
 ## 7. 主干上的纯文档维护
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 7 节。
+<!-- 规范节结束：md/development/GIT_WORKFLOW.md#load-document-maintenance -->
+
 <!-- 规范文件结束：md/development/GIT_WORKFLOW.md -->

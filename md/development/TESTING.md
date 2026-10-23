@@ -6,6 +6,8 @@
 
 > 通用定义按各节引用转接；本文件保留本项目的具体实施要求。
 
+<a id="load-scope"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-scope -->
 ## 1. 定位、适用规则与职责边界
 
 本节条款见以下子节。
@@ -21,7 +23,10 @@
 ### 1.3. 文档、测试代码、数据和产物
 
 文档维护见根 `AGENTS.md` 第 7 节，工作树用途、初始化和构建隔离见 `GIT_WORKFLOW.md` 第 2.1、2.2、2.3 节，提交权限见其第 3 节。测试使用现有 `test/`、受控数据存储和任务记录。原始输入只读共享，输出按工作树隔离；测试程序、数据、参考和日志不进入 SDK。
+<!-- 规范节结束：md/development/TESTING.md#load-scope -->
 
+<a id="load-evidence"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-evidence -->
 ## 2. 基本原则与证据层次
 
 测试要核验业务输出、状态归属和退出结果。成功 bool、退出码、文件存在和一张正常截图，都不能单独证明业务正确。
@@ -36,7 +41,10 @@
 | 安装态 SDK | 本次安装产物、真实数据、仓库外消费者 | 已覆盖的公共业务可被接收方使用 | 未交付 Feature 或完整 Qt 应用验收 |
 
 完成声明按根 `AGENTS.md` 第 12 节区分证据层级；说明样本、必要条件、实际业务和关键结果，历史证据标明复用。
+<!-- 规范节结束：md/development/TESTING.md#load-evidence -->
 
+<a id="load-test-scope"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-test-scope -->
 ## 3. 风险分级、测试范围与执行频率
 
 本节条款见以下子节。
@@ -63,7 +71,10 @@
 未修改的源码也可能受公共契约、数据语义、共享实现、生命周期、开关或依赖变化影响。沿这些变化检查直接和间接使用路径。同仓、同 SDK 或共用未变化的依赖，不构成重跑其他模块全部测试的理由。必要的依赖编译、链接也不等于依赖业务需要重新验收。
 
 通用定义见 md/development/core/TESTING.core.md 第 3.2 节。
+<!-- 规范节结束：md/development/TESTING.md#load-test-scope -->
 
+<a id="load-admission"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-admission -->
 ## 4. 测试准入
 
 本节条款见以下子节。
@@ -96,7 +107,10 @@
 ### 4.3. 先定义验收条件
 
 通用定义见 md/development/core/TESTING.core.md 第 4.3 节。
+<!-- 规范节结束：md/development/TESTING.md#load-admission -->
 
+<a id="load-data"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-data -->
 ## 5. 真实数据与样本管理
 
 本节条款见以下子节。
@@ -150,7 +164,10 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 ### 5.5. 存储与隔离
 
 原始输入和参考只读共享，缓存、输出、错误副本和日志独立。真实数据不默认提交 Git、上传远端或装入 SDK；权限和敏感信息按提供方要求处理。不删除共享输入、真实数据和参考结果；唯一证据先写进测试报告或任务记录（记录方式见 `LOOP.md`）。
+<!-- 规范节结束：md/development/TESTING.md#load-data -->
 
+<a id="load-reference"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-reference -->
 ## 6. 参考结果、容差与结果核验
 
 本节条款见以下子节。
@@ -205,7 +222,10 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 按工件或父样本报告应评估点数、可比较点数、有效覆盖率，以及无效、拒绝、失败、未计算数量和原因；类别预先定义并可对账。误差、极值和尾部指标使用同一可比较集合，点数与第 17 节的用例数分开统计。
 
 独立验证不足时可以继续探索，结论限定在已测范围，不宣称未验证的材料、工件或采集条件精度。
+<!-- 规范节结束：md/development/TESTING.md#load-reference -->
 
+<a id="load-test-design"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-test-design -->
 ## 7. 用例设计与测试工程
 
 本节条款见以下子节。
@@ -259,7 +279,10 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 ### 7.7. 过时测试清理
 
 通用定义见 md/development/core/TESTING.core.md 第 7.7 节。
+<!-- 规范节结束：md/development/TESTING.md#load-test-design -->
 
+<a id="load-state-geometry"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-state-geometry -->
 ## 8. 通用数据、几何与状态测试
 
 | 场景 | 核验重点 |
@@ -276,7 +299,10 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 | 导出 | 指定数据、分辨率和几何正确，必要时回读 |
 
 分别核验各 revision 的覆盖范围；`presentationRevision` 不能代替全部场景版本。状态和几何契约见根 `AGENTS.md` 第 10.4 节。
+<!-- 规范节结束：md/development/TESTING.md#load-state-geometry -->
 
+<a id="load-feature"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-feature -->
 ## 9. Feature 真实业务测试矩阵
 
 本节条款见以下子节。
@@ -303,7 +329,10 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 | 其他 Feature | 每个承诺输出的真实输入、公共入口、参考和退出 |
 
 覆盖实际动作的正常、合法空结果、非法输入或缺资源、重复调用和退出；涉及数据写入、异步、View 或 runtime 时追加对应专项。异常可在受控副本或私有边界注入；它只证明异常处理。等值面显示、显隐或渲染位移不能冒充表面精度、分割修改或未承诺计量能力。
+<!-- 规范节结束：md/development/TESTING.md#load-feature -->
 
+<a id="load-async"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-async -->
 ## 10. 生命周期、线程、异步与回调
 
 本节条款见以下子节。
@@ -336,7 +365,10 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 - 连续请求和积压；核验队列、合并/拒绝策略及 tick 工作量。
 
 回调前后状态与版本核验按[通用线程与回调不变量](core/ENGINEERING.core.md#thread-callback-invariants)检查；同线程不等于重入安全，取消接纳也不等于任务已结束。
+<!-- 规范节结束：md/development/TESTING.md#load-async -->
 
+<a id="load-rendering"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-rendering -->
 ## 11. 渲染、交互与多 Feature 隔离
 
 本节条款见以下子节。
@@ -363,7 +395,10 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 ### 11.3. 多 Feature 组合
 
 由应用显式组合实际 Feature，覆盖共享数据更新、操作顺序、活动任务切换、取消、分别 Detach 和整体 Stop。架构只支持互斥时，验证明确拒绝。检查 input、overlay/effect、结果、快照、缓存、任务和释放互不污染。两两通过不能替代已知高风险完整组合；Qt 宿主的 UI 和部署仍由接收方负责。
+<!-- 规范节结束：md/development/TESTING.md#load-rendering -->
 
+<a id="load-performance"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-performance -->
 ## 12. 性能、容量与稳定性测试
 
 本节条款见以下子节。
@@ -407,7 +442,10 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 在稳定窗口判断缓存是否有界、可复用及按期释放，不要求返回进程初始字节数。必要副本按 `FEATURE_DEVELOPMENT.md` 第 9.2 节核验，不能为零复制破坏快照。
 
 整卷规模结论使用对应真实整卷。资源负例用受控上限、隔离进程或注入并确认命中目标，不耗尽整机、破坏驱动或覆盖共享数据；环境不足时报告限制。
+<!-- 规范节结束：md/development/TESTING.md#load-performance -->
 
+<a id="load-fault-runtime"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-fault-runtime -->
 ## 13. 失败注入与私有 runtime
 
 本节条款见以下子节。
@@ -430,13 +468,19 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 | 公共边界 | vendor 头、类型、导入库和内部 target 不传播 |
 
 只破坏受控测试副本，不改共享依赖或正式安装；结束后恢复环境，把必要证据写进测试报告或任务记录（记录方式见 `LOOP.md`）。mock DLL 与真实 DLL 分开统计。
+<!-- 规范节结束：md/development/TESTING.md#load-fault-runtime -->
 
+<a id="load-integration"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-integration -->
 ## 14. 多分支集成与滚动基线回归
 
 通用定义见 md/development/core/TESTING.core.md 第 14 节。
 
 构建、注册、依赖或生成条件变化时重新配置；实际受影响时补 Host 独立、Feature ON/OFF、公开头和 runtime 边界。无文本冲突也检查重复注册、同义类型、回调、版本和缓存语义。涉及 CMake 修改时，解决方案同步与完整性核对见 根 `AGENTS.md` 第 11.1 节。
+<!-- 规范节结束：md/development/TESTING.md#load-integration -->
 
+<a id="load-sdk"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-sdk -->
 ## 15. SDK 安装态与正式交付测试
 
 本节条款见以下子节。
@@ -466,7 +510,10 @@ clean-room 位于源码仓库及全部开发工作树之外，只从本次 stage
 ### 15.5. 正式交付不跳过测试
 
 正式交付的执行要求见 `SDK_DELIVERY.md` 第 11.2 节。
+<!-- 规范节结束：md/development/TESTING.md#load-sdk -->
 
+<a id="load-execution"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-execution -->
 ## 16. 测试执行顺序与命令
 
 本节条款见以下子节。
@@ -499,7 +546,10 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 ### 16.4. 进程与资源清理
 
 通用定义见 md/development/core/TESTING.core.md 第 16.4 节。
+<!-- 规范节结束：md/development/TESTING.md#load-execution -->
 
+<a id="load-results"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-results -->
 ## 17. 结果状态、统计与失败处理
 
 本节条款见以下子节。
@@ -539,7 +589,10 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 通用定义见 md/development/core/TESTING.core.md 第 17.6 节。
 
 集成恢复时重新核对源 HEAD、实验已验证基线、待合名单、依赖和同步策略，分别保留受阻与可独立继续分支的状态；按 `GIT_WORKFLOW.md` 第 4.3、4.4、4.6 节确认下一源分支同步验证及强同步屏障。正式 SDK 恢复重建受变化影响的交付证据链。
+<!-- 规范节结束：md/development/TESTING.md#load-results -->
 
+<a id="load-completion"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-completion -->
 ## 18. 测试准出与阶段结论
 
 本节条款见以下子节。
@@ -561,7 +614,10 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 ### 18.3. 主干与正式 SDK 准出
 
 在实际主干结果核对已有证据并补测差异。正式 SDK 还要满足 `SDK_DELIVERY.md` 第 13 节；链接探针、诊断包和缺真实业务的脚本成功不能代替准出。
+<!-- 规范节结束：md/development/TESTING.md#load-completion -->
 
+<a id="load-reuse"></a>
+<!-- 规范节开始：md/development/TESTING.md#load-reuse -->
 ## 19. 证据、复用与责任
 
 本节条款见以下子节。
@@ -581,4 +637,6 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 ### 19.3. 职责与协作
 
 负责人在已确定的任务范围内安排测试并对测试结论负责；方向决策按根 `AGENTS.md` 第 13.2 节执行。实现者提供可运行入口，复核者核对证据与边界。R3 和关键 SDK 边界需要独立复核。skill、图谱和多 Agent 规则见根 `AGENTS.md` 第 13 节；工具报告或子代理 摘要不能代替本次必需验证。
+<!-- 规范节结束：md/development/TESTING.md#load-reuse -->
+
 <!-- 规范文件结束：md/development/TESTING.md -->

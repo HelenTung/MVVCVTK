@@ -14,7 +14,7 @@
 | 续接与配置纠正 | `send_agent_prompt`；`update_agent.settings`，纠正后再核实 |
 | 归档 | `archive_agent`；归档会中断仍在运行的会话并移出活动列表 |
 
-本表落实[派发接口与会话生命周期](../../core/COLLABORATION.core.md#dispatch-interface)；权限模式参数取当前会话运行时适配文件，管理与查询范围按该接口的“会话权限与逐级裁决”核对。
+本表落实[派发接口与会话生命周期](../../core/COLLABORATION.core.md#dispatch-interface)；权限模式参数取当前会话运行时适配文件，管理与查询范围按[会话权限与逐级裁决](../../core/COLLABORATION.core.md#load-session-boundaries)核对。
 
 ## 2. 工作区与工具行为
 

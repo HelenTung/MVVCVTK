@@ -2,10 +2,15 @@
 
 > 加载范围与角色身份见 md/development/core/AGENTS.core.md 第 0 节；文件路径以规范包根为基准。参数只承接目录、格式、命令、模型和预算等具体值；本文件不要求任何特定项目架构。
 
+<a id="load-facts"></a>
+<!-- 规范节开始：md/development/core/ENGINEERING.core.md#load-facts -->
 ## 4. 事实取证
 
 确认实际行为时按当前源码与构建或依赖配置 → 发布脚本 → 自动化测试 → README → 规范 → 图谱或其他生成资料的顺序取证。事实与授权的区分见 md/development/core/AGENTS.core.md 第 1.2 节。
+<!-- 规范节结束：md/development/core/ENGINEERING.core.md#load-facts -->
 
+<a id="load-principles"></a>
+<!-- 规范节开始：md/development/core/ENGINEERING.core.md#load-principles -->
 ## 8. 通用修改原则
 
 - 优先修根因，采用最小的架构改动；把改动接到现有业务链上，不另起一条平行链路。
@@ -15,7 +20,10 @@
 - 按 md/development/core/LOOP.core.md 第 14.1 节决定破坏性收敛后，直接删除旧入口、旧状态和旧适配，不保留 `V2`、双轨 API 或隐式 fallback。
 
 - 优化性能前先找到真实热点和可比较的基线。
+<!-- 规范节结束：md/development/core/ENGINEERING.core.md#load-principles -->
 
+<a id="load-code"></a>
+<!-- 规范节开始：md/development/core/ENGINEERING.core.md#load-code -->
 ## 10. 代码、状态与生命周期
 
 ### 10.1. 通用代码要求
@@ -46,7 +54,10 @@
 - 缓存和异步结果列出实际依赖与失效条件，只比较裸指针或不足范围的版本号不算有效。
 - 已发布且仍有读者的快照不能原地修改，const 不等于深层不可变；借外部缓冲须说明 owner、有效期与释放顺序。
 - 半开 region 与含端点 extent 不混用；维度乘积、offset、字节数在分配前检查溢出。
+<!-- 规范节结束：md/development/core/ENGINEERING.core.md#load-code -->
 
+<a id="load-risk"></a>
+<!-- 规范节开始：md/development/core/ENGINEERING.core.md#load-risk -->
 ## 11. 变更风险与验证等级
 
 变更风险与验证分级使用 D0、R1、R2、R3，按实际影响决定验证和独立复核；检查措施不能改变事实风险，最高为 R3。决定级下限、裁决、通知与独立授权只在 md/development/core/LOOP.core.md 第 14.1 节定义，不能用风险级代替决定级或授权。
@@ -67,7 +78,10 @@
 普通文档属于 D0；md/development/core/LOOP.core.md 第 14.1 节定义的现行项目规范集合不因文档身份归入 D0。除非用户明确指示修改，对这些规范的拟议改动按 R3 处理；用户明确指示的规范修改按实际改动范围定级，不自动升为 R3。用户明确批准具体修改方案也属于本条的明确指示；只有一般仓库任务授权时不适用该例外。本条只定义风险定级，未获现行规范修改授权时不得因已按 R3 评估而实施，授权仍按 md/development/core/LOOP.core.md 第 14.1 节执行。
 
 在本地分支上提交用户明确指示的规范修改，不因提交动作本身升为 R3，改动内容仍按实际范围定级。提交与远端操作的许可按 md/development/core/GIT_WORKFLOW.core.md 第 0 节及 md/development/core/LOOP.core.md 第 14.1 节执行，不改变原有授权清单。
+<!-- 规范节结束：md/development/core/ENGINEERING.core.md#load-risk -->
 
+<a id="load-rule-validation"></a>
+<!-- 规范节开始：md/development/core/ENGINEERING.core.md#load-rule-validation -->
 ### 11.1. 现行项目规范的验证映射
 
 只修改现行项目规范时，按本节验证规范资产；没有受影响的产品实现、构建配置或交付物时，不运行无关的产品 configure、Debug/Release 构建、业务、真实数据或 SDK 测试。若同时修改产品资产，仍按实际风险补齐那些资产的适用验证。
@@ -76,13 +90,19 @@
 - **独立复核**：R3 必须由未参与实现的执行者复核；项目另有专项复核触发条件时一并执行。复核对照获批方案与实际全文差异，确认既有约束未被遗漏或扩大，不以实现者自审替代。
 - **新会话行为场景验证**：修改改变权限、派发或回复行为时，必须在新会话中验证受影响的角色与场景。执行前写明场景输入、适用角色、允许动作、预期停报或回复及判据，至少覆盖正常执行与相关越界、拒绝或上报路径；按获批范围使用隔离资产，不借验证执行未授权的真实操作。只运行本轮受影响的场景，不为验证新建角色或改变派发拓扑。
 - **结论分开报告**：静态检查、独立复核与新会话行为验证分别报告；未运行的行为场景列为未验证，静态一致不能证明运行行为通过。不因规范任务免除适用复核或行为验证，也不因缺这些证据改跑无关产品构建。
+<!-- 规范节结束：md/development/core/ENGINEERING.core.md#load-rule-validation -->
 
+<a id="load-skills"></a>
+<!-- 规范节开始：md/development/core/ENGINEERING.core.md#load-skills -->
 ## 13. 技能与辅助资料
 
 - skill 是可选的加速手段。只有用户指定、任务本身就是维护 skill 的产物、平台要求，或不用就拿不到必要输入时，才必须使用。用之前读 `SKILL.md`，用之后回到源码和测试核验结果。不虚构 skill 已运行，未选用的 skill 不需要说明“未使用”。
 
 - 图谱只是辅助视图：存在且与当前分支一致时可以用来缩小阅读范围；过期或缺失时直接读源码。只有本轮任务包含图谱维护时才更新图谱。不提交 图谱机器状态目录 下的机器状态文件。
+<!-- 规范节结束：md/development/core/ENGINEERING.core.md#load-skills -->
 
+<a id="load-naming"></a>
+<!-- 规范节开始：md/development/core/ENGINEERING.core.md#load-naming -->
 ## 20. 命名语义的一般原则
 
 - 不从单个历史反例推导新规则，也不为统一形式对全仓机械改名。
@@ -98,4 +118,6 @@
 - 位于哪一层，是否跨边界？
 
 - 去掉所在的文件路径，名字是否仍然能看懂？
+<!-- 规范节结束：md/development/core/ENGINEERING.core.md#load-naming -->
+
 <!-- 规范文件结束：md/development/core/ENGINEERING.core.md -->
