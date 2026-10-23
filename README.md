@@ -1,49 +1,65 @@
 # MVVCVTK
 
-MVVCVTK 是 Windows x64 上的 C++17 / VTK 体数据可视化宿主。`VtkAppHostSession` 是组合根，负责多视图运行时、加载事务、输入路由、可信 Feature 和统一停止；Crop 与 GapAnalysis 作为可选 Feature 接入，不取得 App 内部对象身份。
+MVVCVTK 是 Windows x64 上基于 C++17 / VTK 的体数据可视化与分析宿主。本实验分支以 `VtkAppHostSession` 为组合根，提供多视图、数据加载与修订、渲染、输入路由和会话生命周期；业务能力通过可选 Feature 接入。当前仓内交互入口是 Qt 功能工作台 `QtFeatureManual`。
 
-Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整快照入口；颜色与透明度节点独立，reload 和 LOD 不重解释显式节点。同一数据版本的默认 percentile histogram 在 Session 内只扫描一次，各 View 仍保存独立 TF 值快照。Volume 质量为 `Auto/Low/High/XHigh/Ultra` 五档；`Low/High/XHigh/Ultra` 固定使用原始 dimensions 的 `25%/50%/75%/100%`，仅 `Auto` 在模型加载时依据系统内存、GPU mapper 预算和 CPU 核心数确定一次，运行期不按帧耗重新定档。非原生 LOD 持有 resample producer/output，由正常渲染按需物化，不再追加整卷 `DeepCopy`。
+## 架构与模块
 
-运行时切换显式质量档采用两阶段提交：固定百分比产生的目标 dimensions 不做资源降级，可用物理内存只约束 CPU resample 工作集。已渲染窗口切档时先等待旧 draw 完成并显式释放 mapper 的旧 volume/mask GPU 资源，再在同一 OpenGL context 查询 NVX/ATI 驱动报告的当前剩余显存；单块预算由这次释放后的剩余容量、mapper 保留比例和等量重分配余量共同计算，不使用固定字节大小。候选超过单块预算时用 VTK `SetPartitions` 保持原 dimensions，并在正常 `Render` 中按视点排序、逐块复用同一 3D texture 上传；只有单块候选使用 `PreLoadData`。厂商显存扩展不可用时才回退到 mapper 配置预算；准入失败则恢复原 active LOD 的 mapper 绑定与已应用质量，后续正常 Render 重新装载旧档。
+应用负责创建 Session、选择 Feature 并调用公共入口；Host 不链接具体 Feature，Feature 之间互不依赖，也不包含 Host 私有头。
 
-冷窗口首次提交 Volume 时，配置回退预算只产生候选分块；首次正常绘制在 OpenGL context 就绪后补做驱动显存查询与 GPU 准入，避免把初始化时的保守分块永久保留。窗口替换或 context 重建会重新准入；正常后续帧不重复查询或重建 LOD。该过程保持 dimensions 和采样质量，不追加 Render，也不在绘制栈中调用 PreLoadData；无显存扩展时继续使用配置回退。
+| 层次 | CMake target | 职责 |
+| --- | --- | --- |
+| Host API | `MVVCVTK::HostAPI` | Session、请求、结果、状态快照与数据读取等公开契约；接口 target，不链接 Host 实现库 |
+| Feature SPI（扩展接口） | `MVVCVTK::FeatureSPI` | `HostFeature`、可信数据、视图、输入、叠加与渲染扩展契约；接口 target |
+| Host 实现 | `MVVCVTK::Host` | 组合数据、窗口、渲染与生命周期；公开依赖 HostAPI，内部使用 FeatureSPI |
+| 仓内共享支持 | `MVVCVTKInternal::FeatureSupport` | Host / Feature 私有使用的构建期支持，不安装、不导出 |
+| 外部宿主 | 仓内示例为 `qt_feature_manual` | 提供 Qt 窗口、事件循环和操作界面，显式组合 Host 与所选 Feature |
 
-`IsoSurface` 与 `CompositeIsoSurface` 沿用同一质量枚举和 `25%/50%/75%/100%` 显式 dimensions，但由独立 Iso LOD 计划器控制等值面提取输入，不复用 Volume 的 ray、jitter、显存和 partitions 策略。切档先完整物化 resample、`vtkFlyingEdges3D` 与可选 mask/clip 候选，成功后才切换稳定 mapper；失败保留旧等值面和已应用挡位。`Ultra` 直接使用原始 dimensions，旧的 766 最大维度限制已移除；PolyData 直通、Feature 私有 overlay 和全分辨率数据导出不受主体 Iso 展示挡位影响。
+Feature 公开依赖 FeatureSPI；PartSegmentation、ModelRotation、WallThickness 还公开依赖 HostAPI。具体依赖以各模块 CMake 为准。Qt 不进入 Host / Feature 的公共接口或 SDK 部署；DefX 仅由 GapAnalysis 的私有 `GapKernel.dll` bridge 使用。
 
-## 支持范围
+当前 `MVVCVTK/features/` 接入九个 Feature，下表是源码能力概览，不表示全部已进入 SDK 或完成业务验收。target 别名均为 `MVVCVTK::<模块名>`。
 
-- Windows x64；仓库和 SDK 均不提供 Win32/x86 配置。
-- CMake 4.2 或更高版本、Visual Studio 18 2026、MSVC `v145`、C++17。
-- 日常源码构建固定使用 Visual Studio 2026 的 MSVC `v145`；Release 制品启用 AVX2。
-- Debug 使用 `/MDd`，Release 使用 `/MD`。
-- SDK 携带 VTK 9.4.2、OpenCV 4.12.0，以及仅供 GapAnalysis 私有 bridge 使用的 DefX Debug/Release 运行时；Qt 5.14.2 的头、库、DLL 与 CMake package 由接收方宿主自行提供。完整 VTK 环境保留 QVTK/VTK Qt 适配模块，用于对接宿主 Qt。
-- SDK 是固定工具链静态库，不承诺跨编译器、工具集、运行库或配置的稳定二进制 ABI。
+| 模块 | 主要能力 | 构建开关 |
+| --- | --- | --- |
+| OrthogonalCrop | 交互裁剪、裁剪结果与历史 | `MVVCVTK_BUILD_ORTHOGONAL_CROP` |
+| GapAnalysis | 基于 DefX 的缺陷／间隙分析及结果显示 | `MVVCVTK_BUILD_GAP_ANALYSIS` |
+| PartSegmentation | 零件分割、编辑、拆分、合并与历史 | `MVVCVTK_BUILD_PART_SEGMENTATION` |
+| SurfaceDetermination | 全局自动表面测定、预览与正式表面结果 | `MVVCVTK_BUILD_SURFACE_DETERMINATION` |
+| ArtifactReduction | 扩散降噪、环状伪影处理及候选提交 | `MVVCVTK_BUILD_ARTIFACT_REDUCTION` |
+| ModelRotation | 模型显示旋转、取消与撤销 | `MVVCVTK_BUILD_MODEL_ROTATION` |
+| MetrologyAlignment | 计量配准、参考导入、偏差评估与检测 | `MVVCVTK_BUILD_METROLOGY_ALIGNMENT` |
+| WallThickness | 基于源灰度、标签与测量表面的壁厚计算及公差评估 | `MVVCVTK_BUILD_WALL_THICKNESS` |
+| RoiEditing | ROI（感兴趣区域）交互绘制、编辑与组合操作 | `MVVCVTK_BUILD_ROI_EDITING` |
 
-## 依赖 bootstrap
+Host 提供体渲染、等值面和正交切片等显示能力，应用通过公共请求调整视图参数。显示质量与业务数据处理分开；Feature 通过公共入口读取输入、提交结果并管理自己的显示资源。
 
-依赖 bundle 不进入 Git。受控制品服务器保存官方依赖 ZIP，具体版本与内容身份由仓库依赖锁记录；CI 通过 `MVVCVTK_DEPS_URI` secret 下载，本地也可使用已有归档：
+## 支持范围与依赖
+
+- Windows x64、CMake 4.2 或更高版本、Visual Studio 18 2026、MSVC `v145`、C++17。
+- Debug 使用 `/MDd`，Release 使用 `/MD`；当前日常 preset 启用 Release AVX2。
+- 锁定依赖为 VTK 9.4.2、OpenCV 4.12.0；仓内 Qt 工作台和 Qt 测试使用 Qt 5.14.2。
+- SDK 为固定工具链静态库，不承诺跨编译器、工具集、运行库或配置的稳定二进制兼容。
+
+依赖 bundle 不进入 Git，版本与内容身份由[依赖锁](tools/MVVCVTK.Dependencies.lock.psd1)记录。在仓库根执行，按来源选择下载或本地归档，再校验：
 
 ```powershell
+# 从受控制品服务器获取（先设置 MVVCVTK_DEPS_URI）
 ./tools/Get-MVVCVTKDependencies.ps1 -Uri $env:MVVCVTK_DEPS_URI
+# 或使用已有归档；路径替换为实际文件
 ./tools/Get-MVVCVTKDependencies.ps1 -ArchivePath .\artifacts\MVVCVTK-Dependencies.zip
 ./tools/Get-MVVCVTKDependencies.ps1 -VerifyOnly
 ```
 
-脚本先解包到独立临时目录，拒绝 reparse point，并按规范化相对路径、文件大小和每文件 SHA-256 重算内容树。只有内容树、manifest SHA-256、包身份和平台全部匹配 [依赖锁](tools/MVVCVTK.Dependencies.lock.psd1) 后，才安装到官方库总目录 `deps/official`。版本仅属于校验元数据，不再进入目录名；更换依赖必须显式更新锁。
+脚本校验 manifest 和内容树后安装到 `deps/official`。日常 preset 的 Qt 工作台／测试需要该目录中的 Qt；SDK 只复制锁定 VTK/OpenCV，接收方自行提供 Qt 本体及其部署。
 
-`MVVCVTK/vcpkg.json` 的公共依赖使用固定 git baseline；项目构建所需的 VTK/OpenCV 以及仓库 Qt 测试使用的 Qt 以 `deps/official` 下的锁定 bundle 为准。内部 UI 不再属于产品构建或 SDK 依赖。
-
-GapAnalysis 的 DefX 作为外部三方环境依赖放在 `MVVCVTK_DEFX_ROOT`（preset 默认 `deps/third_party/defx`）：供应商头位于 `include/`，Debug/Release 的 DLL 位于 `bin/<配置>/`，导入库位于 `lib/<配置>/`。Feature 源码树和仓库根临时 `gap/` 均不作为构建输入；中央依赖模块将工件封装为私有 `DefX::Analysis` 目标。供应商 C++/STL/VTK 接口只在 Feature 内的 `MVVCVTKGapKernel.dll` 兼容层消费，GapAnalysis 主库只接收固定宽度 POD、原始标签和区域/header 副本；兼容层不执行阈值、腐蚀、连通域、过滤或重编号。两套供应商工件必须分别匹配 x64、MSVC 运行库、iterator debug level 和 VTK 9.4.2 配置，禁止跨配置回退。
-
-源码构建只把 DefX DLL 复制到生成目录，与私有 kernel 组成运行时对，不改动三方依赖根中的原始文件。GapAnalysis 加载器忽略当前工作目录和 PATH 查找：SDK/外部宿主必须用 `MVVCVTK_GAP_RUNTIME_DIR` 指定当前配置的私有运行时绝对目录；未配置时只接受应用程序同目录中的运行时对。选定后使用绝对路径加载 kernel，并核对实际 bridge 与 DefX 均来自该目录；显式目录非法时不会回退。
-
-受控 CI runner 可通过仓库变量 `MVVCVTK_DEFX_ROOT` 指向预装的只读 DefX 根；未配置时使用工作区的 `deps/third_party/defx`。CI 会在配置前核对上述六个工件，第三方内容不由官方依赖下载脚本获取。
+启用 GapAnalysis 时，另需 DefX 开发环境。`MVVCVTK_DEFX_ROOT` 默认指向 `deps/third_party/defx`，也可通过同名环境变量或 CMake cache 指定外部根：头文件在 `include/`，Debug/Release DLL 在 `bin/<配置>/`，导入库在 `lib/<配置>/`。这些输入不由官方依赖下载脚本获取；两套工件必须分别匹配工具链、运行库与 VTK 配置。
 
 ## 构建和测试
 
-安装依赖后，以 CMake 作为主构建入口：
+在仓库根设置临时目录并使用 CMake preset：
 
 ```powershell
+New-Item -ItemType Directory -Force .\out\tmp | Out-Null
+$env:TEMP = $env:TMP = (Resolve-Path .\out\tmp).Path
 cmake --preset vs2026-x64
 cmake --open out/build/vs2026-x64
 cmake --build --preset vs2026-debug
@@ -52,92 +68,90 @@ ctest --preset vs2026-debug
 ctest --preset vs2026-release
 ```
 
-本地大体积质量审计可运行 `out/build/vs2026-x64/bin/Debug/MVVCVTK.exe --quality-audit`；它在硬编码样本加载完成后依次执行 Low、High、XHigh、Ultra 的准入与 Render，并输出各显式档是否实际应用的 `AUDIT_QUALITY` 后退出。审计通过要求 High、XHigh、Ultra 均按固定 dimensions 实际应用；动态 partitions 只能改变 GPU 上传块数，不能缩水、伪装成功或沿用旧质量链路。
+`vs2026-x64` 开启上述九个 Feature 中除 WallThickness 以外的八个，并开启 `MVVCVTK_BUILD_TESTING`、`MVVCVTK_BUILD_QT_TESTING` 和 `MVVCVTK_BUILD_QT_MANUAL`。这与未使用 preset 时的原始 option 默认值不同：原始默认只开启 OrthogonalCrop、GapAnalysis 和普通测试。
 
-`MVVCVTK::Host`、`MVVCVTK::OrthogonalCrop` 和 `MVVCVTK::GapAnalysis` 分别生成独立静态库，不提供把三者固化在一起的 SDK 聚合 target。`examples/standalone/main.cpp` 显式组合这三个模块并生成默认可启动的 `MVVCVTK` 应用，只负责本地演示和运行，不进入 SDK 安装。Qt 本体只进入由 `MVVCVTK_BUILD_QT_TESTING` 控制的仓库测试，不是 Host 的公共依赖，也不进入 SDK；`deps/official/vtk` 中的 VTK Qt 适配模块仍随完整 VTK 环境交付。
+各 Feature 可通过表中开关独立选择；`MVVCVTK_BUILD_QT_MANUAL` 控制工作台，`MVVCVTK_BUILD_QT_TESTING` 控制仓内 Qt 自动化测试，后者要求 `MVVCVTK_BUILD_TESTING=ON`。Host 始终构建，不依赖某个固定 Feature 组合。
 
-`MVVCVTK_BUILD_ORTHOGONAL_CROP`、`MVVCVTK_BUILD_GAP_ANALYSIS` 可分别关闭两个 Feature；`MVVCVTK_BUILD_STANDALONE` 控制示例。Standalone 只有在两个 Feature 都启用时构建，关闭任一 Feature 都不会把示例的组合选择反向施加给 Host 或另一个 Feature。
+生成的解决方案为 `out/build/vs2026-x64/MVVCVTK.slnx`，启用工作台时启动项目为 QtFeatureManual。Host、Feature、测试分别归入相应 IDE 分组；接口 target 不等同于独立实现库。静态库输出到构建目录的 `lib/<配置>`，应用和测试程序输出到 `bin/<配置>`。仓库不维护手写的解决方案或生产项目文件。
 
-Standalone 加载数据后可按 `g` 显式发送一次 `GapHostAction::Start`，用于触发当前 Gap/DefX 主链；该入口仍走 `GapHostFeature::SendRequest`，不直接调用私有算法。原有 `j` 键继续由 Gap Feature 自身处理 Start/Overlay 切换。
+上述是执行入口，不代表在当前机器或本次文档修订中已运行。具体测试条件与验收范围见[测试规范](md/development/TESTING.md)。
 
-仓库不维护手写 `.sln`、生产 `.vcxproj` 或测试 `.vcxproj`。`cmake --preset vs2026-x64` 是唯一工程生成入口，Visual Studio 2026 generator 会在 `out/build/vs2026-x64/MVVCVTK.slnx` 生成现代 Solution 文件及其项目。Solution 顶层只保留一个 `MVVCVTK` 组，下面包含默认启动的 `Application/MVVCVTK`、主干 `Host`、Host API/Feature SPI 接口目标、位于 `Host/Features` 的两个扩展库、边界与行为测试以及 CMake 内建目标；三库项目显示各自完整的实现源码和私有头，但 SDK 安装仍只取批准的公开头与单独维护的物理闭包。静态库统一输出到 `lib/<配置>`，应用和测试程序统一输出到 `bin/<配置>`。Windows CI 应在带桌面 OpenGL、v145 和内部依赖访问权的受控 runner 上运行 Debug/Release 全套测试。
+## Qt 功能工作台
 
-## 实验分支手动测试
+```powershell
+cmake --build --preset vs2026-release --target qt_feature_manual
+.\out\build\vs2026-x64\RunQtFeatureManual-Release.cmd
+```
 
-在实验工作树执行 `cmake --build --preset vs2026-release --target qt_feature_manual`，然后运行
-`out/build/vs2026-x64/RunQtFeatureManual-Release.cmd`。
+入口源码为 `test/QtHost/Manual/main.cpp`，生成程序为 `bin/Release/QtFeatureManual.exe`；启动脚本设置匹配的依赖路径和 Qt plugin 路径。当前树已没有旧 `examples/standalone/main.cpp`、`MVVCVTK_BUILD_STANDALONE` 或 `MVVCVTK.exe --quality-audit` 入口。
 
-手动测试在中央以等宽等高的四宫格展示一个 3D 视窗和上下、前后、左右三个切片图；3D 视窗上方可切换等值面与体渲染，切片可通过滚轮逐层查看。左侧“场景”仅展示当前体数据和可视对象，“结果目录”独立保留裁剪历史、零件目录、统计与发布来源；右侧通过标签切换参数分组，开始、停止、取消等动作使用直接按钮，停止入口独立于参数滚动区域；底部可展开操作日志。
+工作台显示一个 3D 视窗和三个正交切片视窗，可切换体渲染／等值面，通过功能页调用已启用的模块。使用“打开体数据…”（`Ctrl+O`）或拖入文件后，先核对输入尺寸、间距等参数再加载。场景、结果目录、参数和操作日志由工作台管理；业务命令使用 Feature 公共入口。
 
-裁剪控件在主 3D 视窗中拖动：球的中心控制点负责平移、绿色控制点调整半径；圆柱另有两个端点用于调整方向和长度；盒可用 Shift 加左键拖动整体平移，平面可拖动中心与法线箭头。命中裁剪控件时，参考切片平面会让出鼠标事件。保留/移除内部在松开鼠标后生成历史，只有定位时不新增历史。自动化覆盖四种形状、三种裁剪模式及等值面/体渲染的 Qt 鼠标交互。
+SurfaceDetermination 当前公开的测定方法为 `SurfaceDeterminationMethod::GlobalAutomatic`；预览与正式测定是不同用途。壁厚页使用同一输入的零件标签与有效正式测量表面，阈值和长度单位应与源数据一致。
 
-自动 ISO50 在包含空气背景的范围内，按直方图分群后的样本量选择占比最多的非空气材料，用背景峰与该材料峰的中点作为阈值。范围估计与直方图共用最多 128³ 个采样点，并以固定空间剔除少量极端值，避免稀疏预采样漏掉薄材料；其他表面方法的自动种子仍保留多峰歧义检查。
+普通 preset 默认不构建壁厚。仓内 CUDA 配置 `vs2026-x64-cuda` 开启 WallThickness 及 `MVVCVTK_WALL_CUDA`，当前预设指向 CUDA 13.2 安装路径，使用前需具备该环境：
 
-视图参数随目标及显示模式切换：等值面开放 ISO，体渲染开放传输函数，两者均支持质量和透明度；切片开放窗宽窗位。不适用的字段不会进入请求。无当前输入、结果或候选时，对应业务命令禁用并显示原因，结果就绪后自动恢复；体渲染下不能把自动 ISO 直接应用到显示。
+```powershell
+cmake --preset vs2026-x64-cuda
+cmake --build --preset vs2026-cuda-release --target qt_feature_manual
+.\out\build\vs2026-x64-cuda\RunQtFeatureManual-Release.cmd
+```
 
-窗口顶部“打开体数据…”（`Ctrl+O`）可主动选择文件，随后进入数据输入页核对尺寸、间距等参数；也可直接拖入文件。默认输入为 `F:/data/ct/1536x1536x1536_1440.raw`，float32，尺寸 `1536×1536×1536`，间距 `0.1537 mm`，数据集标识 `1`；参数可修改，点击“加载体数据”后才加载。
+运行自动化前，先用对应 build preset 构建全部目标或 `qt_feature_tests`。Qt 自动化入口示例为 `ctest --preset vs2026-release -R '^QtFeature\.Automation$'`；壁厚配置对应 `vs2026-cuda-release` 测试 preset。合成用例只证明其覆盖的路径，真实业务与大数据性能需另行验收。
 
-“零件”是统一业务页，集中提供分割、属性设置、涂绘、拆分、合并、候选确认与丢弃、撤销和重做；选择零件节点会绑定同页的相关操作，多选零件可准备合并。方向与变换参数按完整的 3×3 或 4×4 矩阵展示，单元格行列信息通过悬停提示查看。
+## SDK 配置与消费
 
-“壁厚分析”由 `MVVCVTK_BUILD_WALL_THICKNESS` 控制并已加入 preset。先完成同一输入的零件分割和正式测量表面（局部自适应 ISO50 或梯度峰值），再计算壁厚；默认材料标签为 `1`。页面提供取消、清除、结果查询、公差评估、显示设置、结果激活和采样定位。`ctest --preset vs2026-release -R QtFeature.Automation` 验证手动入口、四视图及 3D 模式切换、分割进行中切换 Feature，以及合成 8 mm 壁厚流程。
+仓内模块集合与安装包集合不同。当前实验分支的 package 声明 `Host`、`OrthogonalCrop`、`GapAnalysis`、`MetrologyAlignment` 四个 component；两个 SDK preset 只开启这四个模块，关闭 Qt 工作台和 Qt 测试，其余六个 Feature 仅接入仓内构建。接口 target HostAPI / FeatureSPI 随包导出，FeatureSupport 不安装或导出，不提供固定组合的 SDK 聚合 target。
 
-## SDK 构建与验证
+这段说明反映当前分支的构建配置，不代替 SDK 准入授权或交付验收。正式允许交付的集合、相对主干的差异与验证要求见[SDK 交付规范](md/development/SDK_DELIVERY.md)。
+
+SDK 构建入口如下；执行前须完成该规范要求的范围、输入和授权核对：
 
 ```powershell
 ./tools/release/Build-MVVCVTKSdk.ps1
-# 可选：覆盖 preset 的 DefX 三方环境根
+# 可选：覆盖 DefX 开发环境根
 ./tools/release/Build-MVVCVTKSdk.ps1 -DefXRoot D:\third_party\defx
 ```
 
-发布脚本复用同一个 CMake preset 构建并测试 Debug/Release，安装三个静态库及 GapAnalysis 私有的分配置 bridge/DefX 运行时，白名单复制 VTK/OpenCV，再在仓库外动态生成一次性 CMake clean-room probe，验证安装态组件矩阵、公开头闭包、私有头隔离和两种配置的消费链接。DefX 实际分析链由仓内 Debug/Release Gap/QtHost 测试覆盖；clean-room probe 只存在于临时验证目录，不作为仓库源码，也不进入 SDK。
+脚本默认使用 `vs2026-sdk-tested-x64`，依次执行 Debug/Release 构建、CTest、安装、闭包检查、仓库外 clean-room 消费验证和 ZIP 打包。`vs2026-sdk-products-x64` 供 `-SkipTests` 诊断流程使用。可选真实 C3 VTP 由 `-MetrologyMesh` 传入，未传入时该项为 `NOT_RUN`；不能把边界检查或脚本完成等同于所有真实业务验收通过。
 
-stage 输出到 `out/stage/<version>-win-x64`，ZIP 输出到 `out/packages`；当前不生成归档 checksum 或 manifest。直接执行 `cmake --install` 安装项目模块、CMake 消费接口和 GapAnalysis 私有运行时，不复制 VTK/OpenCV；完整定向交付由发布脚本把 VTK/OpenCV 放到安装根的 `deps/official`。
+stage 位于 `out/stage/<revision>-win-x64`，ZIP 位于 `out/packages/`。默认 revision 在干净树上为 `yyyy.MM.dd-git.<12位短提交>`，脏树上为 `yyyy.MM.dd-rev.<HHmmss>`；脏树产物只能报告为诊断状态。
 
-SDK 根目录只保留 `include/`、`lib/` 和 `deps/`；官方依赖位于 `deps/official/{vtk,opencv}`，三方运行时位于 `deps/third_party/defx`，DefX 供应商头文件和导入库不进入 SDK。CMake package 位于 `lib/cmake/MVVCVTK/`；`lib/<配置>/` 每个配置只含 `MVVCVTKHost.lib`、`MVVCVTKOrthogonalCrop.lib`、`MVVCVTKGapAnalysis.lib`，`MVVCVTKGapKernel.dll` 与 `DefXAnalysis.dll` 只位于 `deps/third_party/defx/bin/<配置>`。安装包不携带 Qt 本体、内部 UI、README、NOTICE、manifest、standalone、clean-room 示例、MSBuild/qmake 适配层或验证工具；完整 VTK 目录中的 QVTK/VTK Qt 模块不视为 Qt 本体。
+当前安装配置的主要布局如下；实际交付仍按批准清单核对：
 
-脏工作树目录名使用 `yyyy.MM.dd-rev.N`；干净工作树目录名使用 `yyyy.MM.dd-git.<short-commit>`。不传 `-PackageRevision` 时脚本按工作树状态生成合法目录名和 ZIP 名，包内不再保存独立版本文件。
+| 路径 | 内容 |
+| --- | --- |
+| `include/MVVCVTK/API/` | Host 与已安装 Feature 的公开入口及必要类型 |
+| `include/MVVCVTK/SPI/` | 可信 Feature 扩展契约及物理闭包 |
+| `lib/<Debug或Release>/` | `MVVCVTKHost.lib`、`OrthogonalCrop.lib`、`GapAnalysis.lib`、`MetrologyAlignment.lib`（对应模块启用时） |
+| `lib/cmake/MVVCVTK/` | package 配置及导出 targets |
+| `deps/official/{vtk,opencv}` | 发布脚本复制的锁定官方依赖 |
+| `deps/third_party/defx/bin/<Debug或Release>/` | `GapKernel.dll` 与 `DefXAnalysis.dll` |
 
-## SDK 消费
+直接 `cmake --install` 不复制 VTK/OpenCV，完整依赖布局由发布脚本生成。SDK 不包含 Qt 本体、工作台、测试、真实数据、私有实现头或项目说明文档。VTK bundle 内的 QVTK 适配模块不等于 Qt 本体。
 
-CMake consumer 使用 Windows x64、MSVC `v145`，指向安装目录中的包配置并按需选择三个产品模块。包配置只解析导出 target 与 VTK/OpenCV；DefX target、头文件和导入库不进入 consumer CMake 图：
+消费者使用 Windows x64 / MSVC `v145`，把 `MVVCVTK_DIR` 指向安装根的 `lib/cmake/MVVCVTK`，按实际安装与业务需要选择 component，例如：
 
 ```cmake
-find_package(MVVCVTK CONFIG REQUIRED
-    COMPONENTS Host OrthogonalCrop GapAnalysis)
+find_package(MVVCVTK CONFIG REQUIRED COMPONENTS Host OrthogonalCrop GapAnalysis)
 target_link_libraries(app PRIVATE
     MVVCVTK::Host
     MVVCVTK::OrthogonalCrop
     MVVCVTK::GapAnalysis)
 ```
 
-运行含 GapAnalysis 的程序时，将 `MVVCVTK_GAP_RUNTIME_DIR` 设为当前配置的 `deps/third_party/defx/bin/<配置>` 绝对目录，并把 `deps/official` 下匹配配置的 VTK/OpenCV runtime 目录加入 PATH。私有运行时目录必须同时包含 `MVVCVTKGapKernel.dll` 与 `DefXAnalysis.dll`；GapAnalysis 不从 PATH 或当前工作目录发现这两个 DLL。
+需要计量配准时另请求 `MetrologyAlignment` component 并链接 `MVVCVTK::MetrologyAlignment`；仅使用 Host 时只请求 `Host` component 并链接 `MVVCVTK::Host`。包配置解析 VTK/OpenCV，不将 DefX 开发头、导入库或 target 传播给消费者。
 
-只编译 Host/Feature 头契约的 target 可分别链接 `MVVCVTK::HostAPI` 与
-`MVVCVTK::FeatureSPI`；二者都是自足的纯接口目标，不反向链接 `MVVCVTKHost.lib`。
-具体 Feature 只公开依赖 `FeatureSPI`；Host 实现公开依赖 `HostAPI`，并在内部使用
-`FeatureSPI`。应用按实际功能显式组合 `Host`、`OrthogonalCrop`、`GapAnalysis`，不通过顶层 SDK target 继承 standalone 的组合选择。
+运行含 GapAnalysis 的程序时，把 `MVVCVTK_GAP_RUNTIME_DIR` 指向当前配置的 `deps/third_party/defx/bin/<配置>` 绝对目录，其中须同时存在 `GapKernel.dll` 与 `DefXAnalysis.dll`；旧名 `MVVCVTKGapKernel.dll` 已不使用。加载器不从 PATH 或当前工作目录发现私有运行时。VTK/OpenCV 的匹配运行时仍需可被程序找到，Qt 则由宿主部署。
 
-`VtkAppHostSession::GetSceneViewState` 与 `GetSceneViewStates` 只允许在 Session owner thread、Running 状态下读取，并返回不含 VTK identity 的每 View 纯值投影；集合按配置 topology 顺序包含当前不可用 View。`presentationRevision` 只表示 App presentation 事务，不覆盖 Camera、Feature 或 Overlay 变化。`GetRenderViewEndpoint(s)` 仍是独立、受 Session 生命周期约束的 VTK 观察能力；scene snapshot 不是可写 scene graph，也不是 Qt model。
+## 宿主接入与生命周期
 
-## SDK 公开头边界
+`VtkAppHostSession` 通过 `BuildSession` 建立会话，通过 `AttachFeature` / `DetachFeature` 接入和移除业务。外部使用请求、结果、状态快照和受生命周期约束的 endpoint，不取得 Host 私有 AppRuntime 或 Context。
 
-SDK 项目头统一位于 `include/MVVCVTK/`，其下只允许 `API/` 与 `SPI/` 两个物理分面。顶层业务入口是 `MVVCVTK/API/Host/VtkAppHostSession.h`、`MVVCVTK/SPI/Host/HostFeature.h`、`MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h`、`MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 映射生成。`MVVCVTKHeaderSurface.txt` 只留在构建树供发布验证使用，不进入 SDK。源码目录和仓内 include 路径保持原样；SDK staging 副本单独改写为安装态路径。Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。`FeatureOverlayBase` 只作为仓内构建支持，不安装到 SDK；Feature SPI 也不携带 `AppTypes`、`RenderParams` 或主体 `VisualStrategy`。
+Qt 宿主使用外部事件循环；当前工作台的 `QtHostPump` 使用 `HostDriven` 模式，分别调用 `SendUpdates` 提交更新、`SendRender` 绘制，不调用面向原生 VTK 循环的 `Start()`。Session 构建、Feature 绑定、渲染写入和显式 `Stop` 在 owner thread（所属线程）执行，跨线程任务通过配置的 `sendOwnerTask` 投递。停止失败保留可重试状态，不能当作已停止。
 
-## 线程与停止规则
-
-- `BuildSession`、Feature/Timer/Hotkey 绑定、渲染写入和 `Stop` 属于 Session owner thread。
-- Qt 宿主应在 `HostSessionConfig::sendOwnerTask` 中把任务投递到 owner event loop。非 owner 析构只会登记拥有型 StopPending entry；不会在错误线程销毁 VTK 对象。
-- owner dispatcher 拒绝或抛异常时，Session 仍由 reaper 持有，可在 owner thread 调用 `SendPendingStops()` 重试。token 防止延迟回调停止后来创建的新 Session。
-- 后台加载、导出和普通图像读取使用固定 worker 与有界队列。取消是 C++17 协作式 stop token；任务必须在切片、行和写入边界观察取消。
-- Session Stop 先广播取消，再使用同一绝对 deadline 等待。超时会保留完整 runtime aggregate 并进入可重试状态，不 detach 线程、不泄漏子对象，也不伪报已停止。
-- 已接纳异步回调只在 owner timer 上消费；未接纳请求不取得 callback。
-
-## 图像读取与信任边界
-
-普通调用者只包含 `MVVCVTK/API/Data/ImageReadTypes.h`。同步读取支持相对源图像的半开 region；chunk 每次最多复制 8 MiB，并通过 region 内 x-fast voxel offset 续读；`StartImageRead` 在固定 executor 上复制不可变快照并在 owner timer 回调。所有尺寸、字节数、region 边界和 offset 都在分配前检查。
-
-外部 Feature 属于 `trusted-in-process` 插件，不是沙箱或安全隔离边界。它可以通过 `TrustedFeatureDataPort` 取得 VTK-backed 不可变快照并执行基于 snapshot identity/version 的 CAS 发布，因此只能加载同一信任域、同一固定 ABI 构建的代码。普通 Session 读取 DTO 不包含 VTK identity 或可写 scalar 指针；只读端口与可信写入端口是不同能力。
+普通图像读取返回不暴露 VTK 对象身份或可写 scalar 指针的值数据；可信 Feature 通过 SPI 取得受约束的数据与渲染能力。Feature 是同一信任域内的进程内扩展，不是沙箱。接口用法与边界另见[Qt 接入指南](md/report/QtIntegrationGuide.md)和[Feature 开发规范](md/development/FEATURE_DEVELOPMENT.md)，具体行为以当前公开头与源码为准。
 
 ## 许可证与第三方通知
 
-本仓库当前没有授予项目源码或二进制的通用再分发许可证；获得明确授权前，不应对外分发。最小定向 SDK 不安装 README 或 NOTICE，相关授权与第三方依赖合规仍由交付双方另行确认。仓库内说明详见 [NOTICE](NOTICE)。
+本仓库当前没有授予项目源码或二进制的通用再分发许可证；获得明确授权前，不应对外分发。最小定向 SDK 不安装 README 或 NOTICE，相关授权与第三方依赖合规由交付双方另行确认。详见 [NOTICE](NOTICE)。
