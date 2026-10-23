@@ -1,19 +1,19 @@
 # AGENTS.md
 
-> **开工加载入口**：先读取 `AGENTS.core.md` 第 0 节并完成其正文加载要求，再开展工程动作。下方文件分工只是导航，不能代替对应正文的加载。
+> **开工加载入口**：先读取 `md/development/core/AGENTS.core.md` 第 0 节并完成其正文加载要求，再开展工程动作。下方文件分工只是导航，不能代替对应正文的加载。
 
 > 适用范围：MVVCVTK 仓库根目录及全部子目录。子目录里更近的 `AGENTS.md` 只覆盖它明确声明的规则。
 >
-> 文件分工：本文件定义项目细则；对话与加载见 `AGENTS.core.md`；工程原则见 `core/ENGINEERING.core.md`；工作推进见 `core/LOOP.core.md`；Git 通用模型见 `core/GIT_WORKFLOW.core.md`；三层协作见 `core/COLLABORATION.core.md`；测试证据见 `core/TESTING.core.md`；Git、分支、工作树与合并流程见 `md/development/GIT_WORKFLOW.md`；命名见 `md/development/NAMING.md`；Feature 开发见 `md/development/FEATURE_DEVELOPMENT.md`；测试与验收见 `md/development/TESTING.md`；SDK 交付见 `md/development/SDK_DELIVERY.md`；Loop 工作方式与任务进度文件见 `md/development/LOOP.md`；派发平台适配见 `platform/paseo/DISPATCH.md`；会话运行时适配见 `platform/runtime/CLAUDE_CODE.md`、`platform/runtime/CODEX.md`。
+> 文件分工：本文件定义项目细则；对话与加载见 `md/development/core/AGENTS.core.md`；工程原则见 `md/development/core/ENGINEERING.core.md`；工作推进见 `md/development/core/LOOP.core.md`；Git 通用模型见 `md/development/core/GIT_WORKFLOW.core.md`；三层协作见 `md/development/core/COLLABORATION.core.md`；测试证据见 `md/development/core/TESTING.core.md`；Git、分支、工作树与合并流程见 `md/development/GIT_WORKFLOW.md`；命名见 `md/development/NAMING.md`；Feature 开发见 `md/development/FEATURE_DEVELOPMENT.md`；测试与验收见 `md/development/TESTING.md`；SDK 交付见 `md/development/SDK_DELIVERY.md`；Loop 工作方式与任务进度文件见 `md/development/LOOP.md`；派发平台适配见 `md/development/platform/paseo/DISPATCH.md`；会话运行时适配见 `md/development/platform/runtime/CLAUDE_CODE.md`、`md/development/platform/runtime/CODEX.md`。
 >
 > 一条规则只在一个文件里定义，其他文件只引用，不复述。
 
-> 本文件为项目层；与 AGENTS.core.md 及所引 core 文件合并适用。扩展范围与优先级见 AGENTS.core.md 第 1.1 节；本文件不改写通用角色关系与裁决规则。
+> 本文件为项目层；与 md/development/core/AGENTS.core.md 及所引 core 文件合并适用。扩展范围与优先级见 md/development/core/AGENTS.core.md 第 1.1 节；本文件不改写通用角色关系与裁决规则。
 
 ## 0. 项目具体值
 
-- 工程主题的触发、角色身份与会话关系见 AGENTS.core.md 第 0 节；本文件只提供本项目的具体值与实施细则。
-- 风险等级唯一定义见 core/ENGINEERING.core.md 第 11 节；本文件第 11 节只列本项目具体判级细则与最低验证，既有门槛不降低。完成级别仍按第 12 节。
+- 工程主题的触发、角色身份与会话关系见 md/development/core/AGENTS.core.md 第 0 节；本文件只提供本项目的具体值与实施细则。
+- 风险等级唯一定义见 md/development/core/ENGINEERING.core.md 第 11 节；本文件第 11 节只列本项目具体判级细则与最低验证，既有门槛不降低。完成级别仍按第 12 节。
 
 | 配置名 | 本项目值 |
 | --- | --- |
@@ -34,9 +34,9 @@
 | 临时输出目录 | `out/` |
 | 实验分支格式 | `experiment/<批次标识>` |
 | 临时子目录 | `out/tmp` |
-| 派发平台 | Paseo；适配文件 `platform/paseo/DISPATCH.md` |
-| 协调者运行时 | 按实际会话使用 Claude Code 或 Codex；分别适用 `platform/runtime/CLAUDE_CODE.md`、`platform/runtime/CODEX.md` |
-| 执行者与子代理运行时 | Codex；适配文件 `platform/runtime/CODEX.md` |
+| 派发平台 | Paseo；适配文件 `md/development/platform/paseo/DISPATCH.md` |
+| 协调者运行时 | 按实际会话使用 Claude Code 或 Codex；分别适用 `md/development/platform/runtime/CLAUDE_CODE.md`、`md/development/platform/runtime/CODEX.md` |
+| 执行者与子代理运行时 | Codex；适配文件 `md/development/platform/runtime/CODEX.md` |
 | 执行者与子代理的派发提供方 ID | `codex` |
 | 项目风险细则 | AGENTS.md 第 11 节 |
 | 项目完成级别 | AGENTS.md 第 12 节 |
@@ -49,13 +49,13 @@
 | 短文件名映射 | `GIT_WORKFLOW.md` → `md/development/GIT_WORKFLOW.md`；`LOOP.md` → `md/development/LOOP.md`；`NAMING.md` → `md/development/NAMING.md`；`FEATURE_DEVELOPMENT.md` → `md/development/FEATURE_DEVELOPMENT.md`；`TESTING.md` → `md/development/TESTING.md`；`SDK_DELIVERY.md` → `md/development/SDK_DELIVERY.md` |
 ## 1. 优先级与规则强度
 
-通用定义见 AGENTS.core.md 第 1.1 节。
+通用定义见 md/development/core/AGENTS.core.md 第 1.1 节。
 
 ## 2. 回复风格
 
-通用定义见 AGENTS.core.md 第 1.2 节。
+通用定义见 md/development/core/AGENTS.core.md 第 1.2 节。
 
-通用定义见 AGENTS.core.md 第 1.3 节。
+通用定义见 md/development/core/AGENTS.core.md 第 1.3 节。
 
 ## 3. 架构不变量
 
@@ -85,37 +85,37 @@
 
 ## 4. 事实来源与授权
 
-本项目构建配置为 CMake；事实取证顺序见 core/ENGINEERING.core.md 第 4 节。
+本项目构建配置为 CMake；事实取证顺序见 md/development/core/ENGINEERING.core.md 第 4 节。
 
-通用定义见 AGENTS.core.md 第 1.2 节。
+通用定义见 md/development/core/AGENTS.core.md 第 1.2 节。
 
-裁决、通知与独立授权见 core/LOOP.core.md 第 14.1 节；SDK 边界的具体判定与落实见 md/development/SDK_DELIVERY.md 第 3 节。
+裁决、通知与独立授权见 md/development/core/LOOP.core.md 第 14.1 节；SDK 边界的具体判定与落实见 md/development/SDK_DELIVERY.md 第 3 节。
 
 ## 5. 开始任务前
 
-适用规范与 Loop 的读取、Git 四项现状检查、目标材料核对的完整开工顺序见 core/LOOP.core.md 第 0 节；启动自检见其第 0.1 节。
+适用规范与 Loop 的读取、Git 四项现状检查、目标材料核对的完整开工顺序见 md/development/core/LOOP.core.md 第 0 节；启动自检见其第 0.1 节。
 
 - 是否涉及 API/SPI、CMake/安装、线程、第三方、性能或破坏性迁移；涉及 SDK 时写清授权来源和具体变化；
 
 ## 6. Git 权限一览
 
-常规提交权限、主干与远端操作权限、提交前的暂存边界统一见 core/GIT_WORKFLOW.core.md 第 0 节；提交范围与说明见其第 3 节。
+常规提交权限、主干与远端操作权限、提交前的暂存边界统一见 md/development/core/GIT_WORKFLOW.core.md 第 0 节；提交范围与说明见其第 3 节。
 
 本项目存放位置见 md/development/GIT_WORKFLOW.md 第 2.1、2.3 节，清理与笔记归档见其第 6.6 节。
 
 ## 7. 文档规则
 
-通用定义见 core/LOOP.core.md 第 7 节。
+通用定义见 md/development/core/LOOP.core.md 第 7 节。
 
 ### 7.1. 结果文件与报告
 
-通用定义见 core/LOOP.core.md 第 7.1 节。
+通用定义见 md/development/core/LOOP.core.md 第 7.1 节。
 
 ## 8. 修改原则
 
 **在保证业务正确、精度和生命周期的前提下：内存尽量低，逻辑尽量简单，渲染尽量快。** 三者需要取舍时，依据当前需求和可比证据选择最简单的可行方案。
 
-通用定义见 core/ENGINEERING.core.md 第 8 节。
+通用定义见 md/development/core/ENGINEERING.core.md 第 8 节。
 
 机器相关的数字和测试门限不进入 Host 公共 API。
 
@@ -141,7 +141,7 @@
 
 ### 10.1. 通用
 
-通用定义见 core/ENGINEERING.core.md 第 10.1 节。
+通用定义见 md/development/core/ENGINEERING.core.md 第 10.1 节。
 
 - 公共头只 include 签名需要的内容，私有依赖放进 `.cpp` 或私有头；不依赖偶然的传递包含。
 
@@ -153,20 +153,20 @@
 
 ### 10.2. 注释与 Pimpl
 
-通用注释要求见 core/ENGINEERING.core.md 第 10.2 节。
+通用注释要求见 md/development/core/ENGINEERING.core.md 第 10.2 节。
 
 - 需要隐藏实现时使用 Pimpl：头文件的私有部分只保留 `class Impl;` 和 `std::unique_ptr<Impl> m_impl;`，完整定义放在 `.cpp`，不在头文件中展开实现；`Impl` 内部不再嵌套另一层 `Impl`。没有私有依赖的小型值类型或策略类不强制使用 Pimpl。
 
 ### 10.3. 线程、异步与回调
 
-通用线程、期限、回调及失败状态要求见 core/ENGINEERING.core.md 第 10.3 节；测试保护超时见 core/TESTING.core.md 第 16.4 节。本项目停止与分离操作为 Stop/Detach，回调接口族契约见 md/development/FEATURE_DEVELOPMENT.md 第 6.2.1 节。
+通用线程、期限、回调及失败状态要求见 md/development/core/ENGINEERING.core.md 第 10.3 节；测试保护超时见 md/development/core/TESTING.core.md 第 16.4 节。本项目停止与分离操作为 Stop/Detach，回调接口族契约见 md/development/FEATURE_DEVELOPMENT.md 第 6.2.1 节。
 
 - Session 构建、Feature/Timer/Hotkey 绑定、渲染写入和显式 Stop 都在 owner thread（所属线程）上进行；其他线程结果通过已批准的 dispatcher 回到 owner thread。
 - 工作线程不得修改 owner thread 管理的 renderer、interactor、widget、actor、mapper 等渲染和交互对象、Host 可变状态或已发布共享快照；遵守所用 VTK 类线程约束时，可创建处理线程私有、尚未发布的候选，例如私有 vtkImageData。
 
 ### 10.4. 状态、快照与几何
 
-通用定义见 core/ENGINEERING.core.md 第 10.4 节。
+通用定义见 md/development/core/ENGINEERING.core.md 第 10.4 节。
 
 `GetSceneViewState(s)` 是只读的每 View 投影，不提供写权限；`presentationRevision` 只覆盖 presentation，不能当作全场景版本号。
 
@@ -186,14 +186,14 @@
 
 ## 11. 本项目判级细则
 
-等级定义与通用判级方法见 core/ENGINEERING.core.md 第 11 节。本节只补充本项目的具体命中条件与最低验证，不重新定义等级。涉及 CMake 修改时，configure 与解决方案完整性核对的适用范围另见 本文件第 11.1 节；该节同时指明测试注册与纯注释的既有例外。
+等级定义与通用判级方法见 md/development/core/ENGINEERING.core.md 第 11 节。本节只补充本项目的具体命中条件与最低验证，不重新定义等级。涉及 CMake 修改时，configure 与解决方案完整性核对的适用范围另见 本文件第 11.1 节；该节同时指明测试注册与纯注释的既有例外。
 
-- L0 的本项目范围：Markdown 文档或纯注释，包含 CMake 注释；通用验证见 core/ENGINEERING.core.md 第 11 节，Git 跟踪状态对应的文件检查见 core/TESTING.core.md 第 0 节。
+- L0 的本项目范围：Markdown 文档或纯注释，包含 CMake 注释；通用验证见 md/development/core/ENGINEERING.core.md 第 11 节，Git 跟踪状态对应的文件检查见 md/development/core/TESTING.core.md 第 0 节。
 - L1：外部契约不变、影响局限且可恢复的私有实现，包括往已有 target 加源文件（只调整私有源码列表）；仅给已有 target 增加或修改测试注册及测试属性（`add_test`、`set_tests_properties` 等，不新增 target、不改 target 属性和依赖）也属 L1。受影响 target 必须完成 Debug x64 构建、相关真实小数据回归和无关 diff 审查；Release 敏感路径补 Release。直接相关测试与失败路径审查按 core 的 L1 要求执行。
 - L1 的测试注册例外：仅有上述测试注册或测试属性改动时，最低验证改为重新 configure，确认目标用例已注册（`ctest -N` 只用于注册确认，不算通过），构建该已有 target，并实际运行受影响的用例。
 - **L2、L3 共同的最低验证**：Debug/Release 相关构建和测试；只验证实际受影响的 Feature 开关、Host 独立构建和消费者边界。
 - L2：公共头、HostAPI/FeatureSPI、新增 target，或改变现有 target 的类型、对外编译接口、依赖传播、构建开关、导出或安装行为；header surface、PUBLIC 依赖、安装/package 均按 L2。最低验证按本节上述共同要求执行。
-- L3：Host 核心机制、线程/停止、数据发布、渲染资源、第三方 bridge/runtime 按 L3。除 core 的 L3 完整测试与独立复核要求外，在本节上述 L2、L3 共同最低验证基础上，执行并发、取消、回滚、负例专项和真实数据或质量审计。三层协作中的独立复核按 core/COLLABORATION.core.md 第 13.2 节执行。
+- L3：Host 核心机制、线程/停止、数据发布、渲染资源、第三方 bridge/runtime 按 L3。除 core 的 L3 完整测试与独立复核要求外，在本节上述 L2、L3 共同最低验证基础上，执行并发、取消、回滚、负例专项和真实数据或质量审计。三层协作中的独立复核按 md/development/core/COLLABORATION.core.md 第 13.2 节执行。
 - 性能改动按实际改动范围判级，须提供改动前后可比较的测量；不把性能主题本身作为自动升入 L3 的理由。
 - 只调整已有 target 的私有源码列表按 L1；命中本项目其他 L2/L3 条件时升级。各级验证仍按实际受影响的范围选择，不把级别继承理解为重跑无关模块。
 - 缺少环境或数据时，列出未执行项和可复现的命令。
@@ -226,9 +226,9 @@ CMake 修改合入目标工作树（包括用户日常打开的工作树）后�
 
 ## 12. 验证与完成声明
 
-通用定义见 core/TESTING.core.md 第 0 节。
+通用定义见 md/development/core/TESTING.core.md 第 0 节。
 
-通用定义见 AGENTS.core.md 第 1.2 节。
+通用定义见 md/development/core/AGENTS.core.md 第 1.2 节。
 
 - 合成数据和 mock 只能证明数值、边界和失败路径；**Feature 的正向验收必须通过实际公共入口跑真实数据。** 小数据不能证明整卷数据的性能和资源上限。
 
@@ -248,9 +248,9 @@ CMake 修改合入目标工作树（包括用户日常打开的工作树）后�
 
 ## 13. Skill、图谱与多 Agent
 
-通用定义见 core/ENGINEERING.core.md 第 13 节。
+通用定义见 md/development/core/ENGINEERING.core.md 第 13 节。
 
-通用定义见 core/COLLABORATION.core.md 第 13 节。
+通用定义见 md/development/core/COLLABORATION.core.md 第 13 节。
 
 ### 13.1. 三层分工
 
@@ -260,13 +260,13 @@ CMake 修改合入目标工作树（包括用户日常打开的工作树）后�
 | 执行者 | Codex `gpt-6.1-sol`，思考强度 max |
 | 子代理 | Codex `gpt-6-luna`，思考强度 low |
 
-通用定义见 core/COLLABORATION.core.md 第 13.1 节。
+通用定义见 md/development/core/COLLABORATION.core.md 第 13.1 节。
 
-运行时具体值见本文件第 0 节；配置路径及权限适配见 platform/runtime/CODEX.md 第 1、2 节。
+运行时具体值见本文件第 0 节；配置路径及权限适配见 md/development/platform/runtime/CODEX.md 第 1、2 节。
 
 ### 13.2. 协调者
 
-通用定义见 core/COLLABORATION.core.md 第 13.2 节。
+通用定义见 md/development/core/COLLABORATION.core.md 第 13.2 节。
 
 本项目资源占用重的任务包括全量构建、整卷数据和 GPU 任务。
 
@@ -274,11 +274,11 @@ CMake 修改合入目标工作树（包括用户日常打开的工作树）后�
 
 - 按 本文件第 11.1 节需要核对解决方案时，必查核对结果；缺少就退回补查。
 
-关键 SDK 边界改动同样触发 core/COLLABORATION.core.md 第 13.2 节 的独立复核流程。
+关键 SDK 边界改动同样触发 md/development/core/COLLABORATION.core.md 第 13.2 节 的独立复核流程。
 
 ### 13.3. 执行者
 
-通用定义见 core/COLLABORATION.core.md 第 13.3 节。
+通用定义见 md/development/core/COLLABORATION.core.md 第 13.3 节。
 
 本项目摘要还需写明是否触及公开头、CMake、线程、数据发布或 SDK 边界。
 
@@ -286,10 +286,10 @@ CMake 修改合入目标工作树（包括用户日常打开的工作树）后�
 
 ### 13.4. 子代理
 
-通用定义见 core/COLLABORATION.core.md 第 13.4 节。
+通用定义见 md/development/core/COLLABORATION.core.md 第 13.4 节。
 
 ## 14. 提问与完成报告
 
-协调者给用户的裁决、通知与回复模板见 core/LOOP.core.md 第 14 节；执行者报告与子代理回执见 core/COLLABORATION.core.md 第 13.3、13.4 节。
+协调者给用户的裁决、通知与回复模板见 md/development/core/LOOP.core.md 第 14 节；执行者报告与子代理回执见 md/development/core/COLLABORATION.core.md 第 13.3、13.4 节。
 
 本项目报告中的主要修改还须说明 CMake 接入方式及 SDK 边界实际变化；SDK 具体边界引用 md/development/SDK_DELIVERY.md 第 3 节。

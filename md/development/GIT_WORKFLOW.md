@@ -14,15 +14,15 @@
 
 - Feature 和项目主体实现按第 2.1 节从本轮核实的 baseline 创建开发分支和独立工作树。
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 1.1 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 1.1 节。
 
 ### 1.2. 远端状态
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 1.2 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 1.2 节。
 
 ### 1.3. baseline 与基线字段
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 1.3 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 1.3 节。
 
 ## 2. 工作树
 
@@ -35,7 +35,7 @@
 <repoParent>/MVVCVTK-worktrees/<branchKey>/   # 每个开发或实验分支一个工作树
 ```
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 2.1 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 2.1 节。
 
 - **baseline 执行例外**：构建新的 SDK 发布包（发行）和合并本身在 baseline 树中进行；合并本身包括合并后在目标树重新 configure 以同步解决方案。合并后的构建、测试与业务验证仍使用派生工作树。
 
@@ -49,7 +49,7 @@
 
 ### 2.2. 规范文件的初始化
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 2.2 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 2.2 节。
 
 ### 2.3. 构建隔离
 
@@ -66,13 +66,13 @@
 
 SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVERY.md` 第 11 节执行。
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 2.3 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 2.3 节。
 
 - **临时文件留在工作树内**：执行构建、测试和脚本前，把 `TEMP` 和 `TMP` 指向本工作树的 `out/tmp`（不存在就先创建），让 CMake、MSBuild、CTest 等工具的临时文件不写到系统盘。
 
 ## 3. 开发分支上的提交
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 3 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 3 节。
 
 ## 4. 实验集成
 
@@ -82,9 +82,9 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 
 批准集成不包括 SDK 扩张。
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 4.1 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 4.1 节。
 
-- 实验分支作为批次外新 Feature 的起点前，披露依赖和继承影响，按 core/LOOP.core.md 第 14.1 节决定，遵守用户锁定的任务范围。
+- 实验分支作为批次外新 Feature 的起点前，披露依赖和继承影响，按 md/development/core/LOOP.core.md 第 14.1 节决定，遵守用户锁定的任务范围。
 
 ### 4.2. 合并顺序
 
@@ -92,27 +92,27 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 
 ### 4.3. 每一步合并
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 4.3 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 4.3 节。
 
 ### 4.4. 强同步（例外情况）
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 4.4 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 4.4 节。
 
 ### 4.5. 语义冲突与继承关系
 
 - 没有 Git 文本冲突，也要检查以下语义冲突：同义类型、callback 契约、数据版本、输入注册、生命周期、渲染资源，以及 CMake 和公开面。不用临时 wrapper 或第二套状态掩盖。
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 4.5 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 4.5 节。
 
 冲突修复涉及 SDK 边界时，同样暂停相关部分核对授权。
 
 ### 4.6. 失败与阻塞
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 4.6 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 4.6 节。
 
 ## 5. 合入主干
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 5 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 5 节。
 
 ## 6. 合并后的文档转移与回收
 
@@ -120,33 +120,33 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 
 ### 6.1. 什么时候删除工作树
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 6.1 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 6.1 节。
 
 ### 6.2. 文档转移
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 6.2 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 6.2 节。
 
 ### 6.3. 删除前检查
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 6.3 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 6.3 节。
 
 ### 6.4. 执行
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 6.4 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 6.4 节。
 
-工具策略拒绝的处理引用 core/GIT_WORKFLOW.core.md 第 6.4 节，不以历史工具表现设置其他模型或派发途径。
+工具策略拒绝的处理引用 md/development/core/GIT_WORKFLOW.core.md 第 6.4 节，不以历史工具表现设置其他模型或派发途径。
 
 ### 6.5. 测试验证用工作树
 
 测试验证用工作树是只为构建、测试、验证或复现而临时创建的工作树，例如对某个精确提交做回归、复现问题、跑性能测试或正式 SDK 的验证构建。它不承载开发改动。
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 6.5 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 6.5 节。
 
 - **交付物先移走**：正式 SDK 交付生成的 ZIP 等交付物，先移到符合第 2.1 节要求的约定交付位置，再删除工作树。中间文件按第 6.6 节清理。
 
 ### 6.6. 任务完成后的清理与笔记归档
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 6.6 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 6.6 节。
 
 - **baseline 临时输出**：本条只适用于第 2.1 节规定的发行与合并，只回收本任务独占的临时目录。baseline 原有的 preset 构建目录、用户日常打开的解决方案和共享输出按原用途保留。
 
@@ -162,4 +162,4 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 
 ## 7. 主干上的纯文档维护
 
-通用定义见 core/GIT_WORKFLOW.core.md 第 7 节。
+通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 7 节。

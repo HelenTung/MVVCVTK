@@ -62,7 +62,7 @@
 
 未修改的源码也可能受公共契约、数据语义、共享实现、生命周期、开关或依赖变化影响。沿这些变化检查直接和间接使用路径。同仓、同 SDK 或共用未变化的依赖，不构成重跑其他模块全部测试的理由。必要的依赖编译、链接也不等于依赖业务需要重新验收。
 
-通用定义见 core/TESTING.core.md 第 3.2 节。
+通用定义见 md/development/core/TESTING.core.md 第 3.2 节。
 
 ## 4. 测试准入
 
@@ -95,7 +95,7 @@
 
 ### 4.3. 先定义验收条件
 
-通用定义见 core/TESTING.core.md 第 4.3 节。
+通用定义见 md/development/core/TESTING.core.md 第 4.3 节。
 
 ## 5. 真实数据与样本管理
 
@@ -157,7 +157,7 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 
 ### 6.1. 参考结果的来源
 
-通用定义见 core/TESTING.core.md 第 6.1 节。
+通用定义见 md/development/core/TESTING.core.md 第 6.1 节。
 
 ### 6.2. 按输出选择断言
 
@@ -212,7 +212,7 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 
 ### 7.1. 用例的最小结构
 
-通用定义见 core/TESTING.core.md 第 7.1 节。
+通用定义见 md/development/core/TESTING.core.md 第 7.1 节。
 
 ### 7.2. 测试代码的边界
 
@@ -252,13 +252,13 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 
 ### 7.6. 测试有效性、纠错与去重
 
-通用定义见 core/TESTING.core.md 第 7.6 节。
+通用定义见 md/development/core/TESTING.core.md 第 7.6 节。
 
 纠正、合并或淘汰无新增价值的重复矩阵、仅复述 mock 值、复制实现生成预期、无依据等待及只检查非空的业务测试。头自足、链接、私有头拒绝、解析几何和命中目标的故障注入仍有各自价值。
 
 ### 7.7. 过时测试清理
 
-通用定义见 core/TESTING.core.md 第 7.7 节。
+通用定义见 md/development/core/TESTING.core.md 第 7.7 节。
 
 ## 8. 通用数据、几何与状态测试
 
@@ -374,7 +374,7 @@ admission 风格拒绝是否同步回调按端口声明；`SendRequestResult` �
 
 先确定业务入口、真实规模、硬件/驱动、工具链、配置、Feature/runtime、计算分辨率、实际显示质量、指标、测量边界和不可退化项。
 
-通用定义见 core/TESTING.core.md 第 12.1 节。
+通用定义见 md/development/core/TESTING.core.md 第 12.1 节。
 
 正式性能结论用 Release，同条件对照。Git 集成基线、性能基线和业务参考分别使用；缺性能证据只阻塞相应结论。
 
@@ -398,7 +398,7 @@ admission 风格拒绝是否同步回调按端口声明；`SendRequestResult` �
 
 预先确定冷/热条件、预热、次数、窗口、统计、测试保护超时、比较容差和复跑规则，参数来源按第 6.3 节。保留所有有效运行与异常，不只选最快或最后一次成功。
 
-通用定义见 core/TESTING.core.md 第 12.3 节。
+通用定义见 md/development/core/TESTING.core.md 第 12.3 节。
 
 新旧输入、参数、质量、依赖和资源限制要可比；不可比时分组，不按主频或体素比例代替实测。候选自身增加的线程和搬运不能当外部噪声剔除。
 
@@ -435,7 +435,7 @@ admission 风格拒绝是否同步回调按端口声明；`SendRequestResult` �
 
 ## 14. 多分支集成与滚动基线回归
 
-通用定义见 core/TESTING.core.md 第 14 节。
+通用定义见 md/development/core/TESTING.core.md 第 14 节。
 
 构建、注册、依赖或生成条件变化时重新配置；实际受影响时补 Host 独立、Feature ON/OFF、公开头和 runtime 边界。无文本冲突也检查重复注册、同义类型、回调、版本和缓存语义。涉及 CMake 修改时，解决方案同步与完整性核对见 根 `AGENTS.md` 第 11.1 节。
 
@@ -496,11 +496,11 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 
 ### 16.3. 专项入口
 
-通用定义见 core/TESTING.core.md 第 16.3 节。
+通用定义见 md/development/core/TESTING.core.md 第 16.3 节。
 
 ### 16.4. 进程与资源清理
 
-通用定义见 core/TESTING.core.md 第 16.4 节。
+通用定义见 md/development/core/TESTING.core.md 第 16.4 节。
 
 ## 17. 结果状态、统计与失败处理
 
@@ -508,19 +508,19 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 
 ### 17.1. 用例状态
 
-通用定义见 core/TESTING.core.md 第 17.1 节。
+通用定义见 md/development/core/TESTING.core.md 第 17.1 节。
 
 本项目 FAIL 也包括超出业务期限或 Stop/Detach 等待期限。
 
 ### 17.2. 数量对账
 
-通用定义见 core/TESTING.core.md 第 17.2 节。
+通用定义见 md/development/core/TESTING.core.md 第 17.2 节。
 
 点级精度数量按第 6.5 节另算。
 
 ### 17.3. 环境问题与产品缺陷
 
-通用定义见 core/TESTING.core.md 第 17.3 节。
+通用定义见 md/development/core/TESTING.core.md 第 17.3 节。
 
 ### 17.4. 缺陷处置优先级
 
@@ -534,11 +534,11 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 
 ### 17.5. 修复、重试与中止
 
-通用定义见 core/TESTING.core.md 第 17.5 节。
+通用定义见 md/development/core/TESTING.core.md 第 17.5 节。
 
 ### 17.6. 暂停后恢复
 
-通用定义见 core/TESTING.core.md 第 17.6 节。
+通用定义见 md/development/core/TESTING.core.md 第 17.6 节。
 
 集成恢复时重新核对源 HEAD、实验已验证基线、待合名单、依赖和同步策略，分别保留受阻与可独立继续分支的状态；按 `GIT_WORKFLOW.md` 第 4.3、4.4、4.6 节确认下一源分支同步验证及强同步屏障。正式 SDK 恢复重建受变化影响的交付证据链。
 
@@ -570,13 +570,13 @@ SDK 生成入口是 `./tools/release/Build-MVVCVTKSdk.ps1`；参数和真实输�
 
 ### 19.1. 追溯与报告
 
-通用定义见 core/TESTING.core.md 第 19.1 节。
+通用定义见 md/development/core/TESTING.core.md 第 19.1 节。
 
 把解释结论所需的范围、单位、参数、参考、结果、失败和限制写进测试报告或任务记录（记录方式见 `LOOP.md`）。本次验证的证据归档、工作树保留与删除按 `GIT_WORKFLOW.md` 第 6.5、6.6 节执行。正式交付的产物对应及内容校验照常执行，精度研究保留本文第 6.5 节的分组、覆盖和误差。
 
 ### 19.2. 证据失效与复用
 
-通用定义见 core/TESTING.core.md 第 19.2 节。
+通用定义见 md/development/core/TESTING.core.md 第 19.2 节。
 
 正式交付执行要求见第 15.5 节；普通开发复用不能取消安装态、真实业务和 ZIP 门禁。
 
