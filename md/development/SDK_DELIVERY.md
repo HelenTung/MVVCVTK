@@ -279,7 +279,7 @@ SDK 产品构建的预设和构建目录按第 11.2 节选择，Debug/Release �
 
 正式交付不使用 `-SkipTests` 或 `-SkipCleanRoom`，它们只用于诊断包。历史测试不能替代本次正式交付的必需执行。
 
-`-MetrologyMesh` 为可选参数，真实 C3 VTP 不作为构建或打包前置。传入时仍须核对文件和 SHA-256，并按本次测试与 clean-room 执行范围完成对应验证；不传时仅跳过该项，脚本结束摘要和发布完成报告必须如实列为“未执行（NOT_RUN）”，不得计为通过。其他必需门禁不变。
+`-MetrologyMesh` 为可选参数，真实 C3 VTP 不作为构建或打包前置。传入时仍须核对文件和 SHA-256，并按本次测试与 clean-room 执行范围完成对应验证；不传时仅该项不执行，脚本结束摘要和发布完成报告必须如实列为“未执行（NOT_RUN，非门禁）”，不得计为通过，按 md/development/core/TESTING.core.md 第 17.1 节处理状态与门禁的关系。其他必需门禁不变。
 
 正式交付（不使用 `-SkipTests`）使用 `vs2026-sdk-tested-x64`；诊断包使用 `-SkipTests` 时使用 `vs2026-sdk-products-x64`；构建目录由预设的 `binaryDir` 决定。从本次工作树的发布脚本和 `CMakePresets.json` 核对 `-Preset` 接受集合，并确认符合批准集合；差异按第 2.2 节处理。
 
