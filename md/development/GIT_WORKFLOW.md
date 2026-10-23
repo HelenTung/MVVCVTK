@@ -68,7 +68,7 @@ SDK 生成的构建目录、同次打包与旧产物检查统一按 `SDK_DELIVER
 
 通用定义见 md/development/core/GIT_WORKFLOW.core.md 第 2.3 节。
 
-- **临时文件留在工作树内**：执行构建、测试和脚本前，把 `TEMP` 和 `TMP` 指向本工作树的 `out/tmp`（不存在就先创建），让 CMake、MSBuild、CTest 等工具的临时文件不写到系统盘。
+- **临时文件留在工作树内**：TEMP/TMP 的设置要求见根 AGENTS.md 第0节“临时环境变量”；任务产物的隔离对象和位置范围仍按本节及第2.1节执行。
 
 ## 3. 开发分支上的提交
 
