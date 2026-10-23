@@ -4,27 +4,15 @@
 
 任务分类与通用工作方式见 md/development/core/LOOP.core.md 第 0 节；本项目只写文档分类的文档格式范围为 Markdown。 本项目纯注释改动包括 CMake 注释，且所有非注释内容保持不变；纯注释不要求重新 configure 和解决方案核对。
 
-## 1. 工作方式
+## 通用规则入口
 
-通用定义见 md/development/core/LOOP.core.md 第 1 节。
+| 主题 | 唯一正文 |
+| --- | --- |
+| 工作方式 | [Loop推进](core/LOOP.core.md#work-loop) |
+| 任务进度文件 | [记录结构与写入者](core/LOOP.core.md#task-record) |
+| 存放与写回 | [收尾记录转移](core/LOOP.core.md#record-handoff) |
+| 续接与优先级 | [任务续接](core/LOOP.core.md#task-continuation) |
+| 多协调者 | [baseline协调](core/LOOP.core.md#baseline-coordination) |
+| 已填模板 | [示例入口](core/LOOP.core.md#task-record-examples)，材料位置取根项目配置 |
 
-## 2. `TASK_LOOP.md` 规则
-
-通用定义见 md/development/core/LOOP.core.md 第 2 节。
-
-## 3. 存放与写回
-
-通用定义见 md/development/core/LOOP.core.md 第 3 节。
-
-## 4. 续接与优先级
-
-通用定义见 md/development/core/LOOP.core.md 第 4 节。
-
-## 5. 多协调者
-
-通用定义见 md/development/core/LOOP.core.md 第 5 节。
-
-## 6. `TASK_LOOP.md` 模板
-
-通用定义见 md/development/core/LOOP.core.md 第 6 节。
 <!-- 规范文件结束：md/development/LOOP.md -->

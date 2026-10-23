@@ -89,7 +89,7 @@ SDK 边界变更的独立授权门禁见 md/development/core/LOOP.core.md 第 14
 
 ### 4.2 接口 target
 
-`MVVCVTK::HostAPI`、`MVVCVTK::FeatureSPI` 是随 package 导出的自足接口 target，不是产品 component，也不反向链接 Host 实现库。
+接口 target 的自足性与依赖方向见[共同接口边界](../../AGENTS.md#interface-targets)。`MVVCVTK::HostAPI`、`MVVCVTK::FeatureSPI` 随 package 导出，不是产品 component，也不反向链接 Host 实现库。
 
 ### 4.3 不导出的内部内容
 
@@ -203,7 +203,7 @@ MVVCVTKTargets-release.cmake
 
 ### 8.2 DefX 私有运行时
 
-DefX 只属于 GapAnalysis 的私有 bridge/runtime。当前结构每个配置只交付 `GapKernel.dll` 与 `DefXAnalysis.dll`，具体文件以本轮核实的主分支提交上的 DefX 预期清单及批准差异为准。
+DefX 的共同隔离边界见[项目架构不变量](../../AGENTS.md#vendor-boundary)。当前结构每个配置只交付 `GapKernel.dll` 与 `DefXAnalysis.dll`，具体文件以本轮核实的主分支提交上的 DefX 预期清单及批准差异为准。
 
 `GapKernel.dll` 替代旧名 `MVVCVTKGapKernel.dll`，旧名不再提供。接收方须更新部署脚本、复制与校验清单，以及按文件名显式加载该 DLL 的调用点。
 
@@ -213,7 +213,7 @@ DefX 只属于 GapAnalysis 的私有 bridge/runtime。当前结构每个配置�
 
 ### 8.3 Qt
 
-Qt 的头、库、DLL、plugin、CMake package、qmake 和部署由接收方宿主提供，不进入 Host、Feature 公共依赖或 SDK。
+宿主归属与项目接口限制见[Qt边界](../../AGENTS.md#qt-boundary)。SDK 不交付 Qt 的头、库、DLL、plugin、CMake package 或 qmake；Qt 部署也不属于 SDK 交付。
 
 ### 8.4 消费者 CMake 图
 

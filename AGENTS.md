@@ -67,6 +67,7 @@
 | 累计会话上限 | 每个执行任务默认累计创建不超过 7 个子代理会话；用户可对具体任务明确放宽 |
 | 脚本工具 | PowerShell 工具 |
 | 收尾笔记文件 | `归纳笔记.md` |
+| 协作示例材料 | [协作记录与回复示例](md/agent-guides/协作记录与回复示例.md)，非规范材料，协调者按需读取 |
 | 占用检查进程 | git、cmake、MSBuild、devenv 进程 |
 | 临时输出目录 | `out/` |
 | 实验分支格式 | `experiment/<批次标识>` |
@@ -95,6 +96,8 @@
 
 通用定义见 md/development/core/AGENTS.core.md 第 1.3 节。
 
+<a id="architecture-invariants"></a>
+
 ## 3. 架构不变量
 
 以下是长期边界。代码变化时以当前源码和 CMake 为准核实，不凭本文记忆下结论。
@@ -103,17 +106,27 @@
 
 - `VtkAppHostSession` 是 Host 的组合根。外部只通过 Host API 的请求、结果、状态快照和 endpoint 交互，拿不到 `AppRuntime`、`Context`、窗口实现或内部 service。
 
-- Host 不依赖任何具体 Feature；Feature 之间互不依赖；Feature 不包含 Host 私有头。
+<a id="feature-dependencies"></a>
+
+- Host、Host API 和 Feature SPI 不依赖任何具体 Feature；Feature 之间互不依赖；Feature 不包含 Host 私有头。
+
+<a id="interface-targets"></a>
 
 - `MVVCVTK::HostAPI` 和 `MVVCVTK::FeatureSPI` 是自足接口 target。Host 公开依赖 HostAPI、内部使用 FeatureSPI；Feature 公开依赖 FeatureSPI。
 
 - SDK 按批准白名单交付；产品、公开分面、依赖和排除内容见 `SDK_DELIVERY.md` 第 4、7 至 9 节。
 
-- Feature 是可信的进程内扩展，不是沙箱。普通 Host 数据读取用不暴露 VTK 对象身份的值类型；只有经过审查的 SPI 能力可以携带 VTK 快照或窄 VTK 契约。
+<a id="feature-trust-data"></a>
 
-- Qt 由接收方宿主提供，不进入 Host 或 Feature；SDK 交付边界见 `SDK_DELIVERY.md` 第 8.3 节。
+- Feature 是可信的进程内扩展，不是沙箱。普通 Host 数据读取用不暴露 VTK 对象身份、scalar 指针或内部 mapper/actor 身份的值类型；只有经过审查的 SPI 能力可以携带 VTK 快照或窄 VTK 契约。
 
-- DefX 只存在于 GapAnalysis 的私有 bridge/runtime 中，供应商的 C++、STL、VTK 类型不能穿过这个边界。
+<a id="qt-boundary"></a>
+
+- Qt 由接收方宿主提供，不进入 Host 或 Feature；Qt 类型不进入 Host API、Feature SPI 或 Feature 公共 API。SDK 交付边界见 `SDK_DELIVERY.md` 第 8.3 节。
+
+<a id="vendor-boundary"></a>
+
+- DefX 只存在于 GapAnalysis 的私有 bridge/runtime 中；私有三方 bridge 的供应商 C++、STL、VTK 类型不能穿过对应的 C/POD 边界。
 
 - `FeatureSupport` 只是仓内构建期支持层：保持最小，不承载单个 Feature 的业务；安装边界见 `SDK_DELIVERY.md` 第 4.3 节。
 

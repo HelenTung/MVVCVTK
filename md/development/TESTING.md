@@ -4,7 +4,7 @@
 >
 > 本文件规定测试范围、方法和判定；架构与风险见根 `AGENTS.md`，集成流程见 `GIT_WORKFLOW.md`，Feature 契约见 `FEATURE_DEVELOPMENT.md`，正式交付见 `SDK_DELIVERY.md`。
 
-> 通用定义按以下同号转接；本文件保留本项目的具体实施要求。
+> 通用定义按各节引用转接；本文件保留本项目的具体实施要求。
 
 ## 1. 定位、适用规则与职责边界
 
@@ -321,9 +321,7 @@ p_roi(j) = o_roi + D × (s ⊙ j) = p(a + j)
 
 ### 10.2. 按接口族验证回调
 
-回调契约见 `FEATURE_DEVELOPMENT.md` 第 6.2.1 节，测试分别覆盖同步拒绝、已接纳完成、同步完成、空 callback、异常和重入。
-
-admission 风格拒绝是否同步回调按端口声明；`SendRequestResult` 包装在有效 callback 下同步拒绝也完成一次。已接纳请求成功、失败或取消恰好完成一次，不排入二次完成。
+回调契约以[接口族拒绝与完成规则](FEATURE_DEVELOPMENT.md#callback-family-contract)为准；测试分别覆盖同步拒绝、已接纳请求的成功／失败／取消、同步完成、空 callback、异常和重入，并核验实际完成次数，不在测试规范重写生产契约。
 
 ### 10.3. 必测交错与重入
 
@@ -337,7 +335,7 @@ admission 风格拒绝是否同步回调按端口声明；`SendRequestResult` �
 
 - 连续请求和积压；核验队列、合并/拒绝策略及 tick 工作量。
 
-调用 callback 前状态已提交，返回后重新核验对象和版本；同线程不等于重入安全，取消接纳也不等于任务已结束。
+回调前后状态与版本核验按[通用线程与回调不变量](core/ENGINEERING.core.md#thread-callback-invariants)检查；同线程不等于重入安全，取消接纳也不等于任务已结束。
 
 ## 11. 渲染、交互与多 Feature 隔离
 

@@ -31,7 +31,7 @@
     └── 私有：GapKernel.dll -> DefX runtime
 ```
 
-上图是产品组合示例，实际批准集合按 `SDK_DELIVERY.md` 第 2.3 节核对。`VtkAppHostSession` 通过 `AttachFeature(const std::shared_ptr<HostFeature>&)` 接入 Feature；Host 不静态依赖具体 Feature，Standalone 负责显式组合。
+上图是产品组合示例，实际批准集合按 `SDK_DELIVERY.md` 第 2.3 节核对。`VtkAppHostSession` 通过 `AttachFeature(const std::shared_ptr<HostFeature>&)` 接入 Feature；Standalone 负责显式组合，依赖边界见[共同依赖方向](../../AGENTS.md#feature-dependencies)。
 
 ### 2.2 公开分面
 
@@ -76,34 +76,28 @@ Host 和 Feature 只能通过 `PRIVATE` 依赖在构建树内使用 `FeatureSupp
 
 ### 4.1 边界矩阵
 
-FeatureSupport 的依赖、使用方式和边界见第 3.4 节。
+全表遵守[共同架构不变量](../../AGENTS.md#architecture-invariants)，其中[共同依赖方向](../../AGENTS.md#feature-dependencies)、[Qt边界](../../AGENTS.md#qt-boundary)与[供应商隔离](../../AGENTS.md#vendor-boundary)不在此重复定义；下表保留层内公开面和实现约束。FeatureSupport 的依赖、使用方式和边界见第 3.4 节。
 
 | 区域 | 可以依赖 | 可以公开 | 禁止 |
 | --- | --- | --- | --- |
-| Host API | 稳定值类型、批准的 endpoint/契约 | `VtkAppHostSession`、请求/结果/状态等 | 具体 Feature、Qt、DefX、AppRuntime/Context |
-| Feature SPI | Host 提供的窄端口、可信 view/data/overlay/render 契约 | `HostFeature` 及其物理闭包 | 具体 Feature、Host 私有实现、宿主 UI |
-| Feature 公共 API | Feature SPI、签名必需类型、经审查的 VTK 类型 | 入口、Config/Request/Result/State、必要的值类型 | Algorithm/Service/Router/Widget 实现、私有 bridge、Qt/DefX 类型 |
-| Feature 私有实现 | 本 Feature 公共 API、Feature SPI、VTK、FeatureSupport、批准的第三方 | 不安装、不导出 | Host 私有头、其他 Feature |
-| 私有三方 bridge | 批准的供应商 API | 只对所属 Feature 暴露窄 C/POD 边界 | 让供应商 C++/STL/VTK 类型穿过边界 |
+| Host API | 稳定值类型、批准的 endpoint/契约 | `VtkAppHostSession`、请求/结果/状态等 | Host 私有实现 |
+| Feature SPI | Host 提供的窄端口、可信 view/data/overlay/render 契约 | `HostFeature` 及其物理闭包 | Host 私有实现、宿主 UI |
+| Feature 公共 API | Feature SPI、签名必需类型、经审查的 VTK 类型 | 入口、Config/Request/Result/State、必要的值类型 | Algorithm/Service/Router/Widget 实现、私有 bridge |
+| Feature 私有实现 | 本 Feature 公共 API、Feature SPI、VTK、FeatureSupport、批准的第三方 | 不安装、不导出 | 按上述共同依赖方向核对 |
+| 私有三方 bridge | 批准的供应商 API | 只对所属 Feature 暴露窄 C/POD 边界 | 按上述供应商隔离核对 |
 | Standalone | Host 与启用的 Feature | 不安装 | 绕过 Feature 公共入口、决定 SDK 组合 |
 
 ### 4.2 依赖方向
 
-```text
-允许：应用 -> Host、应用 -> 具体 Feature、Host -> HostAPI、Host -> FeatureSPI（内部）
-      具体 Feature -> FeatureSPI、GapAnalysis -> 私有 GapKernel -> DefX
-禁止：Host -> 任何具体 Feature、Feature A -> Feature B、Feature -> Host 私有 include
-      FeatureSPI -> 具体 Feature
-```
+共同依赖方向见[项目架构不变量](../../AGENTS.md#feature-dependencies)。应用显式链接 Host 与所选 Feature；GapAnalysis 的私有实现链为 `GapAnalysis -> GapKernel -> DefX`。
 
 ### 4.3 Qt
 
-Qt 由接收方宿主提供，Feature 不负责 Qt 的版本、部署、DLL 或宿主 UI。Qt 类型不进入 Host API、Feature SPI 或 Feature 公共 API。不为 Feature 新建 Qt wrapper；需要 UI 时，由外部宿主把用户操作转换成 Feature 请求。
+共同归属与接口限制见[Qt边界](../../AGENTS.md#qt-boundary)。Feature 不负责 Qt 的版本、部署、DLL 或宿主 UI。不为 Feature 新建 Qt wrapper；需要 UI 时，由外部宿主把用户操作转换成 Feature 请求。
 
 ### 4.4 VTK
 
-- Feature SPI 是可信边界，可以使用经过审查的 VTK 快照、renderer 或窄渲染契约。
-- 新增的普通 Host 数据 DTO 不引入可写的 VTK 对象身份、scalar 指针或内部 mapper/actor 身份。
+- Feature SPI 与普通 Host 数据读取的共同约束见[可信扩展与数据边界](../../AGENTS.md#feature-trust-data)；经审查的窄渲染契约可以涉及 renderer。
 - Feature 公共 API 只有在业务输入本身就是 VTK 数据、转换成值类型明显不合理时，才可以新增 VTK 类型；必须检查所有权、可空性、线程、ABI 和安装依赖传播。
 - 不把 `vtkRenderer`、`vtkRenderWindowInteractor` 或完整的 App 视图对象保存成跨生命周期的全局引用，只通过 SPI 取得受约束的 view/lease/port。
 
@@ -185,6 +179,8 @@ SDK 公开面的禁入内容和已批准窄 SPI 的判定按 `SDK_DELIVERY.md` �
 - 异步请求的同步返回值表示“是否接纳”，不能冒充最终成功。
 - 调用方需要区分失败原因、版本冲突、取消和结果数据时，使用结构化的 Result；只有单纯的成功/失败、调用方也没有恢复分支时，才用 `bool`。
 
+<a id="callback-family-contract"></a>
+
 #### 6.2.1 拒绝与完成回调（各接口族分别声明）
 
 | 接口族 / 情形 | 同步返回 | 回调要求 |
@@ -194,7 +190,7 @@ SDK 公开面的禁入内容和已批准窄 SPI 的判定按 `SDK_DELIVERY.md` �
 | 已接纳的请求 | 接纳不等于成功 | 成功、失败、取消三者恰好完成一次；Stop/Detach 引起的取消也算 |
 
 - “拒绝后没有后续回调”不等于“禁止同步失败回调”；但同一个请求不能先同步回调失败、再异步完成一次。
-- 每个入口都要写明：回调在哪个线程、是否可能在发送函数返回前执行、重入规则和异常策略。
+- 每个入口按[通用线程与回调不变量](core/ENGINEERING.core.md#thread-callback-invariants)声明回调契约，并写明异常策略。
 - 测试按接口族分别覆盖，不为了迎合一条通用断言而修改已有的公开回调语义。
 
 ### 6.3 State 与 Result
@@ -269,7 +265,7 @@ worker 数、队列容量和内存上限显式给出，不为每个请求新建�
 
 ### 7.7 回调重入
 
-回调里可能立即查询、再次请求、取消、Detach 或 Stop，允许哪些操作要写进接口契约。规则见根 `AGENTS.md` 第 10.3 节：先完成状态转换再调用用户代码、不持锁回调、回调返回后重新核验。已成功发布的结果不因观察者异常而倒退。
+重入契约声明、调用次序、锁约束与返回后复核见[通用线程与回调不变量](core/ENGINEERING.core.md#thread-callback-invariants)；发布后观察者异常的结果语义见[状态与发布不变量](core/ENGINEERING.core.md#snapshot-publication)。
 
 ## 8. View、渲染、Overlay 与交互
 
