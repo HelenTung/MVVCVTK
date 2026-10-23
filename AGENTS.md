@@ -2,7 +2,7 @@
 
 ## 开工闸门（唯一定义）
 
-本节是规范加载与开工动作检查的唯一定义。路径均相对仓库根；常驻与专项的划分只决定加载时机，不改变各文件条款的适用范围或授权。
+本节是规范加载及加载确认的唯一定义；加载后的现状检查、目标材料读取与完整开工顺序见 md/development/core/LOOP.core.md 第 0 节。路径均相对仓库根；常驻与专项的划分只决定加载时机，不改变各文件条款的适用范围或授权。
 
 **常驻规则（每次开工必读）**
 
@@ -81,7 +81,7 @@
 | 分支命名规则 | md/development/NAMING.md 第 9 节 |
 | 分支或任务命名格式 | md/development/NAMING.md 第 9 节 |
 | 项目工作推进规范 | md/development/LOOP.md |
-| 本项目现行规范路径示例 | 根 `AGENTS.md`、`md/development/*.md` 及实际被会话加载生效的其他规范 |
+| 本项目现行规范集合登记 | 本开工闸门列出的规范文件，以及本轮实际生效的其他项目规范（含适用的局部 `AGENTS.md`）；范围与仓库外规则边界见 md/development/core/LOOP.core.md 第 14.1 节 |
 | 临时位置存放策略 | 工作树、临时文件与日志使用非系统盘；具体位置见 md/development/GIT_WORKFLOW.md 第 2.1、2.3 节 |
 | 临时环境变量 | 执行构建、测试和脚本前，把 `TEMP` 和 `TMP` 指向本工作树的 `out/tmp`（不存在就先创建），让 CMake、MSBuild、CTest 等工具的临时文件不写到系统盘。 |
 | 短文件名映射 | `GIT_WORKFLOW.md` → `md/development/GIT_WORKFLOW.md`；`LOOP.md` → `md/development/LOOP.md`；`NAMING.md` → `md/development/NAMING.md`；`FEATURE_DEVELOPMENT.md` → `md/development/FEATURE_DEVELOPMENT.md`；`TESTING.md` → `md/development/TESTING.md`；`SDK_DELIVERY.md` → `md/development/SDK_DELIVERY.md` |
@@ -224,7 +224,7 @@
 
 ## 11. 本项目判级细则
 
-等级定义与通用判级方法见 md/development/core/ENGINEERING.core.md 第 11 节。本节只补充本项目的具体命中条件与最低验证，不重新定义等级。涉及 CMake 修改时，configure 与解决方案完整性核对的适用范围另见 本文件第 11.1 节；该节同时指明测试注册与纯注释的既有例外。
+等级定义与通用判级方法见 md/development/core/ENGINEERING.core.md 第 11 节。本节只补充本项目的具体命中条件与最低验证，不重新定义等级。只修改现行项目规范时，按该文件第 11.1 节的规范验证映射执行，不套用下列产品构建与业务测试清单。涉及 CMake 修改时，configure 与解决方案完整性核对的适用范围另见 本文件第 11.1 节；该节同时指明测试注册与纯注释的既有例外。
 
 - D0 的本项目范围：普通 Markdown 文档或纯注释，包含 CMake 注释；现行规范的专门定级与通用验证见 md/development/core/ENGINEERING.core.md 第 11 节，Git 跟踪状态对应的文件检查见 md/development/core/TESTING.core.md 第 0 节。
 - R1：外部契约不变、影响局限且可恢复的私有实现，包括往已有 target 加源文件（只调整私有源码列表）；仅给已有 target 增加或修改测试注册及测试属性（`add_test`、`set_tests_properties` 等，不新增 target、不改 target 属性和依赖）也属 R1。受影响 target 必须完成 Debug x64 构建、相关真实小数据回归和无关 diff 审查；Release 敏感路径补 Release。直接相关测试与失败路径审查按 core 的 R1 要求执行。
