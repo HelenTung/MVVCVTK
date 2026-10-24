@@ -24,6 +24,8 @@ Codex 必须使用 `full-access`。不使用 `auto` 或 `auto-review`；后者�
 
 在 Windows 上通过 `exec_command` 读取规范时，设置 `login: false`，PowerShell 命令首句设置 `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;`（也可用 `[System.Text.UTF8Encoding]::new($false)`），并用 `Get-Content -Encoding UTF8` 解码。每次输出约不超过 6000 个字符，`max_output_tokens` 可设为 8000；若仍截断，缩小分段或增大输出预算。以下模板从仓库根目录执行，均以 `login: false` 调用。
 
+每条命令只读取一个规范文件或一个 `load-` 节级单元，不得在同一条命令中批量读取多个规范文件；输出出现截断提示时，先按更小范围补读，再继续后续操作。
+
 全文读取示例（`CODEX.md`）：
 
 ```powershell
