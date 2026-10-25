@@ -408,3 +408,9 @@ gap/
 
 # Downloaded official and third-party dependency payloads
 /deps/
+
+# Local-only project specifications
+/AGENTS.md
+/CLAUDE.md
+/md/development/
+/md/agent-guides/协作记录与回复示例.md
